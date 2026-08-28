@@ -123,8 +123,12 @@ export interface CheckpointDiff {
   changedFiles: ChangedFiles;
   files: Array<{
     path: string;
-    before: string | null;
-    after: string | null;
+    status: "created" | "modified" | "deleted";
+    hunks: Array<{
+      oldStart: number;
+      newStart: number;
+      lines: Array<{ type: "context" | "added" | "removed"; content: string }>;
+    }>;
   }>;
 }
 

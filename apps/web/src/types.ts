@@ -74,7 +74,15 @@ export interface CheckpointDiff {
   checkpointId: string;
   parentCheckpointId: string | null;
   changedFiles: ChangedFiles;
-  files: Array<{ path: string; before: string | null; after: string | null }>;
+  files: Array<{
+    path: string;
+    status: "created" | "modified" | "deleted";
+    hunks: Array<{
+      oldStart: number;
+      newStart: number;
+      lines: Array<{ type: "context" | "added" | "removed"; content: string }>;
+    }>;
+  }>;
 }
 
 export interface CheckpointDetails {

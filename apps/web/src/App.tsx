@@ -731,9 +731,9 @@ export default function App() {
                   <section>
                     <h4>Checkpoint events</h4>
                     <p>Records a recoverable workspace state after meaningful file changes, including changed files, parent checkpoint, workspace hash, Run, observable context, and the captured execution events for that Run.</p>
-                    <small>Stored as checkpoint metadata in the JSON store. Immutable workspace files and manifests are stored under the BranchPoint snapshot directory.</small>
+                    <small>Stored as checkpoint metadata in the JSON store. Immutable workspace files and manifests are stored under the BranchPoint snapshot directory. A checkpoint's observable context includes the accumulated conversation from earlier Runs and checkpoints up to that point.</small>
                   </section>
-                  <div className="trace-rule-note">No checkpoint is created when a Run leaves the workspace unchanged.</div>
+                  <div className="trace-rule-note">No checkpoint is created when a Run leaves the workspace unchanged. Context from previous checkpoints is implicitly carried forward in later context snapshots; each workspace snapshot remains a point-in-time copy.</div>
                 </div>
               )}
             </section>
@@ -788,7 +788,7 @@ export default function App() {
                 >
                   <button
                     className="checkpoint-summary"
-                    onClick={() => setSelectedCheckpointId(checkpoint.id)}
+                    onClick={() => setSelectedCheckpointId((current) => current === checkpoint.id ? null : checkpoint.id)}
                     aria-expanded={isSelected}
                   >
                     <span className="checkpoint-marker" />
@@ -862,12 +862,12 @@ export default function App() {
                     </div>
                   </div>
                 ))}
-                {checkpointOverlay.diff.files.some((file) => file.before !== null || file.after !== null) && (
+                {checkpointOverlay.diff.files.length > 0 && (
                   <>
                     <button className="code-toggle" type="button" onClick={() => setShowCodeChanges((value) => !value)} aria-expanded={showCodeChanges}>
                       {showCodeChanges ? "Hide code changes" : "View actual code changes"}
                     </button>
-                    {showCodeChanges && <div className="code-change-list">{checkpointOverlay.diff.files.map((file) => <article key={file.path}><strong>{file.path}</strong><div className="code-columns"><pre className="code-before">{file.before ?? "(file did not exist)"}</pre><pre className="code-after">{file.after ?? "(file was deleted)"}</pre></div></article>)}</div>}
+                    {showCodeChanges && <div className="code-change-list">{checkpointOverlay.diff.files.map((file) => <article key={file.path}><header><strong>{file.path}</strong><span>{file.status}</span></header>{file.hunks.map((hunk) => <div className="diff-hunk" key={hunk.oldStart + ":" + hunk.newStart}><code>@@ -{hunk.oldStart} +{hunk.newStart} @@</code><pre>{hunk.lines.map((line, index) => <span className={"diff-line diff-line-" + line.type} key={index}>{line.type === "added" ? "+" : line.type === "removed" ? "-" : " "}{line.content}{"\n"}</span>)}</pre></div>)}</article>)}</div>}
                   </>
                 )}
               </div>
@@ -877,6 +877,7 @@ export default function App() {
                 <p className="inspection-message">Run {checkpointOverlay.details.run.id.slice(0, 8)} · {checkpointOverlay.details.run.status} · {checkpointOverlay.details.checkpoint.status}</p>
                 <h3>Observable context</h3>
                 <p className="inspection-muted">{checkpointOverlay.details.context.agentName} · {checkpointOverlay.details.context.instructions.length} instruction characters · source session {checkpointOverlay.details.context.sourceThreadId?.slice(0, 12) ?? "not available"}</p>
+                <p className="inspection-disclaimer">This context snapshot includes the observable conversation accumulated through previous Runs and checkpoints. It does not include hidden model reasoning.</p>
                 <h3>Run instruction</h3>
                 <p className="inspection-copy">{checkpointOverlay.details.run.prompt}</p>
                 {checkpointOverlay.details.run.output && <><h3>Agent result</h3><p className="inspection-copy">{checkpointOverlay.details.run.output}</p></>}

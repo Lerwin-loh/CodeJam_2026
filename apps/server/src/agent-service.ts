@@ -25,6 +25,39 @@ import { WorkspaceHistory } from "./workspace-history.js";
 
 const now = () => new Date().toISOString();
 
+function buildDiffHunks(
+  before: string | null,
+  after: string | null,
+): Array<{
+  oldStart: number;
+  newStart: number;
+  lines: Array<{ type: "context" | "added" | "removed"; content: string }>;
+}> {
+  const oldLines = (before ?? "").split("\n");
+  const newLines = (after ?? "").split("\n");
+  if (before === null) {
+    return [{ oldStart: 0, newStart: 1, lines: newLines.map((content) => ({ type: "added" as const, content })) }];
+  }
+  if (after === null) {
+    return [{ oldStart: 1, newStart: 0, lines: oldLines.map((content) => ({ type: "removed" as const, content })) }];
+  }
+  let prefix = 0;
+  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < oldLines.length - prefix && suffix < newLines.length - prefix && oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]) suffix += 1;
+  if (prefix === oldLines.length && prefix === newLines.length) return [];
+  const context = 3;
+  const start = Math.max(0, prefix - context);
+  const oldEnd = Math.min(oldLines.length, oldLines.length - suffix + context);
+  const newEnd = Math.min(newLines.length, newLines.length - suffix + context);
+  const lines: Array<{ type: "context" | "added" | "removed"; content: string }> = [];
+  for (let index = start; index < prefix; index += 1) lines.push({ type: "context", content: oldLines[index] ?? "" });
+  for (let index = prefix; index < oldLines.length - suffix; index += 1) lines.push({ type: "removed", content: oldLines[index] ?? "" });
+  for (let index = prefix; index < newLines.length - suffix; index += 1) lines.push({ type: "added", content: newLines[index] ?? "" });
+  for (let index = oldLines.length - suffix; index < oldEnd && index < oldLines.length; index += 1) lines.push({ type: "context", content: oldLines[index] ?? "" });
+  return [{ oldStart: start + 1, newStart: start + 1, lines }];
+}
+
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
@@ -355,11 +388,21 @@ export class AgentService {
       ...changedFiles.modified,
       ...changedFiles.deleted,
     ];
-    const files = await Promise.all(paths.map(async (filePath) => ({
-      path: filePath,
-      before: parentSnapshot ? await this.history.readSnapshotFile(parentSnapshot, filePath) : null,
-      after: await this.history.readSnapshotFile(snapshot, filePath),
-    })));
+    const files = await Promise.all(paths.map(async (filePath) => {
+      const before = parentSnapshot
+        ? await this.history.readSnapshotFile(parentSnapshot, filePath)
+        : null;
+      const after = await this.history.readSnapshotFile(snapshot, filePath);
+      return {
+        path: filePath,
+        status: changedFiles.created.includes(filePath)
+          ? ("created" as const)
+          : changedFiles.deleted.includes(filePath)
+            ? ("deleted" as const)
+            : ("modified" as const),
+        hunks: buildDiffHunks(before, after),
+      };
+    }));
     return {
       checkpointId: id,
       parentCheckpointId: checkpoint.parentCheckpointId,

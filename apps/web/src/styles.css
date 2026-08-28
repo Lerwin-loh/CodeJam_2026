@@ -1494,6 +1494,16 @@ textarea:focus {
   line-height: 1.5;
 }
 
+.inspection-disclaimer {
+  margin: -4px 0 0;
+  border-left: 2px solid #cfc6f3;
+  padding: 7px 9px;
+  color: #777488;
+  background: #f7f5ff;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .inspection-conversation {
   display: grid;
   gap: 8px;
@@ -1563,6 +1573,73 @@ textarea:focus {
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.code-change-list {
+  display: grid;
+  gap: 14px;
+}
+
+.code-change-list article {
+  overflow: hidden;
+  border: 1px solid #dedbe8;
+  border-radius: 8px;
+  background: #fbfbfc;
+}
+
+.code-change-list article > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border-bottom: 1px solid #e4e1e9;
+  color: #4e4b5c;
+  font-size: 10px;
+}
+
+.code-change-list article > header span {
+  color: #7c72bc;
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.diff-hunk > code {
+  display: block;
+  padding: 7px 11px;
+  color: #7770a8;
+  background: #f0edff;
+  font-size: 9px;
+}
+
+.diff-hunk pre {
+  margin: 0;
+  overflow-x: auto;
+  padding: 8px 0;
+  background: #fff;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.diff-line {
+  display: block;
+  min-width: max-content;
+  padding: 0 11px;
+  white-space: pre;
+}
+
+.diff-line-added {
+  color: #176e4c;
+  background: #e9f8f0;
+}
+
+.diff-line-removed {
+  color: #a03d43;
+  background: #fceded;
+}
+
+.diff-line-context {
+  color: #66666b;
 }
 
 .inspection-trace span {
