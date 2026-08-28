@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, setAuthToken } from "./api";
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type { Agent, AgentCheckpoint, AgentRun, CheckpointDetails, CheckpointDiff, Message, SystemInfo, TraceEvent } from "./types";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -39,6 +39,9 @@ export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [runs, setRuns] = useState<AgentRun[]>([]);
+  const [checkpoints, setCheckpoints] = useState<AgentCheckpoint[]>([]);
+  const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [system, setSystem] = useState<SystemInfo | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -49,6 +52,19 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
   const [authInput, setAuthInput] = useState("");
+  const [showBranchPoint, setShowBranchPoint] = useState(false);
+  const [selectedCheckpointId, setSelectedCheckpointId] = useState<string | null>(null);
+  const [showBranchPointSettings, setShowBranchPointSettings] = useState(false);
+  const [showTraceRules, setShowTraceRules] = useState(false);
+  const [activeBranchPointView, setActiveBranchPointView] = useState<"history" | "branches" | "compare">("history");
+  const [expandedBranchPointView, setExpandedBranchPointView] = useState<string | null>("history");
+  const [checkpointOverlay, setCheckpointOverlay] = useState<{
+    kind: "diff" | "details" | "unavailable";
+    checkpoint: AgentCheckpoint;
+    details?: CheckpointDetails;
+    diff?: CheckpointDiff;
+  } | null>(null);
+  const [showCodeChanges, setShowCodeChanges] = useState(false);
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
@@ -58,6 +74,16 @@ export default function App() {
   const selected = useMemo(
     () => agents.find((agent) => agent.id === selectedId) ?? null,
     [agents, selectedId],
+  );
+
+  const historyItems = useMemo(
+    () => [
+      ...checkpoints.map((checkpoint) => ({ kind: "checkpoint" as const, createdAt: checkpoint.createdAt, checkpoint })),
+      ...runs
+        .filter((run) => run.checkpointId === null)
+        .map((run) => ({ kind: "run" as const, createdAt: run.createdAt, run })),
+    ].sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
+    [checkpoints, runs],
   );
 
   const refreshAgents = useCallback(async () => {
@@ -74,6 +100,17 @@ export default function App() {
     const result = await api.messages(agentId);
     if (mountedRef.current && selectedIdRef.current === agentId) {
       setMessages(result.messages);
+    }
+  }, []);
+
+  const refreshBranchPoint = useCallback(async (agentId: string) => {
+    const [checkpointResult, traceResult] = await Promise.all([
+      api.checkpoints(agentId),
+      api.trace(agentId),
+    ]);
+    if (mountedRef.current && selectedIdRef.current === agentId) {
+      setCheckpoints(checkpointResult.checkpoints);
+      setTraceEvents(traceResult.events);
     }
   }, []);
 
@@ -98,14 +135,19 @@ export default function App() {
 
   useEffect(() => {
     setActiveRun(null);
+    setSelectedCheckpointId(null);
+    setRuns([]);
     setShowSettings(false);
     if (!selectedId) {
       setMessages([]);
       return;
     }
-    void Promise.all([refreshMessages(selectedId), api.runs(selectedId)])
-      .then(([, result]) => {
+    setCheckpoints([]);
+    setTraceEvents([]);
+    void Promise.all([refreshMessages(selectedId), refreshBranchPoint(selectedId), api.runs(selectedId)])
+      .then(([, , result]) => {
         if (selectedIdRef.current !== selectedId) return;
+        setRuns(result.runs);
         const latest = result.runs[0] ?? null;
         setActiveRun(latest);
         if (latest && ["queued", "running"].includes(latest.status)) {
@@ -117,7 +159,7 @@ export default function App() {
       .catch((reason) =>
         setError(reason instanceof Error ? reason.message : String(reason)),
       );
-  }, [refreshMessages, selectedId]);
+  }, [refreshBranchPoint, refreshMessages, selectedId]);
 
   useEffect(() => {
     if (selected) {
@@ -211,7 +253,8 @@ export default function App() {
         const result = await api.run(runId);
         if (selectedIdRef.current === agentId) setActiveRun(result.run);
         if (!["queued", "running"].includes(result.run.status)) {
-          await Promise.all([refreshMessages(agentId), refreshAgents()]);
+          const [, , , runResult] = await Promise.all([refreshMessages(agentId), refreshAgents(), refreshBranchPoint(agentId), api.runs(agentId)]);
+          setRuns(runResult.runs);
           return;
         }
       }
@@ -242,6 +285,22 @@ export default function App() {
       setError(reason instanceof Error ? reason.message : String(reason));
       setActiveRun(null);
       await refreshAgents();
+    }
+  };
+
+  const openCheckpointAction = async (kind: "diff" | "details", checkpoint: AgentCheckpoint) => {
+    setError(null);
+    try {
+      if (kind === "diff") {
+        const { diff } = await api.checkpointDiff(checkpoint.id);
+        setShowCodeChanges(false);
+        setCheckpointOverlay({ kind, checkpoint, diff });
+      } else {
+        const details = await api.checkpointDetails(checkpoint.id);
+        setCheckpointOverlay({ kind, checkpoint, details });
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
     }
   };
 
@@ -307,7 +366,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={"app-shell " + (showBranchPoint ? "branchpoint-open" : "")}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">A</div>
@@ -409,6 +468,14 @@ export default function App() {
                   disabled={busy || selected.status === "busy"}
                 >
                   Settings
+                </button>
+                <button
+                  className={"button " + (showBranchPoint ? "button-primary" : "button-ghost")}
+                  onClick={() => setShowBranchPoint((value) => !value)}
+                  aria-expanded={showBranchPoint}
+                  aria-controls="branchpoint-panel"
+                >
+                  BranchPoint
                 </button>
                 <button
                   className="button button-ghost"
@@ -601,6 +668,229 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {showBranchPoint && (
+        <aside className="branchpoint-panel" id="branchpoint-panel">
+          <div className="branchpoint-heading">
+            <div>
+              <span className="eyebrow">BranchPoint · Beta</span>
+              <h2>Execution history</h2>
+            </div>
+            <div className="panel-heading-actions">
+              <button
+                className="settings-button"
+                onClick={() => setShowBranchPointSettings((value) => !value)}
+                aria-expanded={showBranchPointSettings}
+                aria-label="Open BranchPoint settings"
+                title="BranchPoint settings"
+              >
+                Settings
+              </button>
+              <button
+                className="panel-close"
+                onClick={() => setShowBranchPoint(false)}
+                aria-label="Close BranchPoint panel"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+
+          <div className="branchpoint-context">
+            <div><span>Agent</span><strong>{selected?.name ?? "No Agent selected"}</strong></div>
+            <div><span>Active branch</span><strong>Branching is not available yet</strong></div>
+            <div><span>Checkpoints saved</span><strong>{checkpoints.length}</strong></div>
+          </div>
+
+          {showBranchPointSettings && (
+            <section className="branchpoint-settings">
+              <div className="settings-popup-heading">
+                <div>
+                  <span className="eyebrow">BranchPoint settings</span>
+                  <h3>Workspace controls</h3>
+                </div>
+                <button className="panel-close" onClick={() => setShowBranchPointSettings(false)} aria-label="Close BranchPoint settings">×</button>
+              </div>
+              <button className="settings-link active" type="button">Branch defaults <span>›</span></button>
+              <button className="settings-link" type="button">Runtime and permissions <span>›</span></button>
+              <button
+                className={"settings-link " + (showTraceRules ? "active" : "")}
+                type="button"
+                onClick={() => setShowTraceRules((value) => !value)}
+                aria-expanded={showTraceRules}
+              >
+                Trace and checkpoint rules <span>{showTraceRules ? "⌃" : "›"}</span>
+              </button>
+              {showTraceRules && (
+                <div className="trace-rules">
+                  <section>
+                    <h4>Trace events</h4>
+                    <p>Records what happened during a Run: start, completion, errors, workspace mutations, and observable Codex activity such as tools, commands, file operations, tests, and bounded output.</p>
+                    <small>Stored as lightweight metadata in trace records linked to the Agent and Run. Private hidden chain-of-thought is not captured.</small>
+                  </section>
+                  <section>
+                    <h4>Checkpoint events</h4>
+                    <p>Records a recoverable workspace state after meaningful file changes, including changed files, parent checkpoint, workspace hash, Run, observable context, and the captured execution events for that Run.</p>
+                    <small>Stored as checkpoint metadata in the JSON store. Immutable workspace files and manifests are stored under the BranchPoint snapshot directory.</small>
+                  </section>
+                  <div className="trace-rule-note">No checkpoint is created when a Run leaves the workspace unchanged.</div>
+                </div>
+              )}
+            </section>
+          )}
+
+          <nav className="branchpoint-tabs" aria-label="BranchPoint views">
+            {(["history", "branches", "compare"] as const).map((view) => (
+              <button
+                className={activeBranchPointView === view ? "active" : ""}
+                key={view}
+                onClick={() => {
+                  setActiveBranchPointView(view);
+                  setExpandedBranchPointView(view);
+                }}
+              >
+                {view[0].toUpperCase() + view.slice(1)}
+              </button>
+            ))}
+          </nav>
+
+          <div className="branchpoint-view">
+            <button
+              className="view-collapse"
+              onClick={() => setExpandedBranchPointView((current) => current === activeBranchPointView ? null : activeBranchPointView)}
+              aria-expanded={expandedBranchPointView === activeBranchPointView}
+            >
+              <span>{activeBranchPointView === "history" ? "Checkpoint history" : activeBranchPointView === "branches" ? "Branches" : "Compare branches"}</span>
+              <span>{expandedBranchPointView === activeBranchPointView ? "−" : "+"}</span>
+            </button>
+            {expandedBranchPointView === activeBranchPointView && activeBranchPointView === "history" && (
+              <div className="checkpoint-list">
+                {historyItems.map((item) => {
+              if (item.kind === "run") {
+                return (
+                  <article className="run-history-entry" key={item.run.id}>
+                    <span className="run-history-marker" />
+                    <div className="run-history-copy">
+                      <strong>Run without checkpoint <em>{item.run.status === "completed" ? "Completed" : item.run.status}</em></strong>
+                      <span>{formatTime(item.run.createdAt)} · Run {item.run.id.slice(0, 8)}</span>
+                      <p>{item.run.prompt}</p>
+                    </div>
+                  </article>
+                );
+              }
+              const checkpoint = item.checkpoint;
+              const isSelected = checkpoint.id === selectedCheckpointId;
+              const changedCount = checkpoint.changedFiles.created.length + checkpoint.changedFiles.modified.length + checkpoint.changedFiles.deleted.length;
+              return (
+                <div
+                  className={"checkpoint " + (isSelected ? "selected" : "")}
+                  key={checkpoint.id}
+                >
+                  <button
+                    className="checkpoint-summary"
+                    onClick={() => setSelectedCheckpointId(checkpoint.id)}
+                    aria-expanded={isSelected}
+                  >
+                    <span className="checkpoint-marker" />
+                    <span className="checkpoint-copy">
+                      <strong>Checkpoint {checkpoints.length - checkpoints.indexOf(checkpoint)} <em>{checkpoint.status === "partial" ? "Partial Run state" : "Workspace mutation"}</em></strong>
+                      <span>{formatTime(checkpoint.createdAt)}</span>
+                      <span>Run {checkpoint.runId.slice(0, 8)} · {checkpoint.reason === "auto-mutation" ? "Automatic" : "Explicit"}</span>
+                    </span>
+                    <small>{changedCount} file{changedCount === 1 ? "" : "s"}</small>
+                  </button>
+                  {isSelected && (
+                    <div className="checkpoint-actions">
+                      <div className="checkpoint-files">
+                        {[...checkpoint.changedFiles.created, ...checkpoint.changedFiles.modified, ...checkpoint.changedFiles.deleted].map((file) => <code key={file}>{file}</code>)}
+                      </div>
+                      <div className="checkpoint-buttons">
+                        <button className="button button-primary" type="button" onClick={() => setCheckpointOverlay({ kind: "unavailable", checkpoint })}>Branch from here</button>
+                        <button className="button button-ghost" type="button" onClick={() => setCheckpointOverlay({ kind: "unavailable", checkpoint })}>Restore in new branch</button>
+                        <button className="button button-ghost" type="button" onClick={() => void openCheckpointAction("diff", checkpoint)}>View diff</button>
+                        <button className="button button-ghost" type="button" onClick={() => void openCheckpointAction("details", checkpoint)}>View details</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+                })}
+                {historyItems.length === 0 && (
+                  <div className="empty-branchpoint-view">
+                    No Runs yet. Agent execution history will appear here after the first prompt.
+                  </div>
+                )}
+              </div>
+            )}
+            {expandedBranchPointView === activeBranchPointView && activeBranchPointView !== "history" && (
+              <div className="empty-branchpoint-view">
+                {activeBranchPointView === "branches" ? "No branches have been created yet." : "Choose two branches to compare their workspace state."}
+              </div>
+            )}
+          </div>
+        </aside>
+      )}
+
+      {checkpointOverlay && (
+        <div className="modal-backdrop" onMouseDown={() => setCheckpointOverlay(null)}>
+          <section className="modal checkpoint-overlay" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">Checkpoint inspection</span>
+                <h2>{checkpointOverlay.kind === "diff" ? "Changes from previous checkpoint" : checkpointOverlay.kind === "details" ? "Checkpoint details" : "Branching is not available yet"}</h2>
+              </div>
+              <button type="button" onClick={() => setCheckpointOverlay(null)} aria-label="Close checkpoint inspection">×</button>
+            </div>
+            {checkpointOverlay.kind === "unavailable" && (
+              <p className="inspection-message">Branch creation and restore will be enabled after independent workspace branching is implemented.</p>
+            )}
+            {checkpointOverlay.kind === "diff" && checkpointOverlay.diff && (
+              <div className="inspection-section">
+                <p className="inspection-message">Comparing this checkpoint with its immediate parent.</p>
+                <div className="diff-summary">
+                  {checkpointOverlay.diff.changedFiles.created.length > 0 && <p>Codex added {checkpointOverlay.diff.changedFiles.created.length} file{checkpointOverlay.diff.changedFiles.created.length === 1 ? "" : "s"} in this step.</p>}
+                  {checkpointOverlay.diff.changedFiles.modified.length > 0 && <p>Codex updated {checkpointOverlay.diff.changedFiles.modified.length} existing file{checkpointOverlay.diff.changedFiles.modified.length === 1 ? "" : "s"}.</p>}
+                  {checkpointOverlay.diff.changedFiles.deleted.length > 0 && <p>Codex removed {checkpointOverlay.diff.changedFiles.deleted.length} file{checkpointOverlay.diff.changedFiles.deleted.length === 1 ? "" : "s"}.</p>}
+                  {!checkpointOverlay.diff.files.length && <p>No file content changed between these checkpoints.</p>}
+                  <p className="inspection-muted">This summary is based on the workspace snapshot, not only the Agent's explanation.</p>
+                </div>
+                {(["created", "modified", "deleted"] as const).map((category) => (
+                  <div className="diff-category" key={category}>
+                    <h3>{category[0].toUpperCase() + category.slice(1)} files</h3>
+                    <div className="diff-files">
+                      {checkpointOverlay.diff?.changedFiles[category].length ? checkpointOverlay.diff.changedFiles[category].map((file) => <code className="inspection-file" key={file}>{file}</code>) : <p className="inspection-muted">None</p>}
+                    </div>
+                  </div>
+                ))}
+                {checkpointOverlay.diff.files.some((file) => file.before !== null || file.after !== null) && (
+                  <>
+                    <button className="code-toggle" type="button" onClick={() => setShowCodeChanges((value) => !value)} aria-expanded={showCodeChanges}>
+                      {showCodeChanges ? "Hide code changes" : "View actual code changes"}
+                    </button>
+                    {showCodeChanges && <div className="code-change-list">{checkpointOverlay.diff.files.map((file) => <article key={file.path}><strong>{file.path}</strong><div className="code-columns"><pre className="code-before">{file.before ?? "(file did not exist)"}</pre><pre className="code-after">{file.after ?? "(file was deleted)"}</pre></div></article>)}</div>}
+                  </>
+                )}
+              </div>
+            )}
+            {checkpointOverlay.kind === "details" && checkpointOverlay.details && (
+              <div className="inspection-section">
+                <p className="inspection-message">Run {checkpointOverlay.details.run.id.slice(0, 8)} · {checkpointOverlay.details.run.status} · {checkpointOverlay.details.checkpoint.status}</p>
+                <h3>Observable context</h3>
+                <p className="inspection-muted">{checkpointOverlay.details.context.agentName} · {checkpointOverlay.details.context.instructions.length} instruction characters · source session {checkpointOverlay.details.context.sourceThreadId?.slice(0, 12) ?? "not available"}</p>
+                <h3>Run instruction</h3>
+                <p className="inspection-copy">{checkpointOverlay.details.run.prompt}</p>
+                {checkpointOverlay.details.run.output && <><h3>Agent result</h3><p className="inspection-copy">{checkpointOverlay.details.run.output}</p></>}
+                <h3>Conversation snapshot</h3>
+                <div className="inspection-conversation">{checkpointOverlay.details.context.messages.map((message) => <div key={message.id}><strong>{message.role}</strong><p>{message.content}</p></div>)}</div>
+                <h3>Trace events</h3>
+                <div className="inspection-trace">{checkpointOverlay.details.trace.map((event) => <div key={event.id}><header><strong>{event.type}</strong><span>{formatTime(event.timestamp)}</span></header><p>{typeof event.metadata.explanation === "string" ? event.metadata.explanation : event.type === "codex.event" ? "Codex reported observable execution activity." : "Recorded BranchPoint activity."}</p>{event.type === "codex.event" && <small>{typeof event.metadata.eventType === "string" ? event.metadata.eventType : "Codex event"}{typeof event.metadata.output === "string" ? " · " + event.metadata.output : ""}</small>}</div>)}</div>
+                <h3>Verification</h3>
+                <p className="inspection-muted">Workspace hash: {checkpointOverlay.details.checkpoint.workspaceHash}</p>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
 
       {showCreate && (
         <div className="modal-backdrop" onMouseDown={() => setShowCreate(false)}>

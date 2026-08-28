@@ -10,6 +10,7 @@ import type { AgentService } from "./agent-service.js";
 
 const agentIdParams = z.object({ id: z.string().uuid() });
 const runIdParams = z.object({ id: z.string().uuid() });
+const checkpointIdParams = z.object({ id: z.string().uuid() });
 const createAgentBody = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().max(500).optional(),
@@ -74,6 +75,7 @@ export async function createApp(
 
   app.get("/api/agents", async () => ({ agents: service.listAgents() }));
 
+
   app.post("/api/agents", async (request, reply) => {
     const body = createAgentBody.parse(request.body);
     const agent = await service.createAgent(body);
@@ -116,6 +118,16 @@ export async function createApp(
     return { runs: service.getRuns(id) };
   });
 
+  app.get("/api/agents/:id/checkpoints", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    return { checkpoints: service.getCheckpoints(id) };
+  });
+
+  app.get("/api/agents/:id/trace", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    return { events: service.getTrace(id) };
+  });
+
   app.post("/api/agents/:id/messages", async (request, reply) => {
     const { id } = agentIdParams.parse(request.params);
     const body = messageBody.parse(request.body);
@@ -126,6 +138,21 @@ export async function createApp(
   app.get("/api/runs/:id", async (request) => {
     const { id } = runIdParams.parse(request.params);
     return { run: service.getRun(id) };
+  });
+
+  app.get("/api/checkpoints/:id", async (request) => {
+    const { id } = checkpointIdParams.parse(request.params);
+    return { checkpoint: service.getCheckpoint(id) };
+  });
+
+  app.get("/api/checkpoints/:id/details", async (request) => {
+    const { id } = checkpointIdParams.parse(request.params);
+    return service.getCheckpointDetails(id);
+  });
+
+  app.get("/api/checkpoints/:id/diff", async (request) => {
+    const { id } = checkpointIdParams.parse(request.params);
+    return { diff: await service.getCheckpointDiff(id) };
   });
 
   if (config.nodeEnv === "production") {

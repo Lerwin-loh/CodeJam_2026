@@ -27,6 +27,7 @@ interface ParsedEvents {
   threadId: string | null;
   usage: RunUsage | null;
   errors: string[];
+  events: import("./types.js").RunnerEvent[];
 }
 
 export function containerName(agentId: string, instanceId = "default"): string {
@@ -171,6 +172,7 @@ export class ContainerCodexRunner implements AgentRunner {
       threadId: request.threadId,
       usage: null,
       errors: [],
+      events: [],
     };
     let stdout = "";
     let stderr = "";
@@ -228,7 +230,7 @@ export class ContainerCodexRunner implements AgentRunner {
       }
       const output = parsed.messages.at(-1)?.trim();
       if (!output) throw new Error("Codex completed without an agent message");
-      return { output, threadId: parsed.threadId, usage: parsed.usage };
+      return { output, threadId: parsed.threadId, usage: parsed.usage, events: parsed.events ?? [] };
     } finally {
       clearTimeout(timeout);
       this.active.delete(request.agentId);

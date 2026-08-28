@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
@@ -7,11 +8,20 @@ import type {
   Agent,
   AgentRun,
   AgentRunner,
+  AgentCheckpoint,
+  CheckpointDetails,
+  CheckpointDiff,
   CreateAgentInput,
   Message,
+  RunnerEvent,
+  AgentContextSnapshot,
+  TraceEvent,
+  TraceEventType,
+  WorkspaceManifest,
   UpdateAgentInput,
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
+import { WorkspaceHistory } from "./workspace-history.js";
 
 const now = () => new Date().toISOString();
 
@@ -24,11 +34,13 @@ export class AgentService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
+    private readonly history = new WorkspaceHistory(path.join(config.dataDirectory, "branchpoint")),
   ) {}
 
   async initialize(): Promise<void> {
     await this.store.initialize();
     await this.workspaces.initialize();
+    await this.history.initialize();
     await this.store.mutate((database) => {
       for (const run of database.runs) {
         if (run.status === "queued" || run.status === "running") {
@@ -78,6 +90,143 @@ export class AgentService {
     await this.workspaces.create(agent);
     await this.store.mutate((database) => database.agents.push(agent));
     return agent;
+  }
+
+  private async updateRunWorkspace(
+    runId: string,
+    beforeWorkspaceHash: string | null,
+    afterWorkspaceHash: string | null,
+  ): Promise<void> {
+    await this.store.mutate((database) => {
+      const run = database.runs.find((item) => item.id === runId);
+      if (!run) return;
+      run.beforeWorkspaceHash = beforeWorkspaceHash;
+      run.afterWorkspaceHash = afterWorkspaceHash;
+    });
+  }
+
+  private async captureCheckpoint(
+    agent: Agent,
+    run: AgentRun,
+    before: WorkspaceManifest,
+    status: "complete" | "partial",
+    output: string | null,
+    threadId: string | null,
+  ): Promise<AgentCheckpoint | null> {
+    try {
+      const after = await this.history.manifest(agent.workspacePath);
+      const changedFiles = this.history.diff(before, after);
+      const hasChanges =
+        changedFiles.created.length +
+          changedFiles.modified.length +
+          changedFiles.deleted.length >
+        0;
+      await this.updateRunWorkspace(run.id, before.workspaceHash, after.workspaceHash);
+      if (!hasChanges) return null;
+
+      const snapshot = await this.history.createSnapshot(
+        agent.id,
+        run.id,
+        agent.workspacePath,
+        after,
+      );
+      const messages = this.getMessages(agent.id);
+      if (output) {
+        messages.push({
+          id: randomUUID(),
+          agentId: agent.id,
+          runId: run.id,
+          role: "assistant",
+          content: output,
+          createdAt: now(),
+        });
+      }
+      const context: AgentContextSnapshot = {
+        id: randomUUID(),
+        agentId: agent.id,
+        runId: run.id,
+        agentName: agent.name,
+        agentDescription: agent.description,
+        instructions: agent.instructions,
+        messages,
+        sourceThreadId: threadId,
+        createdAt: now(),
+      };
+      const parentCheckpointId = this.store
+        .snapshot()
+        .checkpoints
+        .filter((checkpoint) => checkpoint.agentId === agent.id)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]?.id ?? null;
+      const checkpoint: AgentCheckpoint = {
+        id: randomUUID(),
+        agentId: agent.id,
+        runId: run.id,
+        parentCheckpointId,
+        snapshotId: snapshot.id,
+        contextId: context.id,
+        workspaceHash: after.workspaceHash,
+        changedFiles,
+        status,
+        reason: "auto-mutation",
+        createdAt: now(),
+      };
+      await this.store.mutate((database) => {
+        database.snapshots.push(snapshot);
+        database.contexts.push(context);
+        database.checkpoints.push(checkpoint);
+      });
+      await this.trace(run, "workspace.changed", { ...changedFiles });
+      await this.trace(run, "checkpoint.created", {
+        checkpointId: checkpoint.id,
+        snapshotId: snapshot.id,
+        status,
+        workspaceHash: after.workspaceHash,
+      });
+      return checkpoint;
+    } catch (error) {
+      await this.trace(run, "run.error", {
+        stage: "checkpoint",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
+  private async trace(
+    run: AgentRun,
+    type: TraceEventType,
+    metadata: Record<string, unknown>,
+  ): Promise<void> {
+    await this.store.mutate((database) => {
+      database.traces.push({
+        id: randomUUID(),
+        runId: run.id,
+        agentId: run.agentId,
+        type,
+        timestamp: now(),
+        metadata: {
+          explanation: this.traceExplanation(type),
+          ...metadata,
+        },
+      });
+    });
+  }
+
+  private traceExplanation(type: TraceEventType): string {
+    switch (type) {
+      case "run.started":
+        return "The Agent began processing the user instruction.";
+      case "codex.event":
+        return "Codex reported an observable tool or model activity.";
+      case "workspace.changed":
+        return "The Agent changed files in its workspace.";
+      case "checkpoint.created":
+        return "A recoverable snapshot was created from the workspace mutation.";
+      case "run.completed":
+        return "The Agent finished successfully.";
+      case "run.error":
+        return "The Run ended with an error or cancellation.";
+    }
   }
 
   async updateAgent(id: string, input: UpdateAgentInput): Promise<Agent> {
@@ -150,6 +299,84 @@ export class AgentService {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
+  getCheckpoints(agentId: string): AgentCheckpoint[] {
+    this.getAgent(agentId);
+    return this.store
+      .snapshot()
+      .checkpoints
+      .filter((checkpoint) => checkpoint.agentId === agentId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  getCheckpoint(id: string): AgentCheckpoint {
+    const checkpoint = this.store.snapshot().checkpoints.find((item) => item.id === id);
+    if (!checkpoint) throw new HttpError(404, "Checkpoint not found");
+    return checkpoint;
+  }
+
+  getCheckpointDetails(id: string): CheckpointDetails {
+    const database = this.store.snapshot();
+    const checkpoint = database.checkpoints.find((item) => item.id === id);
+    if (!checkpoint) throw new HttpError(404, "Checkpoint not found");
+    const run = database.runs.find((item) => item.id === checkpoint.runId);
+    const context = database.contexts.find((item) => item.id === checkpoint.contextId);
+    const snapshot = database.snapshots.find((item) => item.id === checkpoint.snapshotId);
+    if (!run || !context || !snapshot) {
+      throw new HttpError(500, "Checkpoint metadata is incomplete");
+    }
+    return {
+      checkpoint,
+      run,
+      context,
+      snapshot,
+      trace: database.traces
+        .filter((event) => event.runId === checkpoint.runId)
+        .sort((left, right) => left.timestamp.localeCompare(right.timestamp)),
+    };
+  }
+
+  async getCheckpointDiff(id: string): Promise<CheckpointDiff> {
+    const database = this.store.snapshot();
+    const checkpoint = database.checkpoints.find((item) => item.id === id);
+    if (!checkpoint) throw new HttpError(404, "Checkpoint not found");
+    const snapshot = database.snapshots.find((item) => item.id === checkpoint.snapshotId);
+    const parent = checkpoint.parentCheckpointId
+      ? database.checkpoints.find((item) => item.id === checkpoint.parentCheckpointId)
+      : null;
+    const parentSnapshot = parent
+      ? database.snapshots.find((item) => item.id === parent.snapshotId)
+      : null;
+    if (!snapshot) throw new HttpError(500, "Checkpoint snapshot is missing");
+    const changedFiles = parentSnapshot
+      ? this.history.diff(parentSnapshot.manifest, snapshot.manifest)
+      : checkpoint.changedFiles;
+    const paths = [
+      ...changedFiles.created,
+      ...changedFiles.modified,
+      ...changedFiles.deleted,
+    ];
+    const files = await Promise.all(paths.map(async (filePath) => ({
+      path: filePath,
+      before: parentSnapshot ? await this.history.readSnapshotFile(parentSnapshot, filePath) : null,
+      after: await this.history.readSnapshotFile(snapshot, filePath),
+    })));
+    return {
+      checkpointId: id,
+      parentCheckpointId: checkpoint.parentCheckpointId,
+      changedFiles,
+      files,
+    };
+  }
+
+  getTrace(agentId: string): TraceEvent[] {
+    this.getAgent(agentId);
+    return this.store
+      .snapshot()
+      .traces
+      .filter((event) => event.agentId === agentId)
+      .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  }
+
   async sendMessage(
     agentId: string,
     prompt: string,
@@ -173,6 +400,9 @@ export class AgentService {
       startedAt: null,
       completedAt: null,
       createdAt: timestamp,
+      beforeWorkspaceHash: null,
+      afterWorkspaceHash: null,
+      checkpointId: null,
     };
     const message: Message = {
       id: randomUUID(),
@@ -233,6 +463,7 @@ export class AgentService {
   }
 
   private async executeRun(agentAtStart: Agent, run: AgentRun): Promise<void> {
+    let before: WorkspaceManifest | null = null;
     await this.store.mutate((database) => {
       const storedRun = database.runs.find((item) => item.id === run.id);
       if (storedRun) {
@@ -240,16 +471,28 @@ export class AgentService {
         storedRun.startedAt = now();
       }
     });
+    await this.trace(run, "run.started", { workspacePath: agentAtStart.workspacePath });
     try {
       if (this.cancellationRequests.has(agentAtStart.id)) {
         throw new RunCancelledError();
       }
+      before = await this.history.manifest(agentAtStart.workspacePath);
+      await this.updateRunWorkspace(run.id, before.workspaceHash, null);
       const result = await this.runner.run({
         agentId: agentAtStart.id,
         workspacePath: agentAtStart.workspacePath,
         prompt: run.prompt,
         threadId: agentAtStart.codexThreadId,
       });
+      for (const event of result.events ?? []) {
+        await this.trace(run, "codex.event", {
+          eventType: event.type,
+          ...event.metadata,
+        });
+      }
+      const checkpoint = before
+        ? await this.captureCheckpoint(agentAtStart, run, before, "complete", result.output, result.threadId)
+        : null;
       const completedAt = now();
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
@@ -259,6 +502,8 @@ export class AgentService {
         storedRun.output = result.output;
         storedRun.usage = result.usage;
         storedRun.completedAt = completedAt;
+        storedRun.afterWorkspaceHash = checkpoint?.workspaceHash ?? before?.workspaceHash ?? null;
+        storedRun.checkpointId = checkpoint?.id ?? null;
         database.messages.push({
           id: randomUUID(),
           agentId: agent.id,
@@ -272,10 +517,24 @@ export class AgentService {
         agent.lastError = null;
         agent.updatedAt = completedAt;
       });
+      await this.trace(run, "run.completed", {
+        checkpointId: checkpoint?.id ?? null,
+        workspaceChanged: checkpoint !== null,
+      });
     } catch (error) {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;
       const message = error instanceof Error ? error.message : String(error);
+      const checkpoint = before
+        ? await this.captureCheckpoint(
+            agentAtStart,
+            run,
+            before,
+            "partial",
+            null,
+            agentAtStart.codexThreadId,
+          )
+        : null;
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
@@ -283,6 +542,8 @@ export class AgentService {
           storedRun.status = cancelled ? "cancelled" : "failed";
           storedRun.error = message;
           storedRun.completedAt = completedAt;
+          storedRun.afterWorkspaceHash = checkpoint?.workspaceHash ?? before?.workspaceHash ?? null;
+          storedRun.checkpointId = checkpoint?.id ?? null;
         }
         if (agent) {
           if (agent.status !== "stopped") {
@@ -291,6 +552,11 @@ export class AgentService {
           agent.lastError = cancelled ? null : message;
           agent.updatedAt = completedAt;
         }
+      });
+      await this.trace(run, "run.error", {
+        error: message,
+        status: cancelled ? "cancelled" : "failed",
+        checkpointId: checkpoint?.id ?? null,
       });
     }
   }

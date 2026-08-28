@@ -6,6 +6,7 @@ import { RunCancelledError } from "./errors.js";
 import type {
   AgentRunner,
   RunUsage,
+  RunnerEvent,
   RunnerRequest,
   RunnerResult,
 } from "./types.js";
@@ -17,7 +18,11 @@ export interface ParsedEvents {
   threadId: string | null;
   usage: RunUsage | null;
   errors: string[];
+  events?: RunnerEvent[];
 }
+
+const boundedText = (value: unknown, limit = 2_000): string | undefined =>
+  typeof value === "string" ? value.slice(0, limit) : undefined;
 
 export function buildCodexArgs(
   request: RunnerRequest,
@@ -51,6 +56,24 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
 
   if (event.type === "thread.started" && typeof event.thread_id === "string") {
     parsed.threadId = event.thread_id;
+  }
+
+  if (
+    (event.type === "item.started" || event.type === "item.completed") &&
+    event.item &&
+    typeof event.item === "object"
+  ) {
+    const item = event.item as Record<string, unknown>;
+    const metadata: Record<string, unknown> = {
+      codexType: event.type,
+      itemType: typeof item.type === "string" ? item.type : "unknown",
+    };
+    for (const key of ["command", "name", "status", "exit_code"] as const) {
+      if (item[key] !== undefined) metadata[key] = item[key];
+    }
+    const output = boundedText(item.aggregated_output ?? item.text);
+    if (output) metadata.output = output;
+    (parsed.events ??= []).push({ type: String(item.type ?? "item"), metadata });
   }
 
   if (event.type === "item.completed" && event.item && typeof event.item === "object") {
@@ -154,6 +177,7 @@ export class CodexRunner implements AgentRunner {
       threadId: request.threadId,
       usage: null,
       errors: [],
+      events: [],
     };
     let stdout = "";
     let stderr = "";
@@ -219,6 +243,7 @@ export class CodexRunner implements AgentRunner {
         output,
         threadId: parsed.threadId,
         usage: parsed.usage,
+        events: [],
       };
     } finally {
       clearTimeout(timeout);

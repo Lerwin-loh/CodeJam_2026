@@ -41,6 +41,99 @@ export interface AgentRun {
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
+  beforeWorkspaceHash: string | null;
+  afterWorkspaceHash: string | null;
+  checkpointId: string | null;
+}
+
+export type TraceEventType =
+  | "run.started"
+  | "codex.event"
+  | "workspace.changed"
+  | "checkpoint.created"
+  | "run.completed"
+  | "run.error";
+
+export interface TraceEvent {
+  id: string;
+  runId: string;
+  agentId: string;
+  type: TraceEventType;
+  timestamp: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface WorkspaceFile {
+  path: string;
+  size: number;
+  sha256: string;
+  mode: number;
+}
+
+export interface WorkspaceManifest {
+  workspaceHash: string;
+  files: WorkspaceFile[];
+  createdAt: string;
+}
+
+export interface WorkspaceSnapshot {
+  id: string;
+  agentId: string;
+  runId: string | null;
+  directory: string;
+  manifest: WorkspaceManifest;
+  createdAt: string;
+}
+
+export interface AgentContextSnapshot {
+  id: string;
+  agentId: string;
+  runId: string | null;
+  agentName: string;
+  agentDescription: string;
+  instructions: string;
+  messages: Message[];
+  sourceThreadId: string | null;
+  createdAt: string;
+}
+
+export interface ChangedFiles {
+  created: string[];
+  modified: string[];
+  deleted: string[];
+}
+
+export interface AgentCheckpoint {
+  id: string;
+  agentId: string;
+  runId: string;
+  parentCheckpointId: string | null;
+  snapshotId: string;
+  contextId: string;
+  workspaceHash: string;
+  changedFiles: ChangedFiles;
+  status: "complete" | "partial";
+  reason: "auto-mutation" | "explicit";
+  createdAt: string;
+}
+
+export interface CheckpointDiff {
+  checkpointId: string;
+  parentCheckpointId: string | null;
+  changedFiles: ChangedFiles;
+  files: Array<{
+    path: string;
+    before: string | null;
+    after: string | null;
+  }>;
+}
+
+export interface CheckpointDetails {
+  checkpoint: AgentCheckpoint;
+  run: AgentRun;
+  context: AgentContextSnapshot;
+  trace: TraceEvent[];
+  snapshot: WorkspaceSnapshot;
 }
 
 export interface Database {
@@ -48,6 +141,10 @@ export interface Database {
   agents: Agent[];
   messages: Message[];
   runs: AgentRun[];
+  traces: TraceEvent[];
+  snapshots: WorkspaceSnapshot[];
+  contexts: AgentContextSnapshot[];
+  checkpoints: AgentCheckpoint[];
 }
 
 export interface CreateAgentInput {
@@ -66,6 +163,12 @@ export interface RunnerResult {
   output: string;
   threadId: string | null;
   usage: RunUsage | null;
+  events?: RunnerEvent[];
+}
+
+export interface RunnerEvent {
+  type: string;
+  metadata: Record<string, unknown>;
 }
 
 export interface RunnerRequest {

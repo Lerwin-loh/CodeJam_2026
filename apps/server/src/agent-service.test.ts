@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -78,6 +78,59 @@ describe("Agent lifecycle", () => {
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(messages[1]?.content).toContain("write hello world");
     expect(service.getAgent(agent.id).codexThreadId).toBe("fake-thread");
+    expect(service.getCheckpoints(agent.id)).toEqual([]);
+    expect(service.getTrace(agent.id).map((event) => event.type)).toEqual([
+      "run.started",
+      "run.completed",
+    ]);
+    expect(service.getTrace(agent.id)[0]?.metadata.explanation).toContain("began processing");
+  });
+
+  it("automatically checkpoints meaningful workspace mutations", async () => {
+    const service = await makeService({
+      run: async (request) => {
+        await writeFile(path.join(request.workspacePath, "created.txt"), "created by Codex\n");
+        return { output: "created a file", threadId: "mutating-thread", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Mutating" });
+    const { run } = await service.sendMessage(agent.id, "create a file");
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    const checkpoints = service.getCheckpoints(agent.id);
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0]?.runId).toBe(run.id);
+    expect(checkpoints[0]?.changedFiles).toEqual({
+      created: ["created.txt"],
+      modified: [],
+      deleted: [],
+    });
+    expect(service.getRun(run.id).checkpointId).toBe(checkpoints[0]?.id);
+    expect(service.getTrace(agent.id).map((event) => event.type)).toContain("checkpoint.created");
+  });
+
+  it("exposes checkpoint details and a parent comparison", async () => {
+    const service = await makeService({
+      run: async (request) => {
+        await writeFile(path.join(request.workspacePath, "details.txt"), "details\n");
+        return { output: "saved details", threadId: "details-thread", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Inspectable" });
+    const { run } = await service.sendMessage(agent.id, "save details");
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    const checkpoint = service.getCheckpoints(agent.id)[0];
+    expect(checkpoint).toBeDefined();
+    if (!checkpoint) return;
+
+    const details = service.getCheckpointDetails(checkpoint.id);
+    expect(details.context.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(details.trace.some((event) => event.type === "workspace.changed")).toBe(true);
+    expect((await service.getCheckpointDiff(checkpoint.id)).changedFiles.created).toContain("details.txt");
   });
 
   it("atomically accepts only one concurrent run per Agent", async () => {

@@ -70,4 +70,31 @@ describe("Codex runner protocol", () => {
     expect(parsed.messages).toEqual(["Done."]);
     expect(parsed.usage).toEqual({ inputTokens: 10, outputTokens: 4 });
   });
+
+  it("captures observable tool activity without exposing unbounded output", () => {
+    const parsed = {
+      messages: [],
+      threadId: null,
+      usage: null,
+      errors: [],
+      events: [],
+    };
+    parseCodexEventLine(
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          command: "npm test",
+          exit_code: 0,
+          aggregated_output: "x".repeat(3_000),
+        },
+      }),
+      parsed,
+    );
+    expect(parsed.events[0]).toMatchObject({
+      type: "command_execution",
+      metadata: { codexType: "item.completed", command: "npm test", exit_code: 0 },
+    });
+    expect((parsed.events[0]?.metadata.output as string).length).toBe(2_000);
+  });
 });

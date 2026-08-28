@@ -36,6 +36,59 @@ export interface AgentRun {
     outputTokens?: number;
   } | null;
   createdAt: string;
+  beforeWorkspaceHash: string | null;
+  afterWorkspaceHash: string | null;
+  checkpointId: string | null;
+}
+
+export interface ChangedFiles {
+  created: string[];
+  modified: string[];
+  deleted: string[];
+}
+
+export interface AgentCheckpoint {
+  id: string;
+  agentId: string;
+  runId: string;
+  parentCheckpointId: string | null;
+  snapshotId: string;
+  contextId: string;
+  workspaceHash: string;
+  changedFiles: ChangedFiles;
+  status: "complete" | "partial";
+  reason: "auto-mutation" | "explicit";
+  createdAt: string;
+}
+
+export interface TraceEvent {
+  id: string;
+  runId: string;
+  agentId: string;
+  type: string;
+  timestamp: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface CheckpointDiff {
+  checkpointId: string;
+  parentCheckpointId: string | null;
+  changedFiles: ChangedFiles;
+  files: Array<{ path: string; before: string | null; after: string | null }>;
+}
+
+export interface CheckpointDetails {
+  checkpoint: AgentCheckpoint;
+  run: AgentRun;
+  context: {
+    agentName: string;
+    agentDescription: string;
+    instructions: string;
+    messages: Message[];
+    sourceThreadId: string | null;
+  };
+  trace: TraceEvent[];
+  snapshot: { workspaceHash: string; manifest: { files: Array<{ path: string; size: number; sha256: string; mode: number }> } };
 }
 
 export interface SystemInfo {

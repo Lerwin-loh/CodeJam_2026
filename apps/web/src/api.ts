@@ -1,4 +1,4 @@
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type { Agent, AgentCheckpoint, AgentRun, CheckpointDetails, CheckpointDiff, Message, SystemInfo, TraceEvent } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -69,6 +69,14 @@ export const api = {
     request<{ messages: Message[] }>("/api/agents/" + id + "/messages"),
   runs: (id: string) =>
     request<{ runs: AgentRun[] }>("/api/agents/" + id + "/runs"),
+  checkpoints: (id: string) =>
+    request<{ checkpoints: AgentCheckpoint[] }>("/api/agents/" + id + "/checkpoints"),
+  trace: (id: string) =>
+    request<{ events: TraceEvent[] }>("/api/agents/" + id + "/trace"),
+  checkpointDetails: (id: string) =>
+    request<CheckpointDetails>("/api/checkpoints/" + id + "/details"),
+  checkpointDiff: (id: string) =>
+    request<{ diff: CheckpointDiff }>("/api/checkpoints/" + id + "/diff"),
   sendMessage: (id: string, content: string) =>
     request<{ run: AgentRun; message: Message }>(
       "/api/agents/" + id + "/messages",
