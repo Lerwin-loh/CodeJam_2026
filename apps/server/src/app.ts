@@ -140,6 +140,47 @@ export async function createApp(
     return { run: service.getRun(id) };
   });
 
+  app.get("/api/runs/:id/trace/stream", async (request, reply) => {
+    const { id } = runIdParams.parse(request.params);
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    let heartbeat: NodeJS.Timeout | null = null;
+    let unsubscribe: () => void = () => {};
+    let finished = false;
+    const write = (event: import("./types.js").TraceEvent) => {
+      if (!reply.raw.destroyed) {
+        reply.raw.write("event: trace\ndata: " + JSON.stringify(event) + "\n\n");
+        if (["run.completed", "run.error"].includes(event.type)) {
+          finished = true;
+          if (heartbeat) clearInterval(heartbeat);
+          unsubscribe();
+          reply.raw.end();
+        }
+      }
+    };
+    const subscription = service.subscribeToRunTrace(id, write);
+    unsubscribe = subscription.unsubscribe;
+    for (const event of subscription.events) write(event);
+    if (!finished && !reply.raw.destroyed) reply.raw.write(": connected\n\n");
+    if (!finished) heartbeat = setInterval(() => {
+      if (!reply.raw.destroyed) reply.raw.write(": heartbeat\n\n");
+    }, 15_000);
+    request.raw.on("close", () => {
+      if (heartbeat) clearInterval(heartbeat);
+      subscription.unsubscribe();
+    });
+  });
+
+  app.get("/api/runs/:id/details", async (request) => {
+    const { id } = runIdParams.parse(request.params);
+    return service.getRunDetails(id);
+  });
+
   app.get("/api/checkpoints/:id", async (request) => {
     const { id } = checkpointIdParams.parse(request.params);
     return { checkpoint: service.getCheckpoint(id) };
@@ -153,6 +194,11 @@ export async function createApp(
   app.get("/api/checkpoints/:id/diff", async (request) => {
     const { id } = checkpointIdParams.parse(request.params);
     return { diff: await service.getCheckpointDiff(id) };
+  });
+
+  app.post("/api/checkpoints/:id/restore", async (request) => {
+    const { id } = checkpointIdParams.parse(request.params);
+    return service.restoreCheckpoint(id);
   });
 
   if (config.nodeEnv === "production") {

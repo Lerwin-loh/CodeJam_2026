@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
@@ -17,6 +18,7 @@ import type {
   AgentContextSnapshot,
   TraceEvent,
   TraceEventType,
+  RunDetails,
   WorkspaceManifest,
   UpdateAgentInput,
 } from "./types.js";
@@ -61,6 +63,7 @@ function buildDiffHunks(
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
+  private readonly traceListeners = new Map<string, Set<(event: TraceEvent) => void>>();
 
   constructor(
     private readonly config: AppConfig,
@@ -230,8 +233,8 @@ export class AgentService {
     type: TraceEventType,
     metadata: Record<string, unknown>,
   ): Promise<void> {
-    await this.store.mutate((database) => {
-      database.traces.push({
+    const event = await this.store.mutate((database) => {
+      const traceEvent: TraceEvent = {
         id: randomUUID(),
         runId: run.id,
         agentId: run.agentId,
@@ -241,8 +244,11 @@ export class AgentService {
           explanation: this.traceExplanation(type),
           ...metadata,
         },
-      });
+      };
+      database.traces.push(traceEvent);
+      return traceEvent;
     });
+    for (const listener of this.traceListeners.get(run.id) ?? []) listener(event);
   }
 
   private traceExplanation(type: TraceEventType): string {
@@ -322,6 +328,31 @@ export class AgentService {
       throw new HttpError(404, "Run not found");
     }
     return run;
+  }
+
+  getRunDetails(runId: string): RunDetails {
+    const database = this.store.snapshot();
+    const run = database.runs.find((item) => item.id === runId);
+    if (!run) throw new HttpError(404, "Run not found");
+    return {
+      run,
+      trace: database.traces
+        .filter((event) => event.runId === runId)
+        .sort((left, right) => left.timestamp.localeCompare(right.timestamp)),
+    };
+  }
+
+  async restoreCheckpoint(id: string): Promise<{ checkpoint: AgentCheckpoint; workspacePath: string; workspaceHash: string }> {
+    const database = this.store.snapshot();
+    const checkpoint = database.checkpoints.find((item) => item.id === id);
+    if (!checkpoint) throw new HttpError(404, "Checkpoint not found");
+    const snapshot = database.snapshots.find((item) => item.id === checkpoint.snapshotId);
+    if (!snapshot) throw new HttpError(500, "Checkpoint snapshot is missing");
+    const restoreRoot = path.join(this.config.dataDirectory, "branchpoint", "restores");
+    await mkdir(restoreRoot, { recursive: true });
+    const workspacePath = path.join(restoreRoot, checkpoint.id + "-" + Date.now());
+    await this.history.restoreSnapshot(snapshot, workspacePath);
+    return { checkpoint, workspacePath, workspaceHash: snapshot.manifest.workspaceHash };
   }
 
   getRuns(agentId: string): AgentRun[] {
@@ -418,6 +449,24 @@ export class AgentService {
       .traces
       .filter((event) => event.agentId === agentId)
       .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  }
+
+  subscribeToRunTrace(
+    runId: string,
+    listener: (event: TraceEvent) => void,
+  ): { events: TraceEvent[]; unsubscribe: () => void } {
+    const run = this.getRun(runId);
+    const listeners = this.traceListeners.get(runId) ?? new Set<(event: TraceEvent) => void>();
+    listeners.add(listener);
+    this.traceListeners.set(runId, listeners);
+    const events = this.getTrace(run.agentId).filter((event) => event.runId === runId);
+    return {
+      events,
+      unsubscribe: () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) this.traceListeners.delete(runId);
+      },
+    };
   }
 
   async sendMessage(
@@ -521,17 +570,27 @@ export class AgentService {
       }
       before = await this.history.manifest(agentAtStart.workspacePath);
       await this.updateRunWorkspace(run.id, before.workspaceHash, null);
+      let streamedRunnerEvents = 0;
       const result = await this.runner.run({
         agentId: agentAtStart.id,
         workspacePath: agentAtStart.workspacePath,
         prompt: run.prompt,
         threadId: agentAtStart.codexThreadId,
+        onEvent: (event) => {
+          streamedRunnerEvents += 1;
+          void this.trace(run, "codex.event", {
+            eventType: event.type,
+            ...event.metadata,
+          });
+        },
       });
-      for (const event of result.events ?? []) {
-        await this.trace(run, "codex.event", {
-          eventType: event.type,
-          ...event.metadata,
-        });
+      if (streamedRunnerEvents === 0) {
+        for (const event of result.events ?? []) {
+          await this.trace(run, "codex.event", {
+            eventType: event.type,
+            ...event.metadata,
+          });
+        }
       }
       const checkpoint = before
         ? await this.captureCheckpoint(agentAtStart, run, before, "complete", result.output, result.threadId)

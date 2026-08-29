@@ -41,6 +41,11 @@ export interface AgentRun {
   checkpointId: string | null;
 }
 
+export interface RunDetails {
+  run: AgentRun;
+  trace: TraceEvent[];
+}
+
 export interface ChangedFiles {
   created: string[];
   modified: string[];

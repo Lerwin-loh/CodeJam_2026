@@ -99,6 +99,21 @@ export class WorkspaceHistory {
     }
   }
 
+  async restoreSnapshot(snapshot: WorkspaceSnapshot, destination: string): Promise<void> {
+    await mkdir(destination, { recursive: false });
+    try {
+      for (const file of snapshot.manifest.files) {
+        const source = path.join(snapshot.directory, "files", file.path);
+        const target = path.join(destination, file.path);
+        await mkdir(path.dirname(target), { recursive: true });
+        await cp(source, target, { preserveTimestamps: true });
+      }
+    } catch (error) {
+      await rm(destination, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
   private async collectFiles(
     root: string,
     current: string,

@@ -140,6 +140,11 @@ export interface CheckpointDetails {
   snapshot: WorkspaceSnapshot;
 }
 
+export interface RunDetails {
+  run: AgentRun;
+  trace: TraceEvent[];
+}
+
 export interface Database {
   version: 1;
   agents: Agent[];
@@ -180,6 +185,7 @@ export interface RunnerRequest {
   workspacePath: string;
   prompt: string;
   threadId: string | null;
+  onEvent?: (event: RunnerEvent) => void;
 }
 
 export interface AgentRunner {

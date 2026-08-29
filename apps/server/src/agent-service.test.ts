@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -86,6 +86,34 @@ describe("Agent lifecycle", () => {
     expect(service.getTrace(agent.id)[0]?.metadata.explanation).toContain("began processing");
   });
 
+  it("streams runner events to live trace subscribers", async () => {
+    let release!: () => void;
+    const pending = new Promise<RunnerResult>((resolve) => {
+      release = () => resolve({ output: "done", threadId: "live-thread", usage: null });
+    });
+    const service = await makeService({
+      run: async (request) => {
+        request.onEvent?.({
+          type: "command_execution",
+          metadata: { command: "npm test", status: "in_progress" },
+        });
+        return pending;
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Live trace" });
+    const { run } = await service.sendMessage(agent.id, "run tests");
+    const received: string[] = [];
+    const subscription = service.subscribeToRunTrace(run.id, (event) => received.push(event.type));
+
+    await expect.poll(() => service.getTrace(agent.id).filter((event) => event.runId === run.id).length).toBe(2);
+    await expect.poll(() => received).toContain("codex.event");
+    release();
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    subscription.unsubscribe();
+  });
+
   it("automatically checkpoints meaningful workspace mutations", async () => {
     const service = await makeService({
       run: async (request) => {
@@ -131,6 +159,29 @@ describe("Agent lifecycle", () => {
     expect(details.context.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(details.trace.some((event) => event.type === "workspace.changed")).toBe(true);
     expect((await service.getCheckpointDiff(checkpoint.id)).changedFiles.created).toContain("details.txt");
+  });
+
+  it("restores a checkpoint into an independent workspace", async () => {
+    const service = await makeService({
+      run: async (request) => {
+        await writeFile(path.join(request.workspacePath, "restore-me.txt"), "checkpoint state\n");
+        return { output: "saved", threadId: "restore-thread", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Restorable" });
+    const { run } = await service.sendMessage(agent.id, "save a file");
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    const checkpoint = service.getCheckpoints(agent.id)[0];
+    expect(checkpoint).toBeDefined();
+    if (!checkpoint) return;
+
+    await writeFile(path.join(agent.workspacePath, "restore-me.txt"), "later state\n");
+    const restored = await service.restoreCheckpoint(checkpoint.id);
+    expect(await readFile(path.join(restored.workspacePath, "restore-me.txt"), "utf8")).toBe("checkpoint state\n");
+    expect(restored.workspaceHash).toBe(checkpoint.workspaceHash);
+    expect(await readFile(path.join(agent.workspacePath, "restore-me.txt"), "utf8")).toBe("later state\n");
   });
 
   it("atomically accepts only one concurrent run per Agent", async () => {

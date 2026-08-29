@@ -65,10 +65,13 @@ export default function App() {
     diff?: CheckpointDiff;
   } | null>(null);
   const [showCodeChanges, setShowCodeChanges] = useState(false);
+  const [runOverlay, setRunOverlay] = useState<import("./types").RunDetails | null>(null);
+  const [restoreResult, setRestoreResult] = useState<{ path: string; hash: string } | null>(null);
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const pollingRunIds = useRef(new Set<string>());
+  const traceStreamControllers = useRef(new Map<string, AbortController>());
   selectedIdRef.current = selectedId;
 
   const selected = useMemo(
@@ -118,6 +121,30 @@ export default function App() {
     await Promise.all([refreshAgents(), api.system().then(setSystem)]);
   }, [refreshAgents]);
 
+  const appendTraceEvent = useCallback((event: TraceEvent) => {
+    if (selectedIdRef.current !== event.agentId) return;
+    setTraceEvents((current) => current.some((item) => item.id === event.id)
+      ? current
+      : [...current, event].sort((left, right) => left.timestamp.localeCompare(right.timestamp)));
+  }, []);
+
+  const streamRunTrace = useCallback((runId: string) => {
+    traceStreamControllers.current.get(runId)?.abort();
+    const controller = new AbortController();
+    traceStreamControllers.current.set(runId, controller);
+    void api.streamRunTrace(runId, appendTraceEvent, controller.signal)
+      .catch((reason) => {
+        if (!controller.signal.aborted && mountedRef.current) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        }
+      })
+      .finally(() => {
+        if (traceStreamControllers.current.get(runId) === controller) {
+          traceStreamControllers.current.delete(runId);
+        }
+      });
+  }, [appendTraceEvent]);
+
   useEffect(() => {
     mountedRef.current = true;
     void api
@@ -130,6 +157,8 @@ export default function App() {
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
     return () => {
       mountedRef.current = false;
+      for (const controller of traceStreamControllers.current.values()) controller.abort();
+      traceStreamControllers.current.clear();
     };
   }, [bootstrap]);
 
@@ -151,6 +180,7 @@ export default function App() {
         const latest = result.runs[0] ?? null;
         setActiveRun(latest);
         if (latest && ["queued", "running"].includes(latest.status)) {
+          streamRunTrace(latest.id);
           void pollRun(latest.id, selectedId).catch((reason) =>
             setError(reason instanceof Error ? reason.message : String(reason)),
           );
@@ -159,7 +189,7 @@ export default function App() {
       .catch((reason) =>
         setError(reason instanceof Error ? reason.message : String(reason)),
       );
-  }, [refreshBranchPoint, refreshMessages, selectedId]);
+  }, [refreshBranchPoint, refreshMessages, selectedId, streamRunTrace]);
 
   useEffect(() => {
     if (selected) {
@@ -274,6 +304,7 @@ export default function App() {
       if (selectedIdRef.current === selected.id) {
         setMessages((current) => [...current, result.message]);
         setActiveRun(result.run);
+        streamRunTrace(result.run.id);
       }
       setAgents((current) =>
         current.map((agent) =>
@@ -299,6 +330,32 @@ export default function App() {
         const details = await api.checkpointDetails(checkpoint.id);
         setCheckpointOverlay({ kind, checkpoint, details });
       }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const openRunDetails = async (run: AgentRun) => {
+    setError(null);
+    setRunOverlay({
+      run,
+      trace: traceEvents.filter((event) => event.runId === run.id),
+    });
+    try {
+      setRunOverlay(await api.runDetails(run.id));
+    } catch (reason) {
+      // The history trace is already available locally; keep the inspection open
+      // if an older server build does not expose the optional details endpoint.
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const restoreCheckpoint = async (checkpoint: AgentCheckpoint) => {
+    setError(null);
+    try {
+      const result = await api.restoreCheckpoint(checkpoint.id);
+      setRestoreResult({ path: result.workspacePath, hash: result.workspaceHash });
+      setCheckpointOverlay(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
@@ -755,12 +812,35 @@ export default function App() {
           </nav>
 
           <div className="branchpoint-view">
+            {activeBranchPointView === "history" && activeRun && traceEvents.some((event) => event.runId === activeRun.id) && (
+              <section className="live-trace" aria-live="polite">
+                <div className="live-trace-heading">
+                  <div>
+                    <span className="eyebrow">Live trace</span>
+                    <strong>{activeRun.status === "running" || activeRun.status === "queued" ? "Run in progress" : "Latest Run"}</strong>
+                  </div>
+                  {(activeRun.status === "running" || activeRun.status === "queued") && <span className="live-indicator"><span /> Streaming</span>}
+                </div>
+                <div className="live-trace-list">
+                  {traceEvents.filter((event) => event.runId === activeRun.id).slice(-8).map((event) => {
+                    const label = event.type === "codex.event" && typeof event.metadata.eventType === "string"
+                      ? event.metadata.eventType === "error" ? "Codex error" : event.metadata.eventType
+                      : event.type;
+                    return <div className="live-trace-event" key={event.id}>
+                      <span className="trace-event-dot" />
+                      <div><strong>{label}</strong><small>{formatTime(event.timestamp)}</small></div>
+                      <p>{typeof event.metadata.explanation === "string" ? event.metadata.explanation : typeof event.metadata.output === "string" ? event.metadata.output : "Observable execution activity recorded."}</p>
+                    </div>;
+                  })}
+                </div>
+              </section>
+            )}
             <button
               className="view-collapse"
               onClick={() => setExpandedBranchPointView((current) => current === activeBranchPointView ? null : activeBranchPointView)}
               aria-expanded={expandedBranchPointView === activeBranchPointView}
             >
-              <span>{activeBranchPointView === "history" ? "Checkpoint history" : activeBranchPointView === "branches" ? "Branches" : "Compare branches"}</span>
+              <span>{activeBranchPointView === "history" ? "Execution history" : activeBranchPointView === "branches" ? "Branch workspaces" : "Compare workspaces"}</span>
               <span>{expandedBranchPointView === activeBranchPointView ? "−" : "+"}</span>
             </button>
             {expandedBranchPointView === activeBranchPointView && activeBranchPointView === "history" && (
@@ -768,14 +848,15 @@ export default function App() {
                 {historyItems.map((item) => {
               if (item.kind === "run") {
                 return (
-                  <article className="run-history-entry" key={item.run.id}>
+                  <button type="button" className="run-history-entry" key={item.run.id} onClick={() => void openRunDetails(item.run)}>
                     <span className="run-history-marker" />
                     <div className="run-history-copy">
-                      <strong>Run without checkpoint <em>{item.run.status === "completed" ? "Completed" : item.run.status}</em></strong>
+                      <strong>Run event · Immutable <em>{item.run.status === "completed" ? "Completed" : item.run.status}</em></strong>
                       <span>{formatTime(item.run.createdAt)} · Run {item.run.id.slice(0, 8)}</span>
                       <p>{item.run.prompt}</p>
+                      <small>View details →</small>
                     </div>
-                  </article>
+                  </button>
                 );
               }
               const checkpoint = item.checkpoint;
@@ -793,7 +874,7 @@ export default function App() {
                   >
                     <span className="checkpoint-marker" />
                     <span className="checkpoint-copy">
-                      <strong>Checkpoint {checkpoints.length - checkpoints.indexOf(checkpoint)} <em>{checkpoint.status === "partial" ? "Partial Run state" : "Workspace mutation"}</em></strong>
+                      <strong>Checkpoint event · Recoverable <em>{checkpoint.status === "partial" ? "Partial Run state" : "Workspace mutation"}</em></strong>
                       <span>{formatTime(checkpoint.createdAt)}</span>
                       <span>Run {checkpoint.runId.slice(0, 8)} · {checkpoint.reason === "auto-mutation" ? "Automatic" : "Explicit"}</span>
                     </span>
@@ -806,7 +887,7 @@ export default function App() {
                       </div>
                       <div className="checkpoint-buttons">
                         <button className="button button-primary" type="button" onClick={() => setCheckpointOverlay({ kind: "unavailable", checkpoint })}>Branch from here</button>
-                        <button className="button button-ghost" type="button" onClick={() => setCheckpointOverlay({ kind: "unavailable", checkpoint })}>Restore in new branch</button>
+                        <button className="button button-ghost" type="button" onClick={() => void restoreCheckpoint(checkpoint)}>Restore in new branch</button>
                         <button className="button button-ghost" type="button" onClick={() => void openCheckpointAction("diff", checkpoint)}>View diff</button>
                         <button className="button button-ghost" type="button" onClick={() => void openCheckpointAction("details", checkpoint)}>View details</button>
                       </div>
@@ -823,8 +904,15 @@ export default function App() {
               </div>
             )}
             {expandedBranchPointView === activeBranchPointView && activeBranchPointView !== "history" && (
-              <div className="empty-branchpoint-view">
-                {activeBranchPointView === "branches" ? "No branches have been created yet." : "Choose two branches to compare their workspace state."}
+              <div className="branchpoint-empty-state">
+                <span className="branchpoint-empty-icon">{activeBranchPointView === "branches" ? "⑂" : "⇄"}</span>
+                <strong>{activeBranchPointView === "branches" ? "No branch workspaces yet" : "No workspaces to compare yet"}</strong>
+                <p>{activeBranchPointView === "branches"
+                  ? "Restore a Checkpoint event to create an independent workspace. Your original history stays immutable."
+                  : "Create two independent workspaces from Checkpoint events to compare their files and outcomes."}</p>
+                {activeBranchPointView === "branches" && checkpoints.length > 0 && (
+                  <button className="button button-ghost" type="button" onClick={() => setActiveBranchPointView("history")}>Choose a checkpoint</button>
+                )}
               </div>
             )}
           </div>
@@ -889,6 +977,35 @@ export default function App() {
                 <p className="inspection-muted">Workspace hash: {checkpointOverlay.details.checkpoint.workspaceHash}</p>
               </div>
             )}
+          </section>
+        </div>
+      )}
+
+      {runOverlay && (
+        <div className="modal-backdrop" onMouseDown={() => setRunOverlay(null)}>
+          <section className="modal checkpoint-overlay" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div><span className="eyebrow">Immutable Run inspection</span><h2>Run execution trace</h2></div>
+              <button type="button" onClick={() => setRunOverlay(null)} aria-label="Close Run inspection">×</button>
+            </div>
+            <div className="inspection-section">
+              <p className="inspection-message">Run {runOverlay.run.id.slice(0, 8)} · {runOverlay.run.status} · This event cannot be reverted.</p>
+              <h3>Prompt</h3><p className="inspection-copy">{runOverlay.run.prompt}</p>
+              <h3>Trace events</h3>
+              <div className="inspection-trace">{runOverlay.trace.map((event) => <div key={event.id}><header><strong>{event.type}</strong><span>{formatTime(event.timestamp)}</span></header><p>{typeof event.metadata.explanation === "string" ? event.metadata.explanation : event.type === "codex.event" ? "Codex reported observable execution activity." : "Recorded BranchPoint activity."}</p>{event.type === "codex.event" && <small>{typeof event.metadata.eventType === "string" ? event.metadata.eventType : "Codex event"}{typeof event.metadata.output === "string" ? " · " + event.metadata.output : ""}</small>}</div>)}</div>
+              {runOverlay.run.output && <><h3>Agent result</h3><p className="inspection-copy">{runOverlay.run.output}</p></>}
+            </div>
+          </section>
+        </div>
+      )}
+
+      {restoreResult && (
+        <div className="modal-backdrop" onMouseDown={() => setRestoreResult(null)}>
+          <section className="modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-heading"><div><span className="eyebrow">Checkpoint restored</span><h2>New workspace created</h2></div><button type="button" onClick={() => setRestoreResult(null)} aria-label="Close restore result">×</button></div>
+            <p className="inspection-message">The original workspace was not changed.</p>
+            <label>Restored workspace<input readOnly value={restoreResult.path} /></label>
+            <p className="inspection-muted">Workspace hash: {restoreResult.hash}</p>
           </section>
         </div>
       )}
