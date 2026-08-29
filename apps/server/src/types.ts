@@ -201,6 +201,8 @@ export interface AgentContextSnapshot {
   instructions: string;
   messages: Message[];
   sourceThreadId: string | null;
+  sessionRolloutPath: string | null;
+  sessionLineOffset: number | null;
   createdAt: string;
 }
 

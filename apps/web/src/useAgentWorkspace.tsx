@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
+import { branchPointSettingsTabs, type BranchPointSettingsTabKey } from "./branchPointSettingsContent";
 import type {
   AgentBranch,
   AgentCheckpoint,
@@ -69,7 +70,8 @@ export function useAgentWorkspace(
   const [bpExpanded, setBpExpanded] = useState<string | null>("history");
   const [selectedCheckpointId, setSelectedCheckpointId] = useState<string | null>(null);
   const [showBpSettings, setShowBpSettings] = useState(false);
-  const [showTraceRules, setShowTraceRules] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<BranchPointSettingsTabKey>("trace");
+  const [howItWorksOpen, setHowItWorksOpen] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
   const [form, setForm] = useState({ name: "", description: "", instructions: "" });
@@ -503,8 +505,10 @@ export function useAgentWorkspace(
     setSelectedCheckpointId,
     showBpSettings,
     setShowBpSettings,
-    showTraceRules,
-    setShowTraceRules,
+    settingsTab,
+    setSettingsTab,
+    howItWorksOpen,
+    setHowItWorksOpen,
     showSettings,
     setShowSettings,
     form,
@@ -817,6 +821,8 @@ export function AgentPlayground({
 export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
   const canManage = ws.canManage;
   return (
+    <>
+    {!ws.showBpSettings && (
     <aside className="branchpoint-panel" id="branchpoint-panel">
       <div className="branchpoint-heading">
         <div>
@@ -826,7 +832,7 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
         <div className="panel-heading-actions">
           <button
             className="settings-button"
-            onClick={() => ws.setShowBpSettings((value) => !value)}
+            onClick={() => ws.setShowBpSettings(true)}
             aria-expanded={ws.showBpSettings}
             aria-label="Open BranchPoint settings"
             title="BranchPoint settings"
@@ -857,68 +863,6 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
           <strong>{ws.checkpoints.length}</strong>
         </div>
       </div>
-
-      {ws.showBpSettings && (
-        <section className="branchpoint-settings">
-          <div className="settings-popup-heading">
-            <div>
-              <span className="eyebrow">BranchPoint settings</span>
-              <h3>Workspace controls</h3>
-            </div>
-            <button
-              className="panel-close"
-              onClick={() => ws.setShowBpSettings(false)}
-              aria-label="Close BranchPoint settings"
-            >
-              ×
-            </button>
-          </div>
-          <button className="settings-link active" type="button">
-            Branch defaults <span>›</span>
-          </button>
-          <button className="settings-link" type="button">
-            Runtime and permissions <span>›</span>
-          </button>
-          <button
-            className={"settings-link " + (ws.showTraceRules ? "active" : "")}
-            type="button"
-            onClick={() => ws.setShowTraceRules((value) => !value)}
-            aria-expanded={ws.showTraceRules}
-          >
-            Trace and checkpoint rules <span>{ws.showTraceRules ? "⌃" : "›"}</span>
-          </button>
-          {ws.showTraceRules && (
-            <div className="trace-rules">
-              <section>
-                <h4>Trace events</h4>
-                <p>
-                  Records what happened during a Run: start, completion, errors, workspace mutations, and observable
-                  Codex activity such as tools, commands, file operations, tests, and bounded output.
-                </p>
-                <small>
-                  Stored as lightweight metadata in trace records linked to the Agent and Run. Private hidden
-                  chain-of-thought is not captured.
-                </small>
-              </section>
-              <section>
-                <h4>Checkpoint events</h4>
-                <p>
-                  Records a recoverable workspace state after meaningful file changes, including changed files, parent
-                  checkpoint, workspace hash, Run, observable context, and the captured execution events for that Run.
-                </p>
-                <small>
-                  Stored as checkpoint metadata in the JSON store. Immutable workspace files and manifests are stored
-                  under the BranchPoint snapshot directory.
-                </small>
-              </section>
-              <div className="trace-rule-note">
-                No checkpoint is created when a Run leaves the workspace unchanged. Context from previous checkpoints is
-                implicitly carried forward in later context snapshots.
-              </div>
-            </div>
-          )}
-        </section>
-      )}
 
       <nav className="branchpoint-tabs" aria-label="BranchPoint views">
         {(["history", "branches", "compare"] as const).map((view) => (
@@ -1194,6 +1138,104 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
         )}
       </div>
     </aside>
+    )}
+
+    {ws.showBpSettings && (() => {
+      const activeTab = branchPointSettingsTabs.find((tab) => tab.key === ws.settingsTab) ?? branchPointSettingsTabs[0];
+      return (
+        <div className="branchpoint-settings-overlay" onMouseDown={() => ws.setShowBpSettings(false)}>
+          <aside className="branchpoint-settings-panel" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="settings-panel-heading">
+              <div>
+                <span className="eyebrow">BranchPoint · Beta</span>
+                <h2>BranchPoint</h2>
+                <p>Understand how execution is tracked, versioned, and recovered across runs, checkpoints, and branches.</p>
+              </div>
+              <button className="panel-close" type="button" onClick={() => ws.setShowBpSettings(false)} aria-label="Close BranchPoint settings">×</button>
+            </div>
+
+            <section className="how-it-works">
+              <button
+                className="how-it-works-toggle"
+                type="button"
+                onClick={() => ws.setHowItWorksOpen((value) => !value)}
+                aria-expanded={ws.howItWorksOpen}
+              >
+                <span>How it works?</span>
+                <span>{ws.howItWorksOpen ? "⌃" : "›"}</span>
+              </button>
+              {ws.howItWorksOpen && (
+                <div className="how-it-works-body">
+                  <nav className="settings-main-tabs" aria-label="Settings sections">
+                    {branchPointSettingsTabs.map((tab) => (
+                      <button
+                        key={tab.key}
+                        className={ws.settingsTab === tab.key ? "active" : ""}
+                        type="button"
+                        onClick={() => ws.setSettingsTab(tab.key)}
+                      >
+                        <span>{tab.icon}</span>
+                        {tab.label}
+                      </button>
+                    ))}
+                  </nav>
+                  <div className="settings-main-body">
+                    <div className="settings-main-heading">
+                      <div>
+                        <h1>{activeTab.title}</h1>
+                        <p>{activeTab.subtitle}</p>
+                      </div>
+                    </div>
+                    <div className="settings-callout">{activeTab.intro}</div>
+                    <section>
+                      <h3>{activeTab.recordedHeading}</h3>
+                      <p>{activeTab.recordedDescription}</p>
+                      <div className="settings-badge-grid">
+                        {activeTab.recordedItems.map((item) => (
+                          <div className="settings-badge-card" key={item.label}>
+                            <span>{item.icon}</span>
+                            <strong>{item.label}</strong>
+                            <small>{item.caption}</small>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                    <section>
+                      <h3>How it's stored</h3>
+                      <p>{activeTab.storedText}</p>
+                    </section>
+                    <section>
+                      <h3>Why it matters</h3>
+                      <div className="settings-why-grid">
+                        {activeTab.whyItems.map((item) => (
+                          <div className="settings-why-card" key={item.title}>
+                            <span>{item.icon}</span>
+                            <strong>{item.title}</strong>
+                            <small>{item.caption}</small>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                    <div className="settings-summary">
+                      <span>✦</span>
+                      <p><strong>In short: </strong>{activeTab.summary}</p>
+                    </div>
+                    <div className="settings-tip">
+                      <span className="settings-tip-icon">💡</span>
+                      <div>
+                        <strong>Tip</strong>
+                        <p>{activeTab.tip}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </section>
+          </aside>
+        </div>
+      );
+    })()}
+    </>
   );
 }
 

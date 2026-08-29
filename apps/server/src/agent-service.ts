@@ -27,6 +27,7 @@ import type {
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 import { WorkspaceHistory } from "./workspace-history.js";
+import { captureSessionOffset, forkSessionAtOffset } from "./codex-session-fork.js";
 
 const now = () => new Date().toISOString();
 
@@ -316,6 +317,7 @@ export class AgentService {
           createdAt: now(),
         });
       }
+      const sessionOffset = captureSessionOffset(this.config.codexHome, threadId);
       const context: AgentContextSnapshot = {
         id: randomUUID(),
         agentId: agent.id,
@@ -325,6 +327,8 @@ export class AgentService {
         instructions: agent.instructions,
         messages,
         sourceThreadId: threadId,
+        sessionRolloutPath: sessionOffset?.rolloutRelativePath ?? null,
+        sessionLineOffset: sessionOffset?.lineOffset ?? null,
         createdAt: now(),
       };
       const parentCheckpointId = this.store
@@ -545,6 +549,14 @@ export class AgentService {
     if (!checkpoint || checkpoint.agentId !== agentId) throw new HttpError(404, "Checkpoint not found");
     const snapshot = database.snapshots.find((item) => item.id === checkpoint.snapshotId);
     if (!snapshot) throw new HttpError(500, "Checkpoint snapshot is missing");
+    const context = database.contexts.find((item) => item.id === checkpoint.contextId);
+    let forkedThreadId: string | null = null;
+    if (context?.sourceThreadId && context.sessionRolloutPath && context.sessionLineOffset !== null) {
+      forkedThreadId = await forkSessionAtOffset(this.config.codexHome, context.sourceThreadId, {
+        rolloutRelativePath: context.sessionRolloutPath,
+        lineOffset: context.sessionLineOffset,
+      });
+    }
     const branchId = randomUUID();
     const branch: import("./types.js").AgentBranch = {
       id: branchId,
@@ -553,7 +565,7 @@ export class AgentService {
       parentBranchId: checkpoint.branchId,
       parentCheckpointId: checkpointId,
       workspacePath: this.workspaces.branchWorkspacePath(agentId, branchId),
-      codexThreadId: null,
+      codexThreadId: forkedThreadId,
       status: "ready",
       createdAt: now(),
       updatedAt: now(),
@@ -639,6 +651,7 @@ export class AgentService {
           after,
         );
     const snapshotId = snapshot?.id ?? parentSnapshot!.id;
+    const sessionOffset = captureSessionOffset(this.config.codexHome, agent.codexThreadId);
     const context: AgentContextSnapshot = {
       id: randomUUID(),
       agentId: agent.id,
@@ -648,6 +661,8 @@ export class AgentService {
       instructions: agent.instructions,
       messages: this.getMessages(agent.id),
       sourceThreadId: agent.codexThreadId,
+      sessionRolloutPath: sessionOffset?.rolloutRelativePath ?? null,
+      sessionLineOffset: sessionOffset?.lineOffset ?? null,
       createdAt: now(),
     };
     const checkpoint: AgentCheckpoint = {

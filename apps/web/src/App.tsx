@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, getStoredToken, setAuthToken } from "./api";
+import IndividualDashboard from "./IndividualDashboard";
 import ProjectsView from "./ProjectsView";
 import type { User } from "./types";
 
@@ -13,6 +14,7 @@ export default function App() {
   const [nameInput, setNameInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<"individual" | "collaboration">("individual");
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -62,6 +64,11 @@ export default function App() {
   const signOut = () => {
     setAuthToken("");
     setCurrentUser(null);
+    setMode("individual");
+  };
+
+  const toggleMode = () => {
+    setMode((current) => (current === "individual" ? "collaboration" : "individual"));
   };
 
   if (!authChecked) {
@@ -104,5 +111,10 @@ export default function App() {
     );
   }
 
-  return <ProjectsView currentUser={currentUser} onSignOut={signOut} />;
+  return mode === "collaboration" ? (
+    <ProjectsView currentUser={currentUser} onSignOut={signOut} onToggleMode={toggleMode} />
+  ) : (
+    <IndividualDashboard currentUser={currentUser} onSignOut={signOut} onToggleMode={toggleMode} />
+  );
 }
+

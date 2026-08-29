@@ -34,9 +34,10 @@ type ProjectTab = "parent" | "mine" | "commits" | "team";
 interface Props {
   currentUser: User;
   onSignOut: () => void;
+  onToggleMode: () => void;
 }
 
-export default function ProjectsView({ currentUser, onSignOut }: Props) {
+export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: Props) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
@@ -295,7 +296,7 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
   ];
 
   return (
-    <div className={"app-shell " + (ws.showBranchPoint ? "branchpoint-open" : "")}>
+    <div className={"app-shell " + (ws.showBranchPoint && !ws.showBpSettings ? "branchpoint-open" : "")}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">P</div>
@@ -341,6 +342,9 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
             <strong>{currentUser.name}</strong>
           </div>
           <div className="user-card-actions">
+            <button className="button button-ghost" onClick={onToggleMode}>
+              Individual mode
+            </button>
             <button className="button button-ghost" onClick={() => void openAudit()}>
               Access log
             </button>
