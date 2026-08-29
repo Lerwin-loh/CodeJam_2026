@@ -1,11 +1,29 @@
 export type AgentStatus = "ready" | "busy" | "stopped" | "error";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
+export interface User {
+  id: string;
+  name: string;
+}
+
+export interface AuditEntry {
+  id: string;
+  userId: string;
+  userName: string;
+  agentId: string | null;
+  action: string;
+  resource: string;
+  decision: "allow" | "deny";
+  reason: string;
+  timestamp: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
   description: string;
   instructions: string;
+  ownerId: string;
   status: AgentStatus;
   workspacePath: string;
   codexThreadId: string | null;

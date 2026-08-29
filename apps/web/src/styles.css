@@ -345,6 +345,110 @@ button {
   text-overflow: ellipsis;
 }
 
+.user-card {
+  margin-top: auto;
+  margin-bottom: 10px;
+  border: 1px solid #3d3d38;
+  border-radius: 12px;
+  padding: 12px 13px;
+  background: #2b2b26;
+  display: grid;
+  gap: 10px;
+}
+
+.user-card-copy strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 13px;
+  color: #f0eee7;
+}
+
+.user-card-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.user-card-actions .button {
+  flex: 1;
+  min-height: 30px;
+  padding: 0 8px;
+  font-size: 11px;
+  background: #3a3a34;
+  color: #d8d6cd;
+}
+
+.user-card-actions .button:hover:not(:disabled) {
+  background: #45443d;
+}
+
+.audit-list {
+  display: grid;
+  gap: 8px;
+  max-height: 60vh;
+  overflow-y: auto;
+  margin-top: 6px;
+}
+
+.audit-row {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 9px 11px;
+}
+
+.audit-decision {
+  text-transform: uppercase;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 3px 0;
+  text-align: center;
+  border-radius: 6px;
+}
+
+.audit-allow .audit-decision {
+  color: #2f7d5b;
+  background: #e3f4ec;
+}
+
+.audit-deny {
+  border-color: #e7c3c3;
+  background: #fbf1f0;
+}
+
+.audit-deny .audit-decision {
+  color: #b03e3e;
+  background: #f6dcda;
+}
+
+.audit-copy strong {
+  display: block;
+  font-size: 12px;
+}
+
+.audit-copy span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.audit-copy p {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #55554f;
+}
+
+.audit-empty {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  padding: 24px 0;
+}
+
 .eyebrow {
   color: #898982;
   font-size: 9px;

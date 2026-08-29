@@ -4,6 +4,8 @@ import type { Database } from "./types.js";
 
 const emptyDatabase = (): Database => ({
   version: 1,
+  users: [],
+  audit: [],
   agents: [],
   messages: [],
   runs: [],
@@ -27,6 +29,8 @@ export class JsonStore {
       if (parsed.version !== 1 || !Array.isArray(parsed.agents)) {
         throw new Error("Unsupported database format");
       }
+      parsed.users ??= [];
+      parsed.audit ??= [];
       parsed.traces ??= [];
       parsed.snapshots ??= [];
       parsed.contexts ??= [];
@@ -38,6 +42,9 @@ export class JsonStore {
       }
       for (const checkpoint of parsed.checkpoints) {
         checkpoint.label ??= null;
+      }
+      for (const agent of parsed.agents) {
+        agent.ownerId ??= "";
       }
       this.data = parsed;
     } catch (error) {

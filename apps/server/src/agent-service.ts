@@ -9,6 +9,8 @@ import type {
   AgentRun,
   AgentRunner,
   AgentCheckpoint,
+  AuditDecision,
+  AuditEntry,
   CheckpointDetails,
   CheckpointDiff,
   CreateAgentInput,
@@ -17,6 +19,7 @@ import type {
   AgentContextSnapshot,
   TraceEvent,
   TraceEventType,
+  User,
   WorkspaceManifest,
   UpdateAgentInput,
 } from "./types.js";
@@ -88,13 +91,137 @@ export class AgentService {
           agent.updatedAt = now();
         }
       }
+      const orphans = database.agents.filter((agent) => !agent.ownerId);
+      if (orphans.length > 0) {
+        let demo = database.users.find(
+          (user) => user.name.toLowerCase() === "demo",
+        );
+        if (!demo) {
+          demo = {
+            id: randomUUID(),
+            name: "demo",
+            token: randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, ""),
+            createdAt: now(),
+          };
+          database.users.push(demo);
+        }
+        for (const agent of orphans) agent.ownerId = demo.id;
+      }
     });
   }
 
-  listAgents(): Agent[] {
+  listUsers(): Array<Pick<User, "id" | "name" | "createdAt">> {
     return this.store
       .snapshot()
-      .agents.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      .users.map(({ id, name, createdAt }) => ({ id, name, createdAt }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  getUserByToken(token: string): User | null {
+    const trimmed = token.trim();
+    if (!trimmed) return null;
+    return (
+      this.store.snapshot().users.find((user) => user.token === trimmed) ?? null
+    );
+  }
+
+  async createUser(name: string): Promise<User> {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      throw new HttpError(400, "Enter a name to continue.");
+    }
+    if (trimmed.length > 60) {
+      throw new HttpError(400, "Name must be 60 characters or fewer.");
+    }
+    return this.store.mutate((database) => {
+      const existing = database.users.find(
+        (user) => user.name.toLowerCase() === trimmed.toLowerCase(),
+      );
+      if (existing) return structuredClone(existing);
+      const user: User = {
+        id: randomUUID(),
+        name: trimmed,
+        token: randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, ""),
+        createdAt: now(),
+      };
+      database.users.push(user);
+      return structuredClone(user);
+    });
+  }
+
+  async recordAudit(entry: {
+    user: User;
+    agentId: string | null;
+    action: string;
+    resource: string;
+    decision: AuditDecision;
+    reason: string;
+  }): Promise<void> {
+    await this.store.mutate((database) => {
+      database.audit.push({
+        id: randomUUID(),
+        userId: entry.user.id,
+        userName: entry.user.name,
+        agentId: entry.agentId,
+        action: entry.action,
+        resource: entry.resource,
+        decision: entry.decision,
+        reason: entry.reason,
+        timestamp: now(),
+      });
+      if (database.audit.length > 2_000) {
+        database.audit.splice(0, database.audit.length - 2_000);
+      }
+    });
+  }
+
+  listAudit(user: User): AuditEntry[] {
+    const database = this.store.snapshot();
+    const ownedAgentIds = new Set(
+      database.agents
+        .filter((agent) => agent.ownerId === user.id)
+        .map((agent) => agent.id),
+    );
+    return database.audit
+      .filter(
+        (entry) =>
+          entry.userId === user.id ||
+          (entry.agentId !== null && ownedAgentIds.has(entry.agentId)),
+      )
+      .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
+      .slice(0, 200);
+  }
+
+  async assertAgentAccess(
+    agentId: string,
+    user: User,
+    action: string,
+  ): Promise<Agent> {
+    const agent = this.store
+      .snapshot()
+      .agents.find((item) => item.id === agentId);
+    if (!agent) {
+      throw new HttpError(404, "Agent not found");
+    }
+    if (agent.ownerId !== user.id) {
+      await this.recordAudit({
+        user,
+        agentId: agent.id,
+        action,
+        resource: "agent:" + agent.id,
+        decision: "deny",
+        reason: "Agent belongs to a different user",
+      });
+      throw new HttpError(403, "You do not have access to this Agent");
+    }
+    return agent;
+  }
+
+  listAgents(ownerId: string): Agent[] {
+    return this.store
+      .snapshot()
+      .agents.filter((agent) => agent.ownerId === ownerId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   getAgent(id: string): Agent {
@@ -105,7 +232,7 @@ export class AgentService {
     return agent;
   }
 
-  async createAgent(input: CreateAgentInput): Promise<Agent> {
+  async createAgent(input: CreateAgentInput, ownerId: string): Promise<Agent> {
     const timestamp = now();
     const id = randomUUID();
     const agent: Agent = {
@@ -113,6 +240,7 @@ export class AgentService {
       name: input.name.trim(),
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
+      ownerId,
       status: "ready",
       workspacePath: this.workspaces.workspacePath(id),
       codexThreadId: null,
