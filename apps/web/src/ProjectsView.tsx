@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
+import {
+  AgentPlayground,
+  BranchPointPanel,
+  useAgentWorkspace,
+  WorkspaceOverlays,
+} from "./useAgentWorkspace";
 import type {
-  AgentCheckpoint,
+  AuditEntry,
   CommitRequest,
-  Message,
   ParentAgentView,
   Project,
   ProjectDetail,
@@ -24,21 +29,6 @@ function changedCount(cr: CommitRequest): number {
   return cr.changedFiles.created.length + cr.changedFiles.modified.length + cr.changedFiles.deleted.length;
 }
 
-/** A local, not-yet-persisted user message so the chat echoes it immediately. */
-function optimistic(agentId: string, content: string): Message {
-  return {
-    id: "pending-" + Date.now(),
-    agentId,
-    runId: "",
-    branchId: null,
-    role: "user",
-    content,
-    createdAt: new Date().toISOString(),
-  };
-}
-
-const RUN_ACTIVE = ["queued", "running"];
-
 type ProjectTab = "parent" | "mine" | "commits" | "team";
 
 interface Props {
@@ -58,16 +48,15 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
   const [newName, setNewName] = useState("");
 
   const [parent, setParent] = useState<ParentAgentView | null>(null);
-  const [parentPrompt, setParentPrompt] = useState("");
-
-  const [childMessages, setChildMessages] = useState<Message[]>([]);
-  const [childCheckpoints, setChildCheckpoints] = useState<AgentCheckpoint[]>([]);
-  const [childPrompt, setChildPrompt] = useState("");
+  const [child, setChild] = useState<ParentAgentView | null>(null);
 
   const [commitRequests, setCommitRequests] = useState<CommitRequest[]>([]);
   const [securityResult, setSecurityResult] = useState<SecurityCheckResult | null>(null);
   const [securityRunning, setSecurityRunning] = useState(false);
   const [submittingCommit, setSubmittingCommit] = useState(false);
+
+  const [showAudit, setShowAudit] = useState(false);
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
 
   const [mUserName, setMUserName] = useState("");
   const [mRole, setMRole] = useState("");
@@ -103,12 +92,20 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
   const isOwner = detail?.role === "owner";
   const childId = myMember?.childAgentId ?? null;
 
-  const loadChild = useCallback(async (agentId: string) => {
+  const loadChild = useCallback(async (projectId: string) => {
     try {
-      const [m, c] = await Promise.all([api.messages(agentId), api.checkpoints(agentId)]);
-      if (!mounted.current) return;
-      setChildMessages(m.messages);
-      setChildCheckpoints(c.checkpoints);
+      const view = await api.projects.myAgent(projectId);
+      if (mounted.current) setChild(view);
+    } catch (reason) {
+      fail(reason);
+    }
+  }, [fail]);
+
+  const openAudit = useCallback(async () => {
+    setShowAudit(true);
+    try {
+      const { entries } = await api.audit();
+      if (mounted.current) setAuditEntries(entries);
     } catch (reason) {
       fail(reason);
     }
@@ -132,11 +129,8 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
       const parentView = await api.projects.parentAgent(id).catch(() => null);
       if (mounted.current) setParent(parentView);
       await refreshCommitRequests(id);
-      if (next.myMembership) await loadChild(next.myMembership.childAgentId);
-      else {
-        setChildMessages([]);
-        setChildCheckpoints([]);
-      }
+      if (next.myMembership) await loadChild(id);
+      else setChild(null);
       setTab(next.role === "owner" ? "team" : "mine");
     } catch (reason) {
       fail(reason);
@@ -148,33 +142,39 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
     else setDetail(null);
   }, [selectedId, loadDetail]);
 
-  const runAgent = useCallback(
-    async (agentId: string, content: string, after: () => Promise<void>) => {
-      setBusy(true);
-      setError(null);
-      try {
-        const { run } = await api.sendMessage(agentId, content);
-        let latest = run;
-        while (RUN_ACTIVE.includes(latest.status)) {
-          await new Promise((r) => window.setTimeout(r, 1000));
-          if (!mounted.current) return;
-          latest = (await api.run(run.id)).run;
-        }
-        await after();
-        if (latest.status !== "completed" && mounted.current) {
-          setError(
-            "The agent run " +
-              latest.status +
-              (latest.error ? ": " + latest.error : "."),
-          );
-        }
-      } catch (reason) {
-        fail(reason);
-      } finally {
-        if (mounted.current) setBusy(false);
-      }
-    },
-    [fail],
+  const handleAgentDeleted = useCallback(() => {
+    if (selectedId) void loadDetail(selectedId);
+  }, [selectedId, loadDetail]);
+
+  const activeAgent = useMemo(() => {
+    if (tab === "parent" && parent) {
+      return {
+        id: parent.agent.id,
+        canManage: isOwner,
+        seed: parent,
+        title: "Parent agent",
+        subtitle: isOwner
+          ? "You control the parent agent and the canonical main workspace."
+          : "Read-only. Only the project owner can instruct the parent agent.",
+      };
+    }
+    if (tab === "mine" && myMember && childId) {
+      return {
+        id: childId,
+        canManage: true,
+        seed: child,
+        title: "Your agent",
+        subtitle: "Your own copy of the project. You are the " + myMember.role + " engineer.",
+      };
+    }
+    return null;
+  }, [tab, parent, child, isOwner, myMember, childId]);
+
+  const ws = useAgentWorkspace(
+    activeAgent?.id ?? null,
+    activeAgent?.canManage ?? false,
+    activeAgent?.seed ?? null,
+    handleAgentDeleted,
   );
 
   const createProject = async (event: React.FormEvent) => {
@@ -295,7 +295,7 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
   ];
 
   return (
-    <div className="app-shell">
+    <div className={"app-shell " + (ws.showBranchPoint ? "branchpoint-open" : "")}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">P</div>
@@ -341,6 +341,9 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
             <strong>{currentUser.name}</strong>
           </div>
           <div className="user-card-actions">
+            <button className="button button-ghost" onClick={() => void openAudit()}>
+              Access log
+            </button>
             <button className="button button-ghost" onClick={onSignOut}>
               Sign out
             </button>
@@ -397,38 +400,12 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
             </nav>
 
             <section className="project-panel">
-              {tab === "parent" && (
-                <AgentChat
-                  title="Parent agent"
-                  subtitle={
-                    isOwner
-                      ? "Only you can instruct the parent agent."
-                      : "Read-only. Only the project owner can instruct the parent agent."
-                  }
-                  canSend={!!isOwner}
-                  busy={busy}
-                  errorText={tab === "parent" ? error : null}
-                  prompt={parentPrompt}
-                  setPrompt={setParentPrompt}
-                  messages={parent?.messages ?? []}
-                  checkpoints={parent?.checkpoints ?? []}
-                  onSend={async () => {
-                    const agentId = parent?.agent.id;
-                    if (!agentId || !parentPrompt.trim()) return;
-                    const text = parentPrompt.trim();
-                    setParentPrompt("");
-                    setParent((cur) =>
-                      cur ? { ...cur, messages: [...cur.messages, optimistic(agentId, text)] } : cur,
-                    );
-                    await runAgent(agentId, text, async () => {
-                      if (selectedId) {
-                        const view = await api.projects.parentAgent(selectedId);
-                        if (mounted.current) setParent(view);
-                      }
-                    });
-                  }}
-                />
-              )}
+              {tab === "parent" &&
+                (activeAgent ? (
+                  <AgentPlayground ws={ws} title={activeAgent.title} subtitle={activeAgent.subtitle} />
+                ) : (
+                  <p className="muted-note">The parent agent is not available for this project.</p>
+                ))}
 
               {tab === "mine" && myMember && childId && (
                 <div className="mine-panel">
@@ -475,24 +452,9 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
                     </div>
                   )}
 
-                  <AgentChat
-                    title="Your agent"
-                    subtitle={"Your own copy of the project. You are the " + myMember.role + " engineer."}
-                    canSend
-                    busy={busy}
-                    errorText={tab === "mine" ? error : null}
-                    prompt={childPrompt}
-                    setPrompt={setChildPrompt}
-                    messages={childMessages}
-                    checkpoints={childCheckpoints}
-                    onSend={async () => {
-                      if (!childPrompt.trim()) return;
-                      const text = childPrompt.trim();
-                      setChildPrompt("");
-                      setChildMessages((cur) => [...cur, optimistic(childId, text)]);
-                      await runAgent(childId, text, () => loadChild(childId));
-                    }}
-                  />
+                  {activeAgent && activeAgent.id === childId && (
+                    <AgentPlayground ws={ws} title={activeAgent.title} subtitle={activeAgent.subtitle} />
+                  )}
                 </div>
               )}
 
@@ -603,6 +565,43 @@ export default function ProjectsView({ currentUser, onSignOut }: Props) {
         )}
       </main>
 
+      {ws.showBranchPoint && <BranchPointPanel ws={ws} />}
+      <WorkspaceOverlays ws={ws} />
+
+      {showAudit && (
+        <div className="modal-backdrop" onMouseDown={() => setShowAudit(false)}>
+          <section className="modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">Access log</span>
+                <h2>Your access events</h2>
+                <p>Every action you take, and every denied attempt on agents you own.</p>
+              </div>
+              <button type="button" onClick={() => setShowAudit(false)} aria-label="Close access log">
+                ×
+              </button>
+            </div>
+            <div className="audit-list">
+              {auditEntries.map((entry) => (
+                <article className={"audit-row audit-" + entry.decision} key={entry.id}>
+                  <span className="audit-decision">{entry.decision}</span>
+                  <div className="audit-copy">
+                    <strong>
+                      {entry.userName} · {entry.action}
+                    </strong>
+                    <span>
+                      {entry.resource} · {formatTime(entry.timestamp)}
+                    </span>
+                    <p>{entry.reason}</p>
+                  </div>
+                </article>
+              ))}
+              {auditEntries.length === 0 && <p className="audit-empty">No access events recorded yet.</p>}
+            </div>
+          </section>
+        </div>
+      )}
+
       {showCreate && (
         <div className="modal-backdrop" onMouseDown={() => setShowCreate(false)}>
           <form className="modal" onSubmit={createProject} onMouseDown={(e) => e.stopPropagation()}>
@@ -673,122 +672,5 @@ function MemberCard({
         )}
       </div>
     </article>
-  );
-}
-
-function AgentChat({
-  title,
-  subtitle,
-  canSend,
-  busy,
-  errorText,
-  prompt,
-  setPrompt,
-  messages,
-  checkpoints,
-  onSend,
-}: {
-  title: string;
-  subtitle: string;
-  canSend: boolean;
-  busy: boolean;
-  errorText?: string | null;
-  prompt: string;
-  setPrompt: (value: string) => void;
-  messages: Message[];
-  checkpoints: AgentCheckpoint[];
-  onSend: () => Promise<void> | void;
-}) {
-  return (
-    <div className="agent-chat">
-      <div className="agent-chat-head">
-        <div>
-          <span className="eyebrow">{title}</span>
-          <p>{subtitle}</p>
-        </div>
-      </div>
-
-      <div className="agent-chat-body">
-        <div className="chat-messages">
-          {messages.length === 0 && !busy && (
-            <p className="muted-note">
-              {canSend
-                ? "No messages yet — send an instruction below to get started."
-                : "No messages yet."}
-            </p>
-          )}
-          {messages.map((message) => (
-            <article className={"message message-" + message.role} key={message.id}>
-              <div className="message-meta">
-                <strong>{message.role === "user" ? "User" : "Agent"}</strong>
-                <span>{formatTime(message.createdAt)}</span>
-              </div>
-              <div className="message-body">{message.content}</div>
-            </article>
-          ))}
-          {busy && canSend && (
-            <article className="message message-assistant thinking">
-              <div className="message-meta">
-                <strong>Agent</strong>
-                <span>working…</span>
-              </div>
-              <div className="message-body">
-                <Spinner /> Running in the workspace…
-              </div>
-            </article>
-          )}
-          {!busy && errorText && (
-            <article className="chat-run-error">
-              <strong>The agent didn't reply</strong>
-              <span>{errorText}</span>
-            </article>
-          )}
-        </div>
-
-        <aside className="chat-side">
-          <span className="eyebrow">Checkpoints</span>
-          {checkpoints.length === 0 && <p className="muted-note">None yet.</p>}
-          {checkpoints.map((cp) => {
-            const changed =
-              cp.changedFiles.created.length + cp.changedFiles.modified.length + cp.changedFiles.deleted.length;
-            return (
-              <div className="cp-card" key={cp.id}>
-                <strong>
-                  {formatTime(cp.createdAt)} · {changed} file{changed === 1 ? "" : "s"}
-                </strong>
-                <div className="cp-files">
-                  {[...cp.changedFiles.created, ...cp.changedFiles.modified, ...cp.changedFiles.deleted].map((f) => (
-                    <code key={f}>{f}</code>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </aside>
-      </div>
-
-      {canSend ? (
-        <form
-          className="chat-composer"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void onSend();
-          }}
-        >
-          <textarea
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            placeholder="Describe what the agent should do…"
-            rows={2}
-            disabled={busy}
-          />
-          <button className="button button-primary" disabled={busy || !prompt.trim()}>
-            {busy ? <Spinner /> : "Send"}
-          </button>
-        </form>
-      ) : (
-        <div className="chat-composer chat-composer-locked">Owner only — you can read this agent but not instruct it.</div>
-      )}
-    </div>
   );
 }

@@ -19,7 +19,7 @@ import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
-/** Minimum capability each project action needs. Unlisted â owner only. */
+/** Minimum capability each project action needs. Unlisted -> owner only. */
 const PROJECT_ACTIONS: Record<string, "owner" | "member" | "member-own"> = {
   "project.read": "member",
   "project.tree.read": "member",
@@ -140,7 +140,7 @@ export class ProjectService {
 
     const parentAgent: Agent = {
       id: parentAgentId,
-      name: trimmed + " â Parent Agent",
+      name: trimmed + " - Parent Agent",
       description: "Coordinates the project and owns the canonical main workspace.",
       instructions:
         "You are the parent agent for the project \"" +
@@ -333,7 +333,7 @@ export class ProjectService {
 
     const childAgent: Agent = {
       id: childAgentId,
-      name: project.name + " â " + role + " (" + target.name + ")",
+      name: project.name + " - " + role + " (" + target.name + ")",
       description: role + " workspace for " + target.name + ".",
       instructions: childInstructions(project.name, role),
       ownerId: target.id,
@@ -514,7 +514,7 @@ export class ProjectService {
     const totalChanged =
       changedFiles.created.length + changedFiles.modified.length + changedFiles.deleted.length;
     if (totalChanged === 0) {
-      throw new HttpError(409, "Nothing to commit â your workspace matches main.");
+      throw new HttpError(409, "Nothing to commit - your workspace matches main.");
     }
     if (
       database.commitRequests.some(
@@ -575,7 +575,7 @@ export class ProjectService {
 
   /**
    * Owner decision on a pending commit request. Approve/reject only records the
-   * outcome â actually applying the change to main (with conflict handling) is
+   * outcome: actually applying the change to main (with conflict handling) is
    * the next iteration.
    */
   async decideCommitRequest(

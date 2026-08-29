@@ -2585,3 +2585,42 @@ textarea:focus {
 }
 .chat-run-error strong { font-size: 12px; color: #8a3d3d; }
 .chat-run-error span { font-size: 11px; color: #8a3d3d; word-break: break-word; }
+
+.agent-chat-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 2px;
+}
+.agent-chat-title strong {
+  font-family: "Manrope", sans-serif;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+.cp-card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.cp-card-head strong { font-size: 12px; }
+.cp-tag {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.cp-meta { display: block; font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+/* embedded agent playground (BranchPoint workspace inside a project tab) */
+.agent-workspace { display: flex; flex-direction: column; gap: 14px; }
+.agent-workspace .agent-header { margin: 0; max-width: none; min-height: 0; }
+.agent-workspace .agent-header h1 { font-size: 19px; }
+.agent-workspace .playground { height: min(calc(100vh - 260px), 640px); min-height: 420px; }
+.composer.composer-locked {
+  border: 1px dashed var(--line);
+  border-top: 1px dashed var(--line);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 14px 18px;
+  background: var(--paper);
+}

@@ -85,6 +85,7 @@ export const api = {
   audit: () => request<{ entries: AuditEntry[] }>("/api/audit"),
   system: () => request<SystemInfo>("/api/system"),
   listAgents: () => request<{ agents: Agent[] }>("/api/agents"),
+  getAgent: (id: string) => request<{ agent: Agent }>("/api/agents/" + id),
   createAgent: (body: {
     name: string;
     description: string;
@@ -182,6 +183,8 @@ export const api = {
       }),
     parentAgent: (id: string) =>
       request<ParentAgentView>("/api/projects/" + id + "/parent-agent"),
+    myAgent: (id: string) =>
+      request<ParentAgentView>("/api/projects/" + id + "/my-agent"),
     securityCheck: (id: string, memberId: string) =>
       request<{ result: SecurityCheckResult }>(
         "/api/projects/" + id + "/members/" + memberId + "/security-check",

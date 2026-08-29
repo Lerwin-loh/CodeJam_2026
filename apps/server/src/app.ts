@@ -433,6 +433,27 @@ export async function createApp(
     };
   });
 
+  app.get("/api/projects/:id/my-agent", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    const { member } = await projects.assertProjectAccess(id, request.user, "child.read");
+    if (!member) {
+      throw new HttpError(403, "Only project members have a child agent");
+    }
+    const agent = service.getAgent(member.childAgentId);
+    return {
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        status: agent.status,
+        kind: agent.kind,
+      },
+      messages: service.getMessages(agent.id),
+      trace: service.getTrace(agent.id),
+      checkpoints: service.getCheckpoints(agent.id),
+    };
+  });
+
   app.post("/api/projects/:id/members/:memberId/security-check", async (request) => {
     const { id, memberId } = memberParams.parse(request.params);
     await projects.assertProjectAccess(id, request.user, "security.check", { memberId });
