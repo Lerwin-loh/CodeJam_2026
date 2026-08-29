@@ -111,6 +111,54 @@ describe("Agent lifecycle", () => {
     expect(service.getTrace(agent.id).map((event) => event.type)).toContain("checkpoint.created");
   });
 
+  it("saves an explicit user-named checkpoint from the current workspace", async () => {
+    const service = await makeService({
+      run: async (request) => {
+        await writeFile(path.join(request.workspacePath, "feature.txt"), "v1\n");
+        return { output: "added feature", threadId: "explicit-thread", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Namer" });
+    const { run } = await service.sendMessage(agent.id, "add a feature");
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    const auto = service.getCheckpoints(agent.id);
+    expect(auto).toHaveLength(1);
+
+    // Unchanged workspace still saves a named marker, reusing the last snapshot.
+    const marker = await service.createExplicitCheckpoint(agent.id, "  Working baseline  ");
+    expect(marker.reason).toBe("explicit");
+    expect(marker.label).toBe("Working baseline");
+    expect(marker.status).toBe("complete");
+    expect(marker.snapshotId).toBe(auto[0]?.snapshotId);
+    expect(marker.parentCheckpointId).toBe(auto[0]?.id);
+    expect(marker.changedFiles).toEqual({ created: [], modified: [], deleted: [] });
+
+    // A real change produces its own snapshot.
+    await writeFile(path.join(agent.workspacePath, "feature.txt"), "v2\n");
+    const changed = await service.createExplicitCheckpoint(agent.id, "after tweak");
+    expect(changed.snapshotId).not.toBe(marker.snapshotId);
+    expect(changed.changedFiles.modified).toContain("feature.txt");
+
+    const checkpoints = service.getCheckpoints(agent.id);
+    expect(checkpoints).toHaveLength(3);
+    expect(checkpoints[0]?.id).toBe(changed.id);
+    expect(checkpoints[0]?.parentCheckpointId).toBe(marker.id);
+
+    const details = service.getCheckpointDetails(changed.id);
+    expect(details.snapshot.manifest.files.some((file) => file.path === "feature.txt")).toBe(true);
+    expect(service.getTrace(agent.id).filter((event) => event.type === "checkpoint.created")).toHaveLength(3);
+  });
+
+  it("rejects an explicit checkpoint before the Agent has run", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Fresh" });
+    await expect(
+      service.createExplicitCheckpoint(agent.id, "nothing yet"),
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
   it("exposes checkpoint details and a parent comparison", async () => {
     const service = await makeService({
       run: async (request) => {

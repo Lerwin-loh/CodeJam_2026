@@ -71,6 +71,11 @@ export const api = {
     request<{ runs: AgentRun[] }>("/api/agents/" + id + "/runs"),
   checkpoints: (id: string) =>
     request<{ checkpoints: AgentCheckpoint[] }>("/api/agents/" + id + "/checkpoints"),
+  createCheckpoint: (id: string, label: string) =>
+    request<{ checkpoint: AgentCheckpoint }>("/api/agents/" + id + "/checkpoints", {
+      method: "POST",
+      body: JSON.stringify({ label }),
+    }),
   trace: (id: string) =>
     request<{ events: TraceEvent[] }>("/api/agents/" + id + "/trace"),
   checkpointDetails: (id: string) =>

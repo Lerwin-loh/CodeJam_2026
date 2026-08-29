@@ -23,6 +23,9 @@ const updateAgentBody = createAgentBody.partial().refine(
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
 });
+const createCheckpointBody = z.object({
+  label: z.string().trim().min(1).max(120),
+});
 
 export async function createApp(
   config: AppConfig,
@@ -121,6 +124,13 @@ export async function createApp(
   app.get("/api/agents/:id/checkpoints", async (request) => {
     const { id } = agentIdParams.parse(request.params);
     return { checkpoints: service.getCheckpoints(id) };
+  });
+
+  app.post("/api/agents/:id/checkpoints", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    const body = createCheckpointBody.parse(request.body);
+    const checkpoint = await service.createExplicitCheckpoint(id, body.label);
+    return reply.code(201).send({ checkpoint });
   });
 
   app.get("/api/agents/:id/trace", async (request) => {

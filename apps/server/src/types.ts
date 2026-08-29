@@ -114,6 +114,7 @@ export interface AgentCheckpoint {
   changedFiles: ChangedFiles;
   status: "complete" | "partial";
   reason: "auto-mutation" | "explicit";
+  label: string | null;
   createdAt: string;
 }
 

@@ -65,6 +65,8 @@ export default function App() {
     diff?: CheckpointDiff;
   } | null>(null);
   const [showCodeChanges, setShowCodeChanges] = useState(false);
+  const [checkpointLabel, setCheckpointLabel] = useState("");
+  const [savingCheckpoint, setSavingCheckpoint] = useState(false);
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
@@ -285,6 +287,22 @@ export default function App() {
       setError(reason instanceof Error ? reason.message : String(reason));
       setActiveRun(null);
       await refreshAgents();
+    }
+  };
+
+  const saveCheckpoint = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selected || !checkpointLabel.trim() || savingCheckpoint) return;
+    setSavingCheckpoint(true);
+    setError(null);
+    try {
+      await api.createCheckpoint(selected.id, checkpointLabel.trim());
+      setCheckpointLabel("");
+      await refreshBranchPoint(selected.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSavingCheckpoint(false);
     }
   };
 
@@ -764,6 +782,38 @@ export default function App() {
               <span>{expandedBranchPointView === activeBranchPointView ? "−" : "+"}</span>
             </button>
             {expandedBranchPointView === activeBranchPointView && activeBranchPointView === "history" && (
+              <>
+              <form className="checkpoint-create" onSubmit={saveCheckpoint}>
+                <input
+                  value={checkpointLabel}
+                  onChange={(event) => setCheckpointLabel(event.target.value)}
+                  placeholder="Name a checkpoint for the current workspace…"
+                  maxLength={120}
+                  disabled={
+                    !selected ||
+                    selected.status === "busy" ||
+                    savingCheckpoint ||
+                    runs.length === 0
+                  }
+                />
+                <button
+                  className="button button-primary"
+                  disabled={
+                    !selected ||
+                    selected.status === "busy" ||
+                    savingCheckpoint ||
+                    !checkpointLabel.trim() ||
+                    runs.length === 0
+                  }
+                >
+                  {savingCheckpoint ? <Spinner /> : "Save checkpoint"}
+                </button>
+              </form>
+              {selected && runs.length === 0 && (
+                <p className="checkpoint-create-hint">
+                  Send this Agent an instruction first — a checkpoint snapshots the workspace a run produces.
+                </p>
+              )}
               <div className="checkpoint-list">
                 {historyItems.map((item) => {
               if (item.kind === "run") {
@@ -793,7 +843,10 @@ export default function App() {
                   >
                     <span className="checkpoint-marker" />
                     <span className="checkpoint-copy">
-                      <strong>Checkpoint {checkpoints.length - checkpoints.indexOf(checkpoint)} <em>{checkpoint.status === "partial" ? "Partial Run state" : "Workspace mutation"}</em></strong>
+                      <strong>
+                        {checkpoint.label ?? "Checkpoint " + (checkpoints.length - checkpoints.indexOf(checkpoint))}
+                        <em>{checkpoint.reason === "explicit" ? "Named checkpoint" : checkpoint.status === "partial" ? "Partial Run state" : "Workspace mutation"}</em>
+                      </strong>
                       <span>{formatTime(checkpoint.createdAt)}</span>
                       <span>Run {checkpoint.runId.slice(0, 8)} · {checkpoint.reason === "auto-mutation" ? "Automatic" : "Explicit"}</span>
                     </span>
@@ -821,6 +874,7 @@ export default function App() {
                   </div>
                 )}
               </div>
+              </>
             )}
             {expandedBranchPointView === activeBranchPointView && activeBranchPointView !== "history" && (
               <div className="empty-branchpoint-view">
@@ -875,6 +929,12 @@ export default function App() {
             {checkpointOverlay.kind === "details" && checkpointOverlay.details && (
               <div className="inspection-section">
                 <p className="inspection-message">Run {checkpointOverlay.details.run.id.slice(0, 8)} · {checkpointOverlay.details.run.status} · {checkpointOverlay.details.checkpoint.status}</p>
+                {checkpointOverlay.details.checkpoint.label && (
+                  <>
+                    <h3>Checkpoint name</h3>
+                    <p className="inspection-copy">{checkpointOverlay.details.checkpoint.label} · {checkpointOverlay.details.checkpoint.reason === "explicit" ? "Saved by a user" : "Automatic"}</p>
+                  </>
+                )}
                 <h3>Observable context</h3>
                 <p className="inspection-muted">{checkpointOverlay.details.context.agentName} · {checkpointOverlay.details.context.instructions.length} instruction characters · source session {checkpointOverlay.details.context.sourceThreadId?.slice(0, 12) ?? "not available"}</p>
                 <p className="inspection-disclaimer">This context snapshot includes the observable conversation accumulated through previous Runs and checkpoints. It does not include hidden model reasoning.</p>

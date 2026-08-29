@@ -36,6 +36,9 @@ export class JsonStore {
         run.afterWorkspaceHash ??= null;
         run.checkpointId ??= null;
       }
+      for (const checkpoint of parsed.checkpoints) {
+        checkpoint.label ??= null;
+      }
       this.data = parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {

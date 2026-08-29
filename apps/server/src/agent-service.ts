@@ -201,6 +201,7 @@ export class AgentService {
         changedFiles,
         status,
         reason: "auto-mutation",
+        label: null,
         createdAt: now(),
       };
       await this.store.mutate((database) => {
@@ -344,6 +345,105 @@ export class AgentService {
   getCheckpoint(id: string): AgentCheckpoint {
     const checkpoint = this.store.snapshot().checkpoints.find((item) => item.id === id);
     if (!checkpoint) throw new HttpError(404, "Checkpoint not found");
+    return checkpoint;
+  }
+
+  async createExplicitCheckpoint(
+    agentId: string,
+    label: string,
+  ): Promise<AgentCheckpoint> {
+    const agent = this.getAgent(agentId);
+    if (agent.status === "busy") {
+      throw new HttpError(
+        409,
+        "This Agent has a run in progress. Wait for it to finish, then save the checkpoint.",
+      );
+    }
+    const name = label.trim();
+    if (!name) {
+      throw new HttpError(400, "Enter a name for the checkpoint.");
+    }
+
+    const database = this.store.snapshot();
+    const latestRun = database.runs
+      .filter((run) => run.agentId === agentId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
+    if (!latestRun) {
+      throw new HttpError(
+        409,
+        "Send the Agent at least one instruction before saving a checkpoint. Checkpoints snapshot the workspace produced by a run.",
+      );
+    }
+    const latestCheckpoint = database.checkpoints
+      .filter((checkpoint) => checkpoint.agentId === agentId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
+    const parentSnapshot = latestCheckpoint
+      ? database.snapshots.find((item) => item.id === latestCheckpoint.snapshotId) ?? null
+      : null;
+
+    const after = await this.history.manifest(agent.workspacePath);
+    const baseline: WorkspaceManifest = parentSnapshot?.manifest ?? {
+      workspaceHash: "",
+      files: [],
+      createdAt: now(),
+    };
+    const changedFiles = this.history.diff(baseline, after);
+    // An explicit checkpoint is a user-intent marker: always save it. When the
+    // workspace is identical to the last checkpoint, reuse its snapshot instead
+    // of copying the same files again.
+    const unchanged =
+      parentSnapshot !== null &&
+      changedFiles.created.length +
+        changedFiles.modified.length +
+        changedFiles.deleted.length ===
+        0;
+    const snapshot = unchanged
+      ? null
+      : await this.history.createSnapshot(
+          agent.id,
+          latestRun.id,
+          agent.workspacePath,
+          after,
+        );
+    const snapshotId = snapshot?.id ?? parentSnapshot!.id;
+    const context: AgentContextSnapshot = {
+      id: randomUUID(),
+      agentId: agent.id,
+      runId: latestRun.id,
+      agentName: agent.name,
+      agentDescription: agent.description,
+      instructions: agent.instructions,
+      messages: this.getMessages(agent.id),
+      sourceThreadId: agent.codexThreadId,
+      createdAt: now(),
+    };
+    const checkpoint: AgentCheckpoint = {
+      id: randomUUID(),
+      agentId: agent.id,
+      runId: latestRun.id,
+      parentCheckpointId: latestCheckpoint?.id ?? null,
+      snapshotId,
+      contextId: context.id,
+      workspaceHash: after.workspaceHash,
+      changedFiles,
+      status: "complete",
+      reason: "explicit",
+      label: name,
+      createdAt: now(),
+    };
+    await this.store.mutate((db) => {
+      if (snapshot) db.snapshots.push(snapshot);
+      db.contexts.push(context);
+      db.checkpoints.push(checkpoint);
+    });
+    await this.trace(latestRun, "checkpoint.created", {
+      checkpointId: checkpoint.id,
+      snapshotId,
+      status: "complete",
+      workspaceHash: after.workspaceHash,
+      reason: "explicit",
+      label: name,
+    });
     return checkpoint;
   }
 
