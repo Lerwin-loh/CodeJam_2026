@@ -13,6 +13,14 @@ export class WorkspaceManager {
     return path.join(this.root, agentId, "branches", branchId);
   }
 
+  projectMainPath(projectId: string): string {
+    return path.join(this.root, "projects", projectId, "main");
+  }
+
+  projectMemberPath(projectId: string, memberId: string): string {
+    return path.join(this.root, "projects", projectId, "members", memberId);
+  }
+
   async initialize(): Promise<void> {
     await mkdir(this.root, { recursive: true });
     await mkdir(path.join(this.root, ".deleted"), { recursive: true });

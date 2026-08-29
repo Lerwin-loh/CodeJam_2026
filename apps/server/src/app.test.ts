@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { ProjectService } from "./project-service.js";
 import { JsonStore } from "./store.js";
 import type { AgentRunner } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
+import { WorkspaceHistory } from "./workspace-history.js";
 
 const validUser = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -17,29 +19,32 @@ const validUser = {
 };
 
 const service = {
-  listAgents: () => [],
   systemInfo: async () => ({}),
   getUserByToken: (token: string) =>
     token === validUser.token ? validUser : null,
   createUser: async (name: string) => ({ ...validUser, name }),
 } as unknown as AgentService;
 
+const projectsStub = {
+  listProjects: () => [],
+} as unknown as ProjectService;
+
 describe("HTTP boundary", () => {
   it("rejects API requests without a valid user token", async () => {
-    const app = await createApp(loadConfig({ NODE_ENV: "test" }), service);
-    const denied = await app.inject({ method: "GET", url: "/api/agents" });
+    const app = await createApp(loadConfig({ NODE_ENV: "test" }), service, projectsStub);
+    const denied = await app.inject({ method: "GET", url: "/api/projects" });
     expect(denied.statusCode).toBe(401);
 
     const wrongToken = await app.inject({
       method: "GET",
-      url: "/api/agents",
+      url: "/api/projects",
       headers: { authorization: "Bearer nope" },
     });
     expect(wrongToken.statusCode).toBe(401);
 
     const allowed = await app.inject({
       method: "GET",
-      url: "/api/agents",
+      url: "/api/projects",
       headers: { authorization: "Bearer valid-user-token" },
     });
     expect(allowed.statusCode).toBe(200);
@@ -47,7 +52,7 @@ describe("HTTP boundary", () => {
   });
 
   it("lets anyone create or resume a user without a token", async () => {
-    const app = await createApp(loadConfig({ NODE_ENV: "test" }), service);
+    const app = await createApp(loadConfig({ NODE_ENV: "test" }), service, projectsStub);
     const created = await app.inject({
       method: "POST",
       url: "/api/users",
@@ -60,14 +65,11 @@ describe("HTTP boundary", () => {
   });
 
   it("preserves Fastify client error status codes", async () => {
-    const app = await createApp(loadConfig({ NODE_ENV: "test" }), service);
-    const headers = {
-      authorization: "Bearer valid-user-token",
-      "content-type": "application/json",
-    };
+    const app = await createApp(loadConfig({ NODE_ENV: "test" }), service, projectsStub);
+    const headers = { "content-type": "application/json" };
     const malformed = await app.inject({
       method: "POST",
-      url: "/api/agents",
+      url: "/api/users",
       headers,
       payload: "{not-json",
     });
@@ -75,7 +77,7 @@ describe("HTTP boundary", () => {
 
     const oversized = await app.inject({
       method: "POST",
-      url: "/api/agents",
+      url: "/api/users",
       headers,
       payload: JSON.stringify({ name: "x".repeat(1_100_000) }),
     });
@@ -99,8 +101,8 @@ afterEach(async () => {
   );
 });
 
-describe("Ownership enforcement (end to end)", () => {
-  it("scopes Agents per user, denies cross-user access, and records the decision", async () => {
+describe("Project access enforcement (end to end)", () => {
+  it("scopes projects per user, denies cross-user access to project agents, and records the decision", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "launchpad-app-test-"));
     temporaryDirectories.push(root);
     const config = loadConfig({
@@ -111,14 +113,13 @@ describe("Ownership enforcement (end to end)", () => {
       ARK_API_KEY: "test-key",
       ARK_MODEL: "ep-test",
     });
-    const service = new AgentService(
-      config,
-      new JsonStore(path.join(root, "data", "db.json")),
-      new WorkspaceManager(path.join(root, "workspaces")),
-      realRunner,
-    );
+    const store = new JsonStore(path.join(root, "data", "db.json"));
+    const workspaces = new WorkspaceManager(path.join(root, "workspaces"));
+    const history = new WorkspaceHistory(path.join(root, "data", "branchpoint"));
+    const projects = new ProjectService(store, workspaces, history);
+    const service = new AgentService(config, store, workspaces, realRunner, history);
     await service.initialize();
-    const app = await createApp(config, service);
+    const app = await createApp(config, service, projects);
 
     const makeUser = async (name: string) => {
       const response = await app.inject({
@@ -137,51 +138,59 @@ describe("Ownership enforcement (end to end)", () => {
 
     const created = await app.inject({
       method: "POST",
-      url: "/api/agents",
+      url: "/api/projects",
       headers: asAlice,
-      payload: JSON.stringify({ name: "Alice Agent" }),
+      payload: JSON.stringify({ name: "Alice Project" }),
     });
     expect(created.statusCode).toBe(201);
-    const agentId = created.json().agent.id as string;
+    const project = created.json().project as { id: string; parentAgentId: string };
 
-    const bobList = await app.inject({ method: "GET", url: "/api/agents", headers: asBob });
-    expect(bobList.json().agents).toEqual([]);
+    // Bob is not on the project — he sees nothing and cannot reach its agents.
+    const bobList = await app.inject({ method: "GET", url: "/api/projects", headers: asBob });
+    expect(bobList.json().projects).toEqual([]);
 
-    const aliceList = await app.inject({ method: "GET", url: "/api/agents", headers: asAlice });
-    expect(aliceList.json().agents.map((agent: { id: string }) => agent.id)).toEqual([agentId]);
+    const aliceList = await app.inject({ method: "GET", url: "/api/projects", headers: asAlice });
+    expect(aliceList.json().projects.map((p: { id: string }) => p.id)).toEqual([project.id]);
 
-    const denied = await app.inject({
+    const bobReadsProject = await app.inject({
       method: "GET",
-      url: "/api/agents/" + agentId,
+      url: "/api/projects/" + project.id,
       headers: asBob,
     });
-    expect(denied.statusCode).toBe(403);
+    expect(bobReadsProject.statusCode).toBe(403);
 
-    const bobMessage = await app.inject({
+    const bobReadsParentAgent = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + project.parentAgentId,
+      headers: asBob,
+    });
+    expect(bobReadsParentAgent.statusCode).toBe(403);
+
+    const bobMessagesParentAgent = await app.inject({
       method: "POST",
-      url: "/api/agents/" + agentId + "/messages",
+      url: "/api/agents/" + project.parentAgentId + "/messages",
       headers: { authorization: "Bearer " + bob, "content-type": "application/json" },
       payload: JSON.stringify({ content: "do something" }),
     });
-    expect(bobMessage.statusCode).toBe(403);
+    expect(bobMessagesParentAgent.statusCode).toBe(403);
+
+    // There is no way to create a standalone agent.
+    const standalone = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: asAlice,
+      payload: JSON.stringify({ name: "loose agent" }),
+    });
+    expect(standalone.statusCode).toBe(404);
 
     const auditAsAlice = await app.inject({ method: "GET", url: "/api/audit", headers: asAlice });
     const entries = auditAsAlice.json().entries as Array<{
       decision: string;
       userName: string;
       action: string;
-      agentId: string | null;
     }>;
     expect(
-      entries.some(
-        (entry) =>
-          entry.decision === "deny" &&
-          entry.userName === "Bob" &&
-          entry.agentId === agentId,
-      ),
-    ).toBe(true);
-    expect(
-      entries.some((entry) => entry.decision === "allow" && entry.action === "agent.create"),
+      entries.some((entry) => entry.decision === "deny" && entry.userName === "Bob"),
     ).toBe(true);
 
     await app.close();

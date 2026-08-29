@@ -1,4 +1,23 @@
-import type { Agent, AgentCheckpoint, AgentRun, AuditEntry, CheckpointDetails, CheckpointDiff, Message, RunDetails, SystemInfo, TraceEvent, User } from "./types";
+import type {
+  Agent,
+  AgentCheckpoint,
+  AgentRun,
+  AuditEntry,
+  CheckpointDetails,
+  CheckpointDiff,
+  CommitRequest,
+  Message,
+  ParentAgentView,
+  Project,
+  ProjectDetail,
+  ProjectMemberView,
+  RosterEntry,
+  RunDetails,
+  SecurityCheckResult,
+  SystemInfo,
+  TraceEvent,
+  User,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -129,6 +148,62 @@ export const api = {
     }),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
   runDetails: (id: string) => request<RunDetails>("/api/runs/" + id + "/details"),
+
+  projects: {
+    list: () => request<{ projects: Project[] }>("/api/projects"),
+    create: (name: string) =>
+      request<{ project: Project }>("/api/projects", {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      }),
+    get: (id: string) => request<ProjectDetail>("/api/projects/" + id),
+    tree: (id: string) => request<{ files: string[] }>("/api/projects/" + id + "/tree"),
+    file: (id: string, path: string) =>
+      request<{ path: string; content: string }>(
+        "/api/projects/" + id + "/file?path=" + encodeURIComponent(path),
+      ),
+    members: (id: string) =>
+      request<{ members: ProjectMemberView[] | RosterEntry[] }>(
+        "/api/projects/" + id + "/members",
+      ),
+    addMember: (id: string, body: { userName: string; role: string }) =>
+      request<{ member: import("./types").ProjectMember }>("/api/projects/" + id + "/members", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    updateMember: (id: string, memberId: string, body: { role: string }) =>
+      request<{ member: import("./types").ProjectMember }>(
+        "/api/projects/" + id + "/members/" + memberId,
+        { method: "PATCH", body: JSON.stringify(body) },
+      ),
+    removeMember: (id: string, memberId: string) =>
+      request<{ ok: true }>("/api/projects/" + id + "/members/" + memberId, {
+        method: "DELETE",
+      }),
+    parentAgent: (id: string) =>
+      request<ParentAgentView>("/api/projects/" + id + "/parent-agent"),
+    securityCheck: (id: string, memberId: string) =>
+      request<{ result: SecurityCheckResult }>(
+        "/api/projects/" + id + "/members/" + memberId + "/security-check",
+        { method: "POST" },
+      ),
+    submitCommitRequest: (
+      id: string,
+      memberId: string,
+      body: { title?: string; note?: string },
+    ) =>
+      request<{ request: CommitRequest }>(
+        "/api/projects/" + id + "/members/" + memberId + "/commit-request",
+        { method: "POST", body: JSON.stringify(body) },
+      ),
+    commitRequests: (id: string) =>
+      request<{ requests: CommitRequest[] }>("/api/projects/" + id + "/commit-requests"),
+    decideCommitRequest: (requestId: string, decision: "approved" | "rejected") =>
+      request<{ request: CommitRequest }>("/api/commit-requests/" + requestId + "/decide", {
+        method: "POST",
+        body: JSON.stringify({ decision }),
+      }),
+  },
   restoreCheckpoint: (id: string) =>
     request<{ checkpoint: AgentCheckpoint; workspacePath: string; workspaceHash: string }>("/api/checkpoints/" + id + "/restore", {
       method: "POST",

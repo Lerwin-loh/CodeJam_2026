@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import type { AgentService } from "./agent-service.js";
+import type { ProjectService } from "./project-service.js";
 import type { User } from "./types.js";
 
 declare module "fastify" {
@@ -42,11 +43,31 @@ const createCheckpointBody = z.object({
   label: z.string().trim().min(1).max(120),
 });
 
+const projectIdParams = z.object({ id: z.string().uuid() });
+const memberParams = z.object({
+  id: z.string().uuid(),
+  memberId: z.string().uuid(),
+});
+const createProjectBody = z.object({ name: z.string().trim().min(1).max(120) });
+const addMemberBody = z.object({
+  userName: z.string().trim().min(1).max(60),
+  role: z.string().trim().min(1).max(60),
+});
+const updateMemberBody = z.object({ role: z.string().trim().min(1).max(60) });
+const filePathQuery = z.object({ path: z.string().min(1).max(400) });
+const commitRequestBody = z.object({
+  title: z.string().trim().max(120).optional(),
+  note: z.string().trim().max(2000).optional(),
+});
+const decideCommitBody = z.object({ decision: z.enum(["approved", "rejected"]) });
+const commitRequestParams = z.object({ id: z.string().uuid() });
+
 const publicPaths = new Set(["/api/health", "/api/auth"]);
 
 export async function createApp(
   config: AppConfig,
   service: AgentService,
+  projects: ProjectService,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
@@ -104,23 +125,9 @@ export async function createApp(
 
   app.get("/api/system", async () => service.systemInfo());
 
-  app.get("/api/agents", async (request) => ({
-    agents: service.listAgents(request.user.id),
-  }));
-
-  app.post("/api/agents", async (request, reply) => {
-    const body = createAgentBody.parse(request.body);
-    const agent = await service.createAgent(body, request.user.id);
-    await service.recordAudit({
-      user: request.user,
-      agentId: agent.id,
-      action: "agent.create",
-      resource: "agent:" + agent.id,
-      decision: "allow",
-      reason: "Owner created the Agent",
-    });
-    return reply.code(201).send({ agent });
-  });
+  // Agents only exist inside a project — the parent agent for the owner, a child
+  // agent per member. They are created through the project routes below, never
+  // standalone. The per-agent routes that follow serve those project agents.
 
   app.get("/api/agents/:id", async (request) => {
     const { id } = agentIdParams.parse(request.params);
@@ -347,6 +354,123 @@ export async function createApp(
   app.post("/api/checkpoints/:id/restore", async (request) => {
     const { id } = checkpointIdParams.parse(request.params);
     return await service.restoreCheckpoint(id);
+  });
+
+  // --- Collaboration projects (Part 1: RBAC) ----------------------------------
+
+  app.post("/api/projects", async (request, reply) => {
+    const body = createProjectBody.parse(request.body);
+    const project = await projects.createProject(body.name, request.user.id);
+    return reply.code(201).send({ project });
+  });
+
+  app.get("/api/projects", async (request) => ({
+    projects: projects.listProjects(request.user.id),
+  }));
+
+  app.get("/api/projects/:id", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    return projects.getProject(id, request.user);
+  });
+
+  app.get("/api/projects/:id/tree", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.tree.read");
+    return { files: await projects.getMainTree(id) };
+  });
+
+  app.get("/api/projects/:id/file", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    const { path: filePath } = filePathQuery.parse(request.query);
+    await projects.assertProjectAccess(id, request.user, "file.read");
+    return { path: filePath, content: await projects.readMainFile(id, filePath) };
+  });
+
+  app.get("/api/projects/:id/members", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    const { role } = await projects.assertProjectAccess(id, request.user, "members.read");
+    return { members: projects.listMembers(id, role === "owner") };
+  });
+
+  app.post("/api/projects/:id/members", async (request, reply) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "member.manage");
+    const body = addMemberBody.parse(request.body);
+    const member = await projects.addMember(id, request.user, body);
+    return reply.code(201).send({ member });
+  });
+
+  app.patch("/api/projects/:id/members/:memberId", async (request) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "member.manage");
+    const body = updateMemberBody.parse(request.body);
+    const member = await projects.updateMember(id, memberId, body);
+    return { member };
+  });
+
+  app.delete("/api/projects/:id/members/:memberId", async (request) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "member.manage");
+    await projects.removeMember(id, memberId);
+    return { ok: true };
+  });
+
+  app.get("/api/projects/:id/parent-agent", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    const { project } = await projects.assertProjectAccess(id, request.user, "parent.read");
+    const agent = service.getAgent(project.parentAgentId);
+    return {
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        status: agent.status,
+        kind: agent.kind,
+      },
+      messages: service.getMessages(agent.id),
+      trace: service.getTrace(agent.id),
+      checkpoints: service.getCheckpoints(agent.id),
+    };
+  });
+
+  app.post("/api/projects/:id/members/:memberId/security-check", async (request) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "security.check", { memberId });
+    const result = await projects.runSecurityCheck(id, memberId);
+    return { result };
+  });
+
+  app.post("/api/projects/:id/members/:memberId/commit-request", async (request, reply) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.create", { memberId });
+    const body = commitRequestBody.parse(request.body);
+    const created = await projects.submitCommitRequest(id, memberId, body);
+    return reply.code(201).send({ request: created });
+  });
+
+  app.get("/api/projects/:id/commit-requests", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    const { role, member } = await projects.assertProjectAccess(
+      id,
+      request.user,
+      "commit.request.read",
+    );
+    return {
+      requests: projects.listCommitRequests(id, role === "owner" ? null : member),
+    };
+  });
+
+  app.post("/api/commit-requests/:id/decide", async (request) => {
+    const { id } = commitRequestParams.parse(request.params);
+    const existing = projects.getCommitRequest(id);
+    await projects.assertProjectAccess(
+      existing.projectId,
+      request.user,
+      "commit.request.decide",
+    );
+    const body = decideCommitBody.parse(request.body);
+    const updated = await projects.decideCommitRequest(id, body.decision, request.user);
+    return { request: updated };
   });
 
   if (config.nodeEnv === "production") {

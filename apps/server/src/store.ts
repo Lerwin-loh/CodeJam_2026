@@ -7,6 +7,9 @@ const emptyDatabase = (): Database => ({
   users: [],
   audit: [],
   agents: [],
+  projects: [],
+  projectMembers: [],
+  commitRequests: [],
   branches: [],
   messages: [],
   runs: [],
@@ -32,7 +35,11 @@ export class JsonStore {
       }
       parsed.users ??= [];
       parsed.audit ??= [];
+      parsed.projects ??= [];
+      parsed.projectMembers ??= [];
+      parsed.commitRequests ??= [];
       parsed.traces ??= [];
+      for (const member of parsed.projectMembers) member.lastSecurityCheck ??= null;
       parsed.branches ??= [];
       parsed.snapshots ??= [];
       parsed.contexts ??= [];
@@ -51,6 +58,9 @@ export class JsonStore {
       for (const event of parsed.traces) event.branchId ??= null;
       for (const agent of parsed.agents) {
         agent.ownerId ??= "";
+        agent.projectId ??= null;
+        agent.kind ??= "standalone";
+        agent.memberId ??= null;
       }
       this.data = parsed;
     } catch (error) {

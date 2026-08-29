@@ -200,30 +200,37 @@ export class AgentService {
     user: User,
     action: string,
   ): Promise<Agent> {
-    const agent = this.store
-      .snapshot()
-      .agents.find((item) => item.id === agentId);
+    const database = this.store.snapshot();
+    const agent = database.agents.find((item) => item.id === agentId);
     if (!agent) {
       throw new HttpError(404, "Agent not found");
     }
-    if (agent.ownerId !== user.id) {
-      await this.recordAudit({
-        user,
-        agentId: agent.id,
-        action,
-        resource: "agent:" + agent.id,
-        decision: "deny",
-        reason: "Agent belongs to a different user",
-      });
-      throw new HttpError(403, "You do not have access to this Agent");
+    if (agent.ownerId === user.id) {
+      return agent;
     }
-    return agent;
+    // The owner of a project may reach every Agent inside it (parent and children).
+    if (agent.projectId) {
+      const project = database.projects.find((item) => item.id === agent.projectId);
+      if (project && project.ownerId === user.id) {
+        return agent;
+      }
+    }
+    await this.recordAudit({
+      user,
+      agentId: agent.id,
+      action,
+      resource: "agent:" + agent.id,
+      decision: "deny",
+      reason: "Agent belongs to a different user",
+    });
+    throw new HttpError(403, "You do not have access to this Agent");
   }
 
+  /** Standalone Agents only. Project Agents are reached through the project routes. */
   listAgents(ownerId: string): Agent[] {
     return this.store
       .snapshot()
-      .agents.filter((agent) => agent.ownerId === ownerId)
+      .agents.filter((agent) => agent.ownerId === ownerId && agent.projectId === null)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
@@ -244,6 +251,9 @@ export class AgentService {
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
       ownerId,
+      projectId: null,
+      kind: "standalone",
+      memberId: null,
       status: "ready",
       workspacePath: this.workspaces.workspacePath(id),
       codexThreadId: null,
