@@ -155,6 +155,11 @@ export async function createApp(
     return { diff: await service.getCheckpointDiff(id) };
   });
 
+  app.post("/api/checkpoints/:id/restore", async (request) => {
+    const { id } = checkpointIdParams.parse(request.params);
+    return await service.restoreCheckpoint(id);
+  });
+
   if (config.nodeEnv === "production") {
     const webRoot = fileURLToPath(new URL("../../web/dist", import.meta.url));
     await app.register(fastifyStatic, {

@@ -411,6 +411,19 @@ export class AgentService {
     };
   }
 
+  async restoreCheckpoint(checkpointId: string): Promise<{ checkpoint: AgentCheckpoint; workspacePath: string }> {
+    const checkpoint = this.getCheckpoint(checkpointId);
+    const agent = this.getAgent(checkpoint.agentId);
+    const snapshot = this.store
+      .snapshot()
+      .snapshots.find((item) => item.id === checkpoint.snapshotId);
+    if (!snapshot) {
+      throw new HttpError(500, "Checkpoint snapshot is missing");
+    }
+    await this.history.restoreSnapshot(snapshot, agent.workspacePath);
+    return { checkpoint, workspacePath: agent.workspacePath };
+  }
+
   getTrace(agentId: string): TraceEvent[] {
     this.getAgent(agentId);
     return this.store

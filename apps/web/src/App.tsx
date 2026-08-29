@@ -304,6 +304,29 @@ export default function App() {
     }
   };
 
+  const restoreCheckpoint = async (checkpoint: AgentCheckpoint) => {
+    if (!selected) return;
+    const confirmed = window.confirm(
+      "Restore this checkpoint into the active workspace? This will replace the current workspace state with the saved snapshot.",
+    );
+    if (!confirmed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.restoreCheckpoint(checkpoint.id);
+      setCheckpointOverlay(null);
+      setSelectedCheckpointId(null);
+      setError("Workspace restored to checkpoint " + checkpoint.id.slice(0, 8));
+      await Promise.all([refreshMessages(selected.id), refreshBranchPoint(selected.id), api.runs(selected.id)]).then(([, , result]) => {
+        setRuns(result.runs);
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const unlock = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true);
@@ -806,7 +829,7 @@ export default function App() {
                       </div>
                       <div className="checkpoint-buttons">
                         <button className="button button-primary" type="button" onClick={() => setCheckpointOverlay({ kind: "unavailable", checkpoint })}>Branch from here</button>
-                        <button className="button button-ghost" type="button" onClick={() => setCheckpointOverlay({ kind: "unavailable", checkpoint })}>Restore in new branch</button>
+                        <button className="button button-ghost" type="button" onClick={() => void restoreCheckpoint(checkpoint)}>Restore workspace</button>
                         <button className="button button-ghost" type="button" onClick={() => void openCheckpointAction("diff", checkpoint)}>View diff</button>
                         <button className="button button-ghost" type="button" onClick={() => void openCheckpointAction("details", checkpoint)}>View details</button>
                       </div>

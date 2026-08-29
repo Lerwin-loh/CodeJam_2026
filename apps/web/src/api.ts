@@ -77,6 +77,10 @@ export const api = {
     request<CheckpointDetails>("/api/checkpoints/" + id + "/details"),
   checkpointDiff: (id: string) =>
     request<{ diff: CheckpointDiff }>("/api/checkpoints/" + id + "/diff"),
+  restoreCheckpoint: (id: string) =>
+    request<{ checkpoint: AgentCheckpoint; workspacePath: string }>("/api/checkpoints/" + id + "/restore", {
+      method: "POST",
+    }),
   sendMessage: (id: string, content: string) =>
     request<{ run: AgentRun; message: Message }>(
       "/api/agents/" + id + "/messages",

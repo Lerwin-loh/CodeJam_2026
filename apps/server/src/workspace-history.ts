@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile, chmod } from "node:fs/promises";
 import path from "node:path";
 import type {
   ChangedFiles,
@@ -96,6 +96,36 @@ export class WorkspaceHistory {
       return content.slice(0, 50_000);
     } catch {
       return null;
+    }
+  }
+
+  async restoreSnapshot(snapshot: WorkspaceSnapshot, workspacePath: string): Promise<void> {
+    await mkdir(workspacePath, { recursive: true });
+    const allowedFiles = new Set(snapshot.manifest.files.map((file) => file.path));
+    await this.removeUnexpectedFiles(workspacePath, allowedFiles);
+
+    for (const file of snapshot.manifest.files) {
+      const source = path.join(snapshot.directory, "files", file.path);
+      const destination = path.join(workspacePath, file.path);
+      await mkdir(path.dirname(destination), { recursive: true });
+      await cp(source, destination, { force: true, recursive: false, preserveTimestamps: true });
+      await chmod(destination, file.mode);
+    }
+  }
+
+  private async removeUnexpectedFiles(workspacePath: string, allowedFiles: Set<string>): Promise<void> {
+    const entries = await readdir(workspacePath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (ignoredNames.has(entry.name)) continue;
+      const absolutePath = path.join(workspacePath, entry.name);
+      const relativePath = path.relative(workspacePath, absolutePath).split(path.sep).join("/");
+      if (!allowedFiles.has(relativePath)) {
+        await rm(absolutePath, { recursive: true, force: true });
+        continue;
+      }
+      if (entry.isDirectory()) {
+        await this.removeUnexpectedFiles(absolutePath, allowedFiles);
+      }
     }
   }
 
