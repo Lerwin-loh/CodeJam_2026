@@ -184,6 +184,39 @@ describe("Agent lifecycle", () => {
     expect(await readFile(path.join(agent.workspacePath, "restore-me.txt"), "utf8")).toBe("later state\n");
   });
 
+  it("creates an independent branch workspace and records branch provenance", async () => {
+    const service = await makeService({
+      run: async (request) => {
+        if (request.prompt === "main change") {
+          await writeFile(path.join(request.workspacePath, "main.txt"), "main\n");
+        }
+        if (request.prompt === "branch change") {
+          await writeFile(path.join(request.workspacePath, "branch.txt"), "branch\n");
+        }
+        return { output: "done", threadId: request.threadId ?? "branch-thread", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Branches" });
+    const mainRun = await service.sendMessage(agent.id, "main change");
+    await expect.poll(() => service.getRun(mainRun.run.id).status).toBe("completed");
+    const checkpoint = service.getCheckpoints(agent.id)[0];
+    expect(checkpoint).toBeDefined();
+    if (!checkpoint) return;
+
+    const branch = await service.createBranchFromCheckpoint(agent.id, checkpoint.id, "try-alternative");
+    expect(service.getMessages(agent.id, branch.id).map((message) => message.content)).toContain("main change");
+    expect(service.getRuns(agent.id, branch.id).map((run) => run.id)).toContain(mainRun.run.id);
+    const branchRun = await service.sendMessage(agent.id, "branch change", branch.id);
+    await expect.poll(() => service.getRun(branchRun.run.id).status).toBe("completed");
+
+    expect(service.getRun(branchRun.run.id).branchId).toBe(branch.id);
+    expect(await readFile(path.join(branch.workspacePath, "main.txt"), "utf8")).toBe("main\n");
+    expect(await readFile(path.join(branch.workspacePath, "branch.txt"), "utf8")).toBe("branch\n");
+    await expect(readFile(path.join(agent.workspacePath, "branch.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("atomically accepts only one concurrent run per Agent", async () => {
     let finish!: (result: RunnerResult) => void;
     const pending = new Promise<RunnerResult>((resolve) => {

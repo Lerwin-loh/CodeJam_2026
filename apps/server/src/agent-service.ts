@@ -166,12 +166,13 @@ export class AgentService {
         agent.workspacePath,
         after,
       );
-      const messages = this.getMessages(agent.id);
+      const messages = this.getMessages(agent.id, run.branchId);
       if (output) {
         messages.push({
           id: randomUUID(),
           agentId: agent.id,
           runId: run.id,
+          branchId: run.branchId,
           role: "assistant",
           content: output,
           createdAt: now(),
@@ -191,11 +192,12 @@ export class AgentService {
       const parentCheckpointId = this.store
         .snapshot()
         .checkpoints
-        .filter((checkpoint) => checkpoint.agentId === agent.id)
+        .filter((checkpoint) => checkpoint.agentId === agent.id && checkpoint.branchId === run.branchId)
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]?.id ?? null;
       const checkpoint: AgentCheckpoint = {
         id: randomUUID(),
         agentId: agent.id,
+        branchId: run.branchId,
         runId: run.id,
         parentCheckpointId,
         snapshotId: snapshot.id,
@@ -238,6 +240,7 @@ export class AgentService {
         id: randomUUID(),
         runId: run.id,
         agentId: run.agentId,
+        branchId: run.branchId,
         type,
         timestamp: now(),
         metadata: {
@@ -314,11 +317,38 @@ export class AgentService {
     return this.setStatus(id, "stopped");
   }
 
-  getMessages(agentId: string): Message[] {
+  private branchHistoryLimits(database: import("./types.js").Database, agentId: string, branchId: string | null): Map<string | null, string> {
+    if (!branchId) return new Map([[null, "\uffff"]]);
+    const limits = new Map<string | null, string>([[branchId, "\uffff"]]);
+    let current = database.branches.find((branch) => branch.id === branchId);
+    while (current) {
+      const checkpoint = database.checkpoints.find((item) => item.id === current?.parentCheckpointId);
+      const checkpointRun = checkpoint ? database.runs.find((run) => run.id === checkpoint.runId) : null;
+      const cutoff = checkpointRun?.completedAt ?? checkpoint?.createdAt ?? "";
+      const sourceBranchId = current.parentBranchId;
+      const previous = limits.get(sourceBranchId);
+      if (!previous || cutoff < previous) limits.set(sourceBranchId, cutoff);
+      current = sourceBranchId
+        ? database.branches.find((branch) => branch.id === sourceBranchId)
+        : undefined;
+    }
+    return limits;
+  }
+
+  private visibleOnBranch(database: import("./types.js").Database, agentId: string, branchId: string | null, itemBranchId: string | null, createdAt: string): boolean {
+    if (branchId === null) return itemBranchId === null;
+    if (itemBranchId === branchId) return true;
+    const limit = this.branchHistoryLimits(database, agentId, branchId).get(itemBranchId);
+    return limit !== undefined && createdAt <= limit;
+  }
+
+  getMessages(agentId: string, branchId: string | null = null): Message[] {
     this.getAgent(agentId);
+    const database = this.store.snapshot();
     return this.store
       .snapshot()
       .messages.filter((message) => message.agentId === agentId)
+      .filter((message) => this.visibleOnBranch(database, agentId, branchId, message.branchId, message.createdAt))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
@@ -355,20 +385,67 @@ export class AgentService {
     return { checkpoint, workspacePath, workspaceHash: snapshot.manifest.workspaceHash };
   }
 
-  getRuns(agentId: string): AgentRun[] {
+  getRuns(agentId: string, branchId: string | null = null): AgentRun[] {
     this.getAgent(agentId);
+    const database = this.store.snapshot();
     return this.store
       .snapshot()
       .runs.filter((run) => run.agentId === agentId)
+      .filter((run) => this.visibleOnBranch(database, agentId, branchId, run.branchId, run.createdAt))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
-  getCheckpoints(agentId: string): AgentCheckpoint[] {
+  getBranches(agentId: string): import("./types.js").AgentBranch[] {
     this.getAgent(agentId);
+    return this.store.snapshot().branches
+      .filter((branch) => branch.agentId === agentId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  getBranch(id: string): import("./types.js").AgentBranch {
+    const branch = this.store.snapshot().branches.find((item) => item.id === id);
+    if (!branch) throw new HttpError(404, "Branch not found");
+    return branch;
+  }
+
+  async createBranchFromCheckpoint(
+    agentId: string,
+    checkpointId: string,
+    name: string,
+  ): Promise<import("./types.js").AgentBranch> {
+    const agent = this.getAgent(agentId);
+    const database = this.store.snapshot();
+    const checkpoint = database.checkpoints.find((item) => item.id === checkpointId);
+    if (!checkpoint || checkpoint.agentId !== agentId) throw new HttpError(404, "Checkpoint not found");
+    const snapshot = database.snapshots.find((item) => item.id === checkpoint.snapshotId);
+    if (!snapshot) throw new HttpError(500, "Checkpoint snapshot is missing");
+    const branchId = randomUUID();
+    const branch: import("./types.js").AgentBranch = {
+      id: branchId,
+      agentId,
+      name: name.trim(),
+      parentBranchId: checkpoint.branchId,
+      parentCheckpointId: checkpointId,
+      workspacePath: this.workspaces.branchWorkspacePath(agentId, branchId),
+      codexThreadId: null,
+      status: "ready",
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    await mkdir(path.dirname(branch.workspacePath), { recursive: true });
+    await this.history.restoreSnapshot(snapshot, branch.workspacePath);
+    await this.store.mutate((next) => next.branches.push(branch));
+    return branch;
+  }
+
+  getCheckpoints(agentId: string, branchId: string | null = null): AgentCheckpoint[] {
+    this.getAgent(agentId);
+    const database = this.store.snapshot();
     return this.store
       .snapshot()
       .checkpoints
       .filter((checkpoint) => checkpoint.agentId === agentId)
+      .filter((checkpoint) => this.visibleOnBranch(database, agentId, branchId, checkpoint.branchId, checkpoint.createdAt))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
@@ -442,12 +519,14 @@ export class AgentService {
     };
   }
 
-  getTrace(agentId: string): TraceEvent[] {
+  getTrace(agentId: string, branchId: string | null = null): TraceEvent[] {
     this.getAgent(agentId);
+    const database = this.store.snapshot();
     return this.store
       .snapshot()
       .traces
       .filter((event) => event.agentId === agentId)
+      .filter((event) => this.visibleOnBranch(database, agentId, branchId, event.branchId, event.timestamp))
       .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
   }
 
@@ -459,7 +538,9 @@ export class AgentService {
     const listeners = this.traceListeners.get(runId) ?? new Set<(event: TraceEvent) => void>();
     listeners.add(listener);
     this.traceListeners.set(runId, listeners);
-    const events = this.getTrace(run.agentId).filter((event) => event.runId === runId);
+    const events = this.store.snapshot().traces
+      .filter((event) => event.runId === runId)
+      .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
     return {
       events,
       unsubscribe: () => {
@@ -472,6 +553,7 @@ export class AgentService {
   async sendMessage(
     agentId: string,
     prompt: string,
+    branchId: string | null = null,
   ): Promise<{ run: AgentRun; message: Message }> {
     if (!isArkConfigured(this.config)) {
       throw new HttpError(
@@ -480,10 +562,13 @@ export class AgentService {
       );
     }
     const timestamp = now();
+    const branch = branchId ? this.getBranch(branchId) : null;
+    if (branch && branch.agentId !== agentId) throw new HttpError(404, "Branch not found");
     const runId = randomUUID();
     const run: AgentRun = {
       id: runId,
       agentId,
+      branchId,
       status: "queued",
       prompt,
       output: null,
@@ -500,6 +585,7 @@ export class AgentService {
       id: randomUUID(),
       agentId,
       runId,
+      branchId,
       role: "user",
       content: prompt,
       createdAt: timestamp,
@@ -512,23 +598,35 @@ export class AgentService {
       if (storedAgent.status === "stopped") {
         throw new HttpError(409, "Start the Agent before sending a message");
       }
-      if (storedAgent.status === "busy") {
+      if (!branchId && storedAgent.status === "busy") {
         throw new HttpError(409, "This Agent is already running");
+      }
+      const storedBranch = branchId
+        ? database.branches.find((item) => item.id === branchId && item.agentId === agentId)
+        : null;
+      if (branchId && (!storedBranch || storedBranch.status === "busy")) {
+        throw new HttpError(409, storedBranch ? "This branch is already running" : "Branch not found");
       }
       database.runs.push(run);
       database.messages.push(message);
       const snapshot = structuredClone(storedAgent);
-      storedAgent.status = "busy";
-      storedAgent.lastError = null;
+      if (storedBranch) {
+        storedBranch.status = "busy";
+        storedBranch.updatedAt = timestamp;
+      } else {
+        storedAgent.status = "busy";
+        storedAgent.lastError = null;
+      }
       storedAgent.updatedAt = timestamp;
       return snapshot;
     });
     const execution = this.executeRun(agentAtStart, run);
-    this.activeExecutions.set(agentId, execution);
+    const executionKey = branchId ?? agentId;
+    this.activeExecutions.set(executionKey, execution);
     void execution
       .finally(() => {
-        if (this.activeExecutions.get(agentId) === execution) {
-          this.activeExecutions.delete(agentId);
+        if (this.activeExecutions.get(executionKey) === execution) {
+          this.activeExecutions.delete(executionKey);
         }
       })
       .catch(() => undefined);
@@ -555,6 +653,11 @@ export class AgentService {
   }
 
   private async executeRun(agentAtStart: Agent, run: AgentRun): Promise<void> {
+    const branch = run.branchId ? this.getBranch(run.branchId) : null;
+    const executionAgent = branch
+      ? { ...agentAtStart, workspacePath: branch.workspacePath, codexThreadId: branch.codexThreadId }
+      : agentAtStart;
+    const runnerAgentId = branch?.id ?? agentAtStart.id;
     let before: WorkspaceManifest | null = null;
     await this.store.mutate((database) => {
       const storedRun = database.runs.find((item) => item.id === run.id);
@@ -563,19 +666,19 @@ export class AgentService {
         storedRun.startedAt = now();
       }
     });
-    await this.trace(run, "run.started", { workspacePath: agentAtStart.workspacePath });
+    await this.trace(run, "run.started", { workspacePath: executionAgent.workspacePath });
     try {
-      if (this.cancellationRequests.has(agentAtStart.id)) {
+      if (this.cancellationRequests.has(runnerAgentId)) {
         throw new RunCancelledError();
       }
-      before = await this.history.manifest(agentAtStart.workspacePath);
+      before = await this.history.manifest(executionAgent.workspacePath);
       await this.updateRunWorkspace(run.id, before.workspaceHash, null);
       let streamedRunnerEvents = 0;
       const result = await this.runner.run({
-        agentId: agentAtStart.id,
-        workspacePath: agentAtStart.workspacePath,
+        agentId: runnerAgentId,
+        workspacePath: executionAgent.workspacePath,
         prompt: run.prompt,
-        threadId: agentAtStart.codexThreadId,
+        threadId: executionAgent.codexThreadId,
         onEvent: (event) => {
           streamedRunnerEvents += 1;
           void this.trace(run, "codex.event", {
@@ -593,13 +696,14 @@ export class AgentService {
         }
       }
       const checkpoint = before
-        ? await this.captureCheckpoint(agentAtStart, run, before, "complete", result.output, result.threadId)
+        ? await this.captureCheckpoint(executionAgent, run, before, "complete", result.output, result.threadId)
         : null;
       const completedAt = now();
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
-        if (!storedRun || !agent) return;
+        const branchRecord = run.branchId ? database.branches.find((item) => item.id === run.branchId) : null;
+        if (!storedRun || !agent || (run.branchId && !branchRecord)) return;
         storedRun.status = "completed";
         storedRun.output = result.output;
         storedRun.usage = result.usage;
@@ -610,13 +714,20 @@ export class AgentService {
           id: randomUUID(),
           agentId: agent.id,
           runId: run.id,
+          branchId: run.branchId,
           role: "assistant",
           content: result.output,
           createdAt: completedAt,
         });
-        agent.status = "ready";
-        agent.codexThreadId = result.threadId;
-        agent.lastError = null;
+        if (branchRecord) {
+          branchRecord.status = "ready";
+          branchRecord.codexThreadId = result.threadId;
+          branchRecord.updatedAt = completedAt;
+        } else {
+          agent.status = "ready";
+          agent.codexThreadId = result.threadId;
+          agent.lastError = null;
+        }
         agent.updatedAt = completedAt;
       });
       await this.trace(run, "run.completed", {
@@ -629,7 +740,7 @@ export class AgentService {
       const message = error instanceof Error ? error.message : String(error);
       const checkpoint = before
         ? await this.captureCheckpoint(
-            agentAtStart,
+            executionAgent,
             run,
             before,
             "partial",
@@ -640,6 +751,7 @@ export class AgentService {
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
+        const branchRecord = run.branchId ? database.branches.find((item) => item.id === run.branchId) : null;
         if (storedRun) {
           storedRun.status = cancelled ? "cancelled" : "failed";
           storedRun.error = message;
@@ -647,7 +759,10 @@ export class AgentService {
           storedRun.afterWorkspaceHash = checkpoint?.workspaceHash ?? before?.workspaceHash ?? null;
           storedRun.checkpointId = checkpoint?.id ?? null;
         }
-        if (agent) {
+        if (branchRecord) {
+          branchRecord.status = cancelled ? "ready" : "error";
+          branchRecord.updatedAt = completedAt;
+        } else if (agent) {
           if (agent.status !== "stopped") {
             agent.status = cancelled ? "ready" : "error";
           }
