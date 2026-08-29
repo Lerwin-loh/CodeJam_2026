@@ -1,7 +1,8 @@
+import * as fs from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { JsonStore } from "./store.js";
 
 const temporaryDirectories: string[] = [];
@@ -52,5 +53,28 @@ describe("JsonStore", () => {
     expect(store.snapshot().messages.map((message) => message.content)).toEqual([
       "queue recovered",
     ]);
+  });
+
+  it("falls back when rename is blocked by the OS or cloud sync layer", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-rename-test-"));
+    temporaryDirectories.push(root);
+    const originalPath = path.join(root, "db.json");
+    const store = new JsonStore(originalPath);
+    await store.initialize();
+
+    const renameSpy = vi.spyOn(fs, "rename").mockRejectedValueOnce(Object.assign(new Error("EPERM"), { code: "EPERM" }));
+    await store.mutate((database) => {
+      database.messages.push({
+        id: "message-3",
+        agentId: "agent-2",
+        runId: "run-3",
+        role: "user",
+        content: "fallback persisted",
+        createdAt: new Date().toISOString(),
+      });
+    });
+
+    expect(store.snapshot().messages.map((message) => message.content)).toContain("fallback persisted");
+    renameSpy.mockRestore();
   });
 });

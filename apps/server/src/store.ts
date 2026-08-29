@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "./types.js";
 
@@ -12,6 +12,7 @@ const emptyDatabase = (): Database => ({
   snapshots: [],
   contexts: [],
   checkpoints: [],
+  mergeProposals: [],
 });
 
 export class JsonStore {
@@ -21,9 +22,9 @@ export class JsonStore {
   constructor(private readonly filePath: string) {}
 
   async initialize(): Promise<void> {
-    await mkdir(path.dirname(this.filePath), { recursive: true });
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     try {
-      const raw = await readFile(this.filePath, "utf8");
+      const raw = await fs.readFile(this.filePath, "utf8");
       const parsed = JSON.parse(raw) as Database;
       if (parsed.version !== 1 || !Array.isArray(parsed.agents)) {
         throw new Error("Unsupported database format");
@@ -33,6 +34,7 @@ export class JsonStore {
       parsed.snapshots ??= [];
       parsed.contexts ??= [];
       parsed.checkpoints ??= [];
+      parsed.mergeProposals ??= [];
       for (const run of parsed.runs) {
         run.branchId ??= null;
         run.beforeWorkspaceHash ??= null;
@@ -55,6 +57,20 @@ export class JsonStore {
     return structuredClone(this.data);
   }
 
+  private async persistAtomically(sourcePath: string, destinationPath: string): Promise<void> {
+    try {
+      await fs.rename(sourcePath, destinationPath);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") {
+        throw error;
+      }
+    }
+    await fs.copyFile(sourcePath, destinationPath);
+    await fs.unlink(sourcePath);
+  }
+
   async mutate<T>(mutation: (database: Database) => T | Promise<T>): Promise<T> {
     let result!: T;
     const operation = this.queue.then(async () => {
@@ -70,10 +86,10 @@ export class JsonStore {
 
   private async persist(data: Database = this.data): Promise<void> {
     const temporaryPath = this.filePath + ".tmp";
-    await writeFile(temporaryPath, JSON.stringify(data, null, 2) + "\n", {
+    await fs.writeFile(temporaryPath, JSON.stringify(data, null, 2) + "\n", {
       encoding: "utf8",
       mode: 0o600,
     });
-    await rename(temporaryPath, this.filePath);
+    await this.persistAtomically(temporaryPath, this.filePath);
   }
 }
