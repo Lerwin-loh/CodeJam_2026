@@ -16,6 +16,12 @@ Requirements:
 ARK_API_KEY=your-ark-api-key ARK_MODEL=ep-your-endpoint-id npm run poc
 ```
 
+If a `.env` file is present, the launcher loads `ARK_API_KEY`, `ARK_MODEL`,
+`ARK_BASE_URL`, and `APP_AUTH_TOKEN` from it. Values explicitly set in the
+shell take precedence. This is important when using a BytePlus/Southeast Asia
+key: set `ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3` rather
+than allowing the Beijing default.
+
 Open <http://localhost:3000>. Press `Ctrl+C` to stop the server and remove this
 instance's remaining Runtime containers.
 

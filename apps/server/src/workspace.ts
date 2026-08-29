@@ -9,6 +9,10 @@ export class WorkspaceManager {
     return path.join(this.root, agentId);
   }
 
+  branchWorkspacePath(agentId: string, branchId: string): string {
+    return path.join(this.root, agentId, "branches", branchId);
+  }
+
   async initialize(): Promise<void> {
     await mkdir(this.root, { recursive: true });
     await mkdir(path.join(this.root, ".deleted"), { recursive: true });

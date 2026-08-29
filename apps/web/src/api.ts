@@ -1,4 +1,4 @@
-import type { Agent, AgentCheckpoint, AgentRun, CheckpointDetails, CheckpointDiff, Message, SystemInfo, TraceEvent } from "./types";
+import type { Agent, AgentCheckpoint, AgentRun, CheckpointDetails, CheckpointDiff, Message, RunDetails, SystemInfo, TraceEvent } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -13,6 +13,10 @@ let authToken = "";
 
 export function setAuthToken(token: string): void {
   authToken = token.trim();
+}
+
+function branchUrl(url: string, branchId: string | null): string {
+  return branchId ? url + "?branchId=" + encodeURIComponent(branchId) : url;
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -65,29 +69,62 @@ export const api = {
     request<{ agent: Agent }>("/api/agents/" + id + "/stop", {
       method: "POST",
     }),
-  messages: (id: string) =>
-    request<{ messages: Message[] }>("/api/agents/" + id + "/messages"),
-  runs: (id: string) =>
-    request<{ runs: AgentRun[] }>("/api/agents/" + id + "/runs"),
-  checkpoints: (id: string) =>
-    request<{ checkpoints: AgentCheckpoint[] }>("/api/agents/" + id + "/checkpoints"),
-  trace: (id: string) =>
-    request<{ events: TraceEvent[] }>("/api/agents/" + id + "/trace"),
+  messages: (id: string, branchId: string | null = null) =>
+    request<{ messages: Message[] }>(branchUrl("/api/agents/" + id + "/messages", branchId)),
+  runs: (id: string, branchId: string | null = null) =>
+    request<{ runs: AgentRun[] }>(branchUrl("/api/agents/" + id + "/runs", branchId)),
+  checkpoints: (id: string, branchId: string | null = null) =>
+    request<{ checkpoints: AgentCheckpoint[] }>(branchUrl("/api/agents/" + id + "/checkpoints", branchId)),
+  branches: (id: string) =>
+    request<{ branches: import("./types").AgentBranch[] }>("/api/agents/" + id + "/branches"),
+  trace: (id: string, branchId: string | null = null) =>
+    request<{ events: TraceEvent[] }>(branchUrl("/api/agents/" + id + "/trace", branchId)),
   checkpointDetails: (id: string) =>
     request<CheckpointDetails>("/api/checkpoints/" + id + "/details"),
   checkpointDiff: (id: string) =>
     request<{ diff: CheckpointDiff }>("/api/checkpoints/" + id + "/diff"),
-  restoreCheckpoint: (id: string) =>
-    request<{ checkpoint: AgentCheckpoint; workspacePath: string }>("/api/checkpoints/" + id + "/restore", {
-      method: "POST",
-    }),
-  sendMessage: (id: string, content: string) =>
+  sendMessage: (id: string, content: string, branchId: string | null = null) =>
     request<{ run: AgentRun; message: Message }>(
       "/api/agents/" + id + "/messages",
       {
         method: "POST",
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, branchId }),
       },
     ),
+  createBranch: (id: string, checkpointId: string, name: string) =>
+    request<{ branch: import("./types").AgentBranch }>("/api/agents/" + id + "/branches", {
+      method: "POST",
+      body: JSON.stringify({ checkpointId, name }),
+    }),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
+  runDetails: (id: string) => request<RunDetails>("/api/runs/" + id + "/details"),
+  restoreCheckpoint: (id: string) =>
+    request<{ checkpoint: AgentCheckpoint; workspacePath: string; workspaceHash: string }>("/api/checkpoints/" + id + "/restore", {
+      method: "POST",
+    }),
+  streamRunTrace: async (id: string, onEvent: (event: TraceEvent) => void, signal?: AbortSignal): Promise<void> => {
+    const response = await fetch("/api/runs/" + id + "/trace/stream", {
+      headers: authToken ? { Authorization: "Bearer " + authToken } : undefined,
+      signal,
+    });
+    if (!response.ok || !response.body) {
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new ApiError(data.error ?? "Trace stream failed", response.status);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
+        if (!dataLine) continue;
+        try { onEvent(JSON.parse(dataLine.slice(6)) as TraceEvent); } catch { /* refresh fallback */ }
+      }
+      if (done) return;
+    }
+  },
 };

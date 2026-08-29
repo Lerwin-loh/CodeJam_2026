@@ -15,6 +15,34 @@ log() {
   printf '[local-poc] %s\n' "$*" >&2
 }
 
+# Load simple KEY=value entries from the local env file as defaults. Keep
+# values supplied by the shell authoritative, so this still supports:
+#   ARK_BASE_URL=... ARK_API_KEY=... npm run poc
+load_env_default() {
+  local name="$1"
+  local env_file="${LAUNCHPAD_ENV_FILE:-.env}"
+  [[ -n "${!name:-}" || ! -f "$env_file" ]] && return 0
+  local value
+  value="$(awk -v key="$name" '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub("^[[:space:]]*" key "[[:space:]]*=", "")
+      sub("[[:space:]]*#.*$", "")
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+      if ((substr($0, 1, 1) == "\"" && substr($0, length($0), 1) == "\"") ||
+          (substr($0, 1, 1) == "\x27" && substr($0, length($0), 1) == "\x27")) {
+        $0 = substr($0, 2, length($0) - 2)
+      }
+      print
+      exit
+    }
+  ' "$env_file")"
+  [[ -n "$value" ]] && export "$name=$value"
+}
+
+for env_name in ARK_API_KEY ARK_MODEL ARK_BASE_URL APP_AUTH_TOKEN; do
+  load_env_default "$env_name"
+done
+
 engine_works() {
   "$1" info >/dev/null 2>&1
 }

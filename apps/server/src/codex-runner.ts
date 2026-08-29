@@ -46,7 +46,7 @@ export function buildCodexArgs(
   return args;
 }
 
-export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
+export function parseCodexEventLine(line: string, parsed: ParsedEvents, onEvent?: (event: RunnerEvent) => void): void {
   let event: Record<string, unknown>;
   try {
     event = JSON.parse(line) as Record<string, unknown>;
@@ -73,7 +73,9 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents): void {
     }
     const output = boundedText(item.aggregated_output ?? item.text);
     if (output) metadata.output = output;
-    (parsed.events ??= []).push({ type: String(item.type ?? "item"), metadata });
+    const runnerEvent = { type: String(item.type ?? "item"), metadata };
+    (parsed.events ??= []).push(runnerEvent);
+    onEvent?.(runnerEvent);
   }
 
   if (event.type === "item.completed" && event.item && typeof event.item === "object") {
@@ -195,7 +197,7 @@ export class CodexRunner implements AgentRunner {
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
         for (const line of lines) {
-          parseCodexEventLine(line, parsed);
+          parseCodexEventLine(line, parsed, request.onEvent);
         }
       } else {
         stderr += chunk.toString("utf8");
@@ -220,7 +222,7 @@ export class CodexRunner implements AgentRunner {
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) {
-        parseCodexEventLine(stdout.trim(), parsed);
+        parseCodexEventLine(stdout.trim(), parsed, request.onEvent);
       }
       if (active.cancelled) {
         throw new RunCancelledError();
@@ -243,7 +245,7 @@ export class CodexRunner implements AgentRunner {
         output,
         threadId: parsed.threadId,
         usage: parsed.usage,
-        events: [],
+        events: parsed.events ?? [],
       };
     } finally {
       clearTimeout(timeout);

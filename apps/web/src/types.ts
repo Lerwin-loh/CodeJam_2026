@@ -14,10 +14,24 @@ export interface Agent {
   updatedAt: string;
 }
 
+export interface AgentBranch {
+  id: string;
+  agentId: string;
+  name: string;
+  parentBranchId: string | null;
+  parentCheckpointId: string | null;
+  workspacePath: string;
+  codexThreadId: string | null;
+  status: AgentStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Message {
   id: string;
   agentId: string;
   runId: string;
+  branchId: string | null;
   role: "user" | "assistant";
   content: string;
   createdAt: string;
@@ -26,6 +40,7 @@ export interface Message {
 export interface AgentRun {
   id: string;
   agentId: string;
+  branchId: string | null;
   status: RunStatus;
   prompt: string;
   output: string | null;
@@ -41,6 +56,11 @@ export interface AgentRun {
   checkpointId: string | null;
 }
 
+export interface RunDetails {
+  run: AgentRun;
+  trace: TraceEvent[];
+}
+
 export interface ChangedFiles {
   created: string[];
   modified: string[];
@@ -50,6 +70,7 @@ export interface ChangedFiles {
 export interface AgentCheckpoint {
   id: string;
   agentId: string;
+  branchId: string | null;
   runId: string;
   parentCheckpointId: string | null;
   snapshotId: string;
@@ -65,6 +86,7 @@ export interface TraceEvent {
   id: string;
   runId: string;
   agentId: string;
+  branchId: string | null;
   type: string;
   timestamp: string;
   metadata: Record<string, unknown>;

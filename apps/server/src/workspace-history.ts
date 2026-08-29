@@ -99,17 +99,17 @@ export class WorkspaceHistory {
     }
   }
 
-  async restoreSnapshot(snapshot: WorkspaceSnapshot, workspacePath: string): Promise<void> {
-    await mkdir(workspacePath, { recursive: true });
+  async restoreSnapshot(snapshot: WorkspaceSnapshot, destination: string): Promise<void> {
+    await mkdir(destination, { recursive: true });
     const allowedFiles = new Set(snapshot.manifest.files.map((file) => file.path));
-    await this.removeUnexpectedFiles(workspacePath, allowedFiles);
+    await this.removeUnexpectedFiles(destination, allowedFiles);
 
     for (const file of snapshot.manifest.files) {
       const source = path.join(snapshot.directory, "files", file.path);
-      const destination = path.join(workspacePath, file.path);
-      await mkdir(path.dirname(destination), { recursive: true });
-      await cp(source, destination, { force: true, recursive: false, preserveTimestamps: true });
-      await chmod(destination, file.mode);
+      const target = path.join(destination, file.path);
+      await mkdir(path.dirname(target), { recursive: true });
+      await cp(source, target, { force: true, recursive: false, preserveTimestamps: true });
+      await chmod(target, file.mode);
     }
   }
 

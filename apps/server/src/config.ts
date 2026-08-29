@@ -49,6 +49,11 @@ const envSchema = z.object({
 
 export type AppConfig = ReturnType<typeof loadConfig>;
 
+function normalizePath(value: string): string {
+  if (value.startsWith("/")) return value;
+  return path.resolve(value);
+}
+
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const env = envSchema.parse(environment);
   const authToken = env.APP_AUTH_TOKEN?.trim() ?? "";
@@ -68,9 +73,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     host: env.HOST,
     port: env.PORT,
     logLevel: env.LOG_LEVEL,
-    dataDirectory: path.resolve(env.APP_DATA_DIR),
-    workspaceRoot: path.resolve(env.AGENT_WORKSPACE_ROOT),
-    codexHome: path.resolve(env.CODEX_HOME),
+    dataDirectory: normalizePath(env.APP_DATA_DIR),
+    workspaceRoot: normalizePath(env.AGENT_WORKSPACE_ROOT),
+    codexHome: normalizePath(env.CODEX_HOME),
     codexBin: env.CODEX_BIN,
     codexSandboxMode: env.CODEX_SANDBOX_MODE,
     codexTimeoutMs: env.CODEX_TIMEOUT_MS,

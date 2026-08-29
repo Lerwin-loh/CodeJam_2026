@@ -15,10 +15,24 @@ export interface Agent {
   updatedAt: string;
 }
 
+export interface AgentBranch {
+  id: string;
+  agentId: string;
+  name: string;
+  parentBranchId: string | null;
+  parentCheckpointId: string | null;
+  workspacePath: string;
+  codexThreadId: string | null;
+  status: AgentStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Message {
   id: string;
   agentId: string;
   runId: string;
+  branchId: string | null;
   role: MessageRole;
   content: string;
   createdAt: string;
@@ -33,6 +47,7 @@ export interface RunUsage {
 export interface AgentRun {
   id: string;
   agentId: string;
+  branchId: string | null;
   status: RunStatus;
   prompt: string;
   output: string | null;
@@ -58,6 +73,7 @@ export interface TraceEvent {
   id: string;
   runId: string;
   agentId: string;
+  branchId: string | null;
   type: TraceEventType;
   timestamp: string;
   metadata: Record<string, unknown>;
@@ -106,6 +122,7 @@ export interface ChangedFiles {
 export interface AgentCheckpoint {
   id: string;
   agentId: string;
+  branchId: string | null;
   runId: string;
   parentCheckpointId: string | null;
   snapshotId: string;
@@ -140,9 +157,15 @@ export interface CheckpointDetails {
   snapshot: WorkspaceSnapshot;
 }
 
+export interface RunDetails {
+  run: AgentRun;
+  trace: TraceEvent[];
+}
+
 export interface Database {
   version: 1;
   agents: Agent[];
+  branches: AgentBranch[];
   messages: Message[];
   runs: AgentRun[];
   traces: TraceEvent[];
@@ -180,6 +203,7 @@ export interface RunnerRequest {
   workspacePath: string;
   prompt: string;
   threadId: string | null;
+  onEvent?: (event: RunnerEvent) => void;
 }
 
 export interface AgentRunner {

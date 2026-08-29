@@ -20,9 +20,15 @@ const updateAgentBody = createAgentBody.partial().refine(
   (value) => Object.keys(value).length > 0,
   "At least one field is required",
 );
-const messageBody = z.object({
-  content: z.string().trim().min(1).max(50_000),
+const branchBody = z.object({
+  checkpointId: z.string().uuid(),
+  name: z.string().trim().min(1).max(80),
 });
+const branchMessageBody = z.object({
+  content: z.string().trim().min(1).max(50_000),
+  branchId: z.string().uuid().nullable().optional(),
+});
+const branchQuery = z.object({ branchId: z.string().uuid().optional() });
 
 export async function createApp(
   config: AppConfig,
@@ -110,34 +116,91 @@ export async function createApp(
 
   app.get("/api/agents/:id/messages", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return { messages: service.getMessages(id) };
+    const { branchId } = branchQuery.parse(request.query);
+    return { messages: service.getMessages(id, branchId ?? null) };
   });
 
   app.get("/api/agents/:id/runs", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return { runs: service.getRuns(id) };
+    const { branchId } = branchQuery.parse(request.query);
+    return { runs: service.getRuns(id, branchId ?? null) };
   });
 
   app.get("/api/agents/:id/checkpoints", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return { checkpoints: service.getCheckpoints(id) };
+    const { branchId } = branchQuery.parse(request.query);
+    return { checkpoints: service.getCheckpoints(id, branchId ?? null) };
+  });
+
+  app.get("/api/agents/:id/branches", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    return { branches: service.getBranches(id) };
+  });
+
+  app.post("/api/agents/:id/branches", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    const body = branchBody.parse(request.body);
+    const branch = await service.createBranchFromCheckpoint(id, body.checkpointId, body.name);
+    return reply.code(201).send({ branch });
   });
 
   app.get("/api/agents/:id/trace", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return { events: service.getTrace(id) };
+    const { branchId } = branchQuery.parse(request.query);
+    return { events: service.getTrace(id, branchId ?? null) };
   });
 
   app.post("/api/agents/:id/messages", async (request, reply) => {
     const { id } = agentIdParams.parse(request.params);
-    const body = messageBody.parse(request.body);
-    const result = await service.sendMessage(id, body.content);
+    const body = branchMessageBody.parse(request.body);
+    const result = await service.sendMessage(id, body.content, body.branchId ?? null);
     return reply.code(202).send(result);
   });
 
   app.get("/api/runs/:id", async (request) => {
     const { id } = runIdParams.parse(request.params);
     return { run: service.getRun(id) };
+  });
+
+  app.get("/api/runs/:id/trace/stream", async (request, reply) => {
+    const { id } = runIdParams.parse(request.params);
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    let heartbeat: NodeJS.Timeout | null = null;
+    let unsubscribe: () => void = () => {};
+    let finished = false;
+    const write = (event: import("./types.js").TraceEvent) => {
+      if (!reply.raw.destroyed) {
+        reply.raw.write("event: trace\ndata: " + JSON.stringify(event) + "\n\n");
+        if (["run.completed", "run.error"].includes(event.type)) {
+          finished = true;
+          if (heartbeat) clearInterval(heartbeat);
+          unsubscribe();
+          reply.raw.end();
+        }
+      }
+    };
+    const subscription = service.subscribeToRunTrace(id, write);
+    unsubscribe = subscription.unsubscribe;
+    for (const event of subscription.events) write(event);
+    if (!finished && !reply.raw.destroyed) reply.raw.write(": connected\n\n");
+    if (!finished) heartbeat = setInterval(() => {
+      if (!reply.raw.destroyed) reply.raw.write(": heartbeat\n\n");
+    }, 15_000);
+    request.raw.on("close", () => {
+      if (heartbeat) clearInterval(heartbeat);
+      subscription.unsubscribe();
+    });
+  });
+
+  app.get("/api/runs/:id/details", async (request) => {
+    const { id } = runIdParams.parse(request.params);
+    return service.getRunDetails(id);
   });
 
   app.get("/api/checkpoints/:id", async (request) => {

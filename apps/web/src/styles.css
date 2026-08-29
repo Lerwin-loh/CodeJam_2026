@@ -333,6 +333,86 @@ button {
   display: block;
 }
 
+.live-trace {
+  margin: 16px 16px 0;
+  padding: 14px;
+  border: 1px solid #ddd9f7;
+  border-radius: 13px;
+  background: #f8f7ff;
+}
+
+.live-trace-chat {
+  margin: 20px 0 0;
+}
+
+.live-trace-heading, .live-trace-event > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.live-trace-heading strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.live-indicator {
+  color: var(--purple-dark);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.live-indicator span {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--purple);
+  animation: pulse 1.2s infinite;
+}
+
+.live-trace-list {
+  display: grid;
+  gap: 11px;
+  margin-top: 14px;
+}
+
+.live-trace-event {
+  position: relative;
+  padding-left: 14px;
+  border-left: 1px solid #d3cef4;
+}
+
+.trace-event-dot {
+  position: absolute;
+  left: -4px;
+  top: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--purple);
+}
+
+.live-trace-event strong {
+  color: #47418a;
+  font-size: 11px;
+}
+
+.live-trace-event small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.live-trace-event p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .runtime-card strong {
   font-size: 11px;
   margin: 6px 0 4px;
@@ -1159,7 +1239,23 @@ textarea:focus {
 }
 
 .checkpoint-list {
+  position: relative;
   padding-top: 10px;
+}
+
+.checkpoint-list::before {
+  content: "";
+  position: absolute;
+  top: 30px;
+  bottom: 20px;
+  left: 15px;
+  z-index: 2;
+  width: 2px;
+  background: #d9d6e7;
+}
+
+.checkpoint-list.is-empty::before {
+  display: none;
 }
 
 .run-history-entry {
@@ -1169,10 +1265,36 @@ textarea:focus {
   gap: 10px;
   align-items: start;
   padding: 12px 9px;
-  border-bottom: 1px solid #ebe9e2;
+  border: 0;
+  border-radius: 12px;
+  margin-bottom: 8px;
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: #f2f0ff;
+  cursor: pointer;
+}
+
+.run-history-entry,
+.checkpoint-summary,
+.checkpoint-actions {
+  z-index: auto;
+}
+
+.run-history-entry:hover {
+  background: #eae6ff;
+}
+
+.run-history-entry:focus-visible {
+  z-index: 4;
+  outline: 2px solid var(--purple);
+  outline-offset: -2px;
 }
 
 .run-history-marker {
+  position: relative;
+  z-index: 3;
   width: 9px;
   height: 9px;
   margin: 3px 1px 0;
@@ -1206,6 +1328,204 @@ textarea:focus {
   font-size: 9px;
 }
 
+.branchpoint-empty-state {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 44px 28px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.branchpoint-empty-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 12px;
+  color: var(--purple-dark);
+  background: var(--purple-soft);
+  font-size: 22px;
+}
+
+.branchpoint-empty-state strong {
+  color: #55554f;
+  font-size: 13px;
+}
+
+.branchpoint-empty-state p {
+  max-width: 260px;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.branch-list {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+}
+
+.branch-graph {
+  margin: 14px 16px 0;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #f7f5ff;
+}
+
+.branch-graph-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 12px 14px 8px;
+  color: #4d3eaa;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.branch-graph-heading small {
+  color: #9690bd;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.branch-graph-canvas {
+  position: relative;
+  padding: 2px 8px 10px;
+}
+
+.branch-graph-canvas::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 20px;
+  left: 22px;
+  width: 2px;
+  background: #b9afea;
+}
+
+.branch-graph-row {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  min-height: 42px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 6px 0 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.branch-graph-row:hover,
+.branch-graph-row.active {
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.branch-graph-lane {
+  position: relative;
+  display: block;
+  height: 42px;
+}
+
+.branch-graph-lane::after {
+  content: "";
+  position: absolute;
+  top: 20px;
+  left: 22px;
+  width: calc(var(--branch-depth) * 26px);
+  height: 2px;
+  background: #b9afea;
+}
+
+.branch-graph-node {
+  position: absolute;
+  top: 14px;
+  left: calc(22px + (var(--branch-depth) * 26px) - 7px);
+  z-index: 2;
+  width: 14px;
+  height: 14px;
+  border: 3px solid #6954d9;
+  border-radius: 50%;
+  background: #f7f5ff;
+}
+
+.branch-graph-row.active .branch-graph-node {
+  box-shadow: 0 0 0 3px #dcd5ff;
+  background: #6954d9;
+}
+
+.branch-graph-label {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.branch-graph-label strong,
+.branch-graph-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branch-graph-label strong {
+  color: #40348d;
+  font-size: 11px;
+}
+
+.branch-graph-label small {
+  color: #8c88a9;
+  font-size: 9px;
+}
+
+.branch-card {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: inherit;
+  background: var(--paper);
+  text-align: left;
+  cursor: pointer;
+}
+
+.branch-card:hover, .branch-card.active {
+  border-color: #aa9eea;
+  background: var(--purple-soft);
+}
+
+.branch-card-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--purple-dark);
+  background: #e4dfff;
+}
+
+.branch-card strong, .branch-card small {
+  display: block;
+}
+
+.branch-card strong {
+  font-size: 12px;
+}
+
+.branch-card small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
 .run-history-copy p {
   overflow: hidden;
   color: #777870;
@@ -1213,24 +1533,25 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.run-history-copy small {
+  color: var(--purple-dark);
+  font-size: 9px;
+  font-weight: 700;
+}
+
 .checkpoint {
   position: relative;
-  border: 1px solid transparent;
-  border-radius: 9px;
+  margin-bottom: 8px;
+  border: 0;
+  border-radius: 12px;
+  background: #eef8f3;
 }
 
 .checkpoint:not(:last-child)::before {
-  content: "";
-  position: absolute;
-  top: 31px;
-  bottom: -11px;
-  left: 19px;
-  width: 1px;
-  background: #d9d6e7;
+  content: none;
 }
 
 .checkpoint.selected {
-  border-color: #9f91e8;
   background: #f5f2ff;
 }
 
@@ -1250,6 +1571,8 @@ textarea:focus {
 }
 
 .checkpoint-marker {
+  position: relative;
+  z-index: 3;
   width: 11px;
   height: 11px;
   margin-top: 2px;
