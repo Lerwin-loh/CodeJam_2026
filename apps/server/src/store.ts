@@ -44,6 +44,10 @@ export class JsonStore {
         run.checkpointId ??= null;
       }
       for (const message of parsed.messages) message.branchId ??= null;
+      for (const context of parsed.contexts) {
+        context.sessionRolloutPath ??= null;
+        context.sessionLineOffset ??= null;
+      }
       for (const checkpoint of parsed.checkpoints) {
         checkpoint.branchId ??= null;
         checkpoint.label ??= null;

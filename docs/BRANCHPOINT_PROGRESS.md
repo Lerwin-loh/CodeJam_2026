@@ -146,7 +146,13 @@ When a checkpoint is created, BranchPoint stores observable Agent context:
 - Source Codex thread ID
 - Run relationship
 
-The thread ID is retained as provenance. Native Codex session cloning is not used because the current non-interactive `codex exec` flow does not expose a machine-readable fork operation.
+The thread ID is retained as provenance. Branching from a checkpoint forks the
+underlying Codex session transcript at the exact line offset recorded when
+that checkpoint was captured (see `codex-session-fork.ts`), so the new branch
+resumes with full native Codex context up to that point and none of the
+turns that happened afterward. If the source rollout file or its offset is
+unavailable (older checkpoints, missing session files), the branch falls back
+to a fresh thread with no prior context.
 
 ## History View
 

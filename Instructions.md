@@ -50,11 +50,6 @@ Get the `.env` file from the team and place it in the repository root.
 
 Do not commit or share the `.env` file publicly.
 
-Do not run:
-
-```bash
-source .env
-```
 
 ## 5. Load Ark Variables
 

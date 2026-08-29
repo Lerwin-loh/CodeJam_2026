@@ -15,6 +15,138 @@ const emptyForm = {
     "Help me build and test software in this workspace. Keep changes small and explain the result.",
 };
 
+type BranchPointSettingsTabKey = "trace" | "run" | "checkpoint" | "branching";
+
+interface BranchPointSettingsTab {
+  key: BranchPointSettingsTabKey;
+  icon: string;
+  label: string;
+  title: string;
+  subtitle: string;
+  intro: string;
+  recordedHeading: string;
+  recordedDescription: string;
+  recordedItems: Array<{ icon: string; label: string; caption: string }>;
+  storedText: string;
+  whyItems: Array<{ icon: string; title: string; caption: string }>;
+  summary: string;
+  tip: string;
+}
+
+const branchPointSettingsTabs: BranchPointSettingsTab[] = [
+  {
+    key: "trace",
+    icon: "⚡",
+    label: "Trace events",
+    title: "Trace events",
+    subtitle: "See everything that happens during a Run.",
+    intro:
+      "Trace events capture observable activity during a Run — from start to completion. They help you understand what the Agent did, what tools were used, what changed, and how the Run finished.",
+    recordedHeading: "What is recorded",
+    recordedDescription:
+      "Records what happened during a Run: start, completion, errors, workspace mutations, and observable Codex activity such as tools, commands, file operations, tests, and bounded output.",
+    recordedItems: [
+      { icon: "▶", label: "Run start", caption: "run.started" },
+      { icon: "⚡", label: "Activity", caption: "Tools, commands, file ops" },
+      { icon: "✎", label: "Changes", caption: "Workspace mutations" },
+      { icon: "⚠", label: "Errors", caption: "Failures and cancellations" },
+      { icon: "✓", label: "Run complete", caption: "run.completed" },
+    ],
+    storedText:
+      "Stored as lightweight metadata in trace records linked to the Agent and Run. Private hidden chain-of-thought is not captured.",
+    whyItems: [
+      { icon: "🔍", title: "Auditability", caption: "Revisit exactly what happened in a Run." },
+      { icon: "🛠", title: "Debugging", caption: "Identify where failures or issues occurred." },
+      { icon: "↻", title: "Reproducibility", caption: "Understand steps taken to recreate or continue work." },
+    ],
+    summary: "Trace events give you a clear, structured timeline of a Run's observable behavior.",
+    tip: "All events are lightweight metadata records stored in the JSON store and linked to the Agent and Run.",
+  },
+  {
+    key: "run",
+    icon: "◎",
+    label: "Run lifecycle",
+    title: "Run lifecycle",
+    subtitle: "How a single prompt becomes a tracked, resumable execution.",
+    intro:
+      "A Run is one prompt sent to an Agent or Branch. It queues, executes Codex against that workspace, and streams observable events until it finishes — successfully, with an error, or cancelled.",
+    recordedHeading: "What happens during a Run",
+    recordedDescription:
+      "Each Run moves through a fixed sequence of states, hashing the workspace before and after execution to detect real file changes.",
+    recordedItems: [
+      { icon: "⏳", label: "Queued", caption: "Waiting to execute" },
+      { icon: "▶", label: "Running", caption: "Codex executing" },
+      { icon: "⚡", label: "Streaming", caption: "codex.event per action" },
+      { icon: "✓", label: "Completed", caption: "run.completed" },
+      { icon: "✕", label: "Failed / cancelled", caption: "run.error" },
+    ],
+    storedText:
+      "If the Agent or Branch already has a Codex thread, the Run resumes it — the model sees the full native history of every earlier turn on that thread. A freshly created Agent, or a Branch whose thread could not be forked, starts the Run with no prior conversational memory.",
+    whyItems: [
+      { icon: "🧵", title: "Continuity", caption: "Resumed threads keep full native memory." },
+      { icon: "🔒", title: "Isolation", caption: "Each Branch's Runs stay on their own thread." },
+      { icon: "📡", title: "Transparency", caption: "Every step streams as an observable event." },
+    ],
+    summary: "The Run lifecycle turns one prompt into a traceable, resumable unit of execution.",
+    tip: "A Run only creates a checkpoint when it actually changes the workspace — otherwise it stays visible in history with no snapshot.",
+  },
+  {
+    key: "checkpoint",
+    icon: "▤",
+    label: "Checkpoint events",
+    title: "Checkpoint events",
+    subtitle: "Recoverable workspace states you can return to or branch from.",
+    intro:
+      "A checkpoint is created automatically whenever a Run leaves meaningful file changes behind — or explicitly, whenever you choose to name and save one.",
+    recordedHeading: "What is recorded",
+    recordedDescription:
+      "Records a recoverable workspace state after meaningful file changes, including changed files, parent checkpoint, workspace hash, Run, observable context, and the captured execution events for that Run.",
+    recordedItems: [
+      { icon: "📄", label: "Changed files", caption: "Created, modified, deleted" },
+      { icon: "⑂", label: "Parent checkpoint", caption: "Lineage link" },
+      { icon: "#", label: "Workspace hash", caption: "Content fingerprint" },
+      { icon: "💬", label: "Observable context", caption: "Messages up to this point" },
+      { icon: "⏱", label: "Session offset", caption: "Codex rollout line cut point" },
+    ],
+    storedText:
+      "Stored as checkpoint metadata in the JSON store. Immutable workspace files and manifests are stored under the BranchPoint snapshot directory. Alongside the observable context, each checkpoint also records the Codex session's rollout file path and its exact line offset at that moment — the precise cut point later used to fork conversational memory when branching.",
+    whyItems: [
+      { icon: "⏮", title: "Recoverability", caption: "Restore any past workspace state." },
+      { icon: "🧭", title: "Traceability", caption: "Every checkpoint links back to its Run." },
+      { icon: "🗜", title: "Efficient storage", caption: "Unchanged Runs reuse the last snapshot." },
+    ],
+    summary: "Checkpoints are the recoverable, branchable waypoints of an Agent's history.",
+    tip: "Each checkpoint also records the Codex session's rollout offset — the exact cut point used later when branching.",
+  },
+  {
+    key: "branching",
+    icon: "⑂",
+    label: "Branching",
+    title: "Branching",
+    subtitle: "Fork a workspace and its Codex memory from any checkpoint.",
+    intro:
+      "Branching from a checkpoint creates a new, independent workspace and forks the Codex conversation itself — not just the files.",
+    recordedHeading: "What happens when you branch",
+    recordedDescription:
+      "Branching from a checkpoint does two things: it restores that checkpoint's workspace snapshot into a new Branch workspace, and it forks the Codex conversation transcript at the checkpoint's recorded line offset, registering the copy as a new thread.",
+    recordedItems: [
+      { icon: "📁", label: "Workspace restore", caption: "Files copied from snapshot" },
+      { icon: "🧵", label: "Thread fork", caption: "Transcript truncated & copied" },
+      { icon: "🆔", label: "New thread id", caption: "Registered as its own session" },
+      { icon: "🔀", label: "Independent history", caption: "Later Runs diverge safely" },
+    ],
+    storedText:
+      "The new Branch resumes with full native Codex memory of everything up to that checkpoint, but nothing from Runs recorded after it — even when branching from an older checkpoint on a thread that has since moved on with more turns. If the source thread's session files are missing or unreadable, the Branch falls back to a fresh thread with no prior memory rather than failing.",
+    whyItems: [
+      { icon: "🧪", title: "Safe experimentation", caption: "Try a new direction without losing the original." },
+      { icon: "🧠", title: "True memory continuity", caption: "No re-explaining context after branching." },
+      { icon: "🚫", title: "No context leakage", caption: "Later turns never leak into an earlier branch." },
+    ],
+    summary: "Branching gives you a genuinely independent workspace and conversation, cut at exactly the right point.",
+    tip: "If session files are missing, a Branch still restores its workspace — it just starts with no prior Codex memory.",
+  },
+];
+
 function formatTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
@@ -60,7 +192,8 @@ export default function App() {
   const [showBranchPoint, setShowBranchPoint] = useState(false);
   const [selectedCheckpointId, setSelectedCheckpointId] = useState<string | null>(null);
   const [showBranchPointSettings, setShowBranchPointSettings] = useState(false);
-  const [showTraceRules, setShowTraceRules] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<BranchPointSettingsTabKey>("trace");
+  const [howItWorksOpen, setHowItWorksOpen] = useState(false);
   const [activeBranchPointView, setActiveBranchPointView] = useState<"history" | "branches" | "compare">("history");
   const [expandedBranchPointView, setExpandedBranchPointView] = useState<string | null>("history");
   const [checkpointOverlay, setCheckpointOverlay] = useState<{
@@ -537,7 +670,7 @@ export default function App() {
   }
 
   return (
-    <div className={"app-shell " + (showBranchPoint ? "branchpoint-open" : "")}>
+    <div className={"app-shell " + (showBranchPoint && !showBranchPointSettings ? "branchpoint-open" : "")}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">A</div>
@@ -883,8 +1016,9 @@ export default function App() {
         )}
       </main>
 
-      {showBranchPoint && (
+      {showBranchPoint && !showBranchPointSettings && (
         <aside className="branchpoint-panel" id="branchpoint-panel">
+          <>
           <div className="branchpoint-heading">
             <div>
               <span className="eyebrow">BranchPoint · Beta</span>
@@ -893,7 +1027,7 @@ export default function App() {
             <div className="panel-heading-actions">
               <button
                 className="settings-button"
-                onClick={() => setShowBranchPointSettings((value) => !value)}
+                onClick={() => setShowBranchPointSettings(true)}
                 aria-expanded={showBranchPointSettings}
                 aria-label="Open BranchPoint settings"
                 title="BranchPoint settings"
@@ -916,43 +1050,6 @@ export default function App() {
             <div><span>Checkpoints saved</span><strong>{checkpoints.length}</strong></div>
           </div>
 
-          {showBranchPointSettings && (
-            <section className="branchpoint-settings">
-              <div className="settings-popup-heading">
-                <div>
-                  <span className="eyebrow">BranchPoint settings</span>
-                  <h3>Workspace controls</h3>
-                </div>
-                <button className="panel-close" onClick={() => setShowBranchPointSettings(false)} aria-label="Close BranchPoint settings">×</button>
-              </div>
-              <button className="settings-link active" type="button">Branch defaults <span>›</span></button>
-              <button className="settings-link" type="button">Runtime and permissions <span>›</span></button>
-              <button
-                className={"settings-link " + (showTraceRules ? "active" : "")}
-                type="button"
-                onClick={() => setShowTraceRules((value) => !value)}
-                aria-expanded={showTraceRules}
-              >
-                Trace and checkpoint rules <span>{showTraceRules ? "⌃" : "›"}</span>
-              </button>
-              {showTraceRules && (
-                <div className="trace-rules">
-                  <section>
-                    <h4>Trace events</h4>
-                    <p>Records what happened during a Run: start, completion, errors, workspace mutations, and observable Codex activity such as tools, commands, file operations, tests, and bounded output.</p>
-                    <small>Stored as lightweight metadata in trace records linked to the Agent and Run. Private hidden chain-of-thought is not captured.</small>
-                  </section>
-                  <section>
-                    <h4>Checkpoint events</h4>
-                    <p>Records a recoverable workspace state after meaningful file changes, including changed files, parent checkpoint, workspace hash, Run, observable context, and the captured execution events for that Run.</p>
-                    <small>Stored as checkpoint metadata in the JSON store. Immutable workspace files and manifests are stored under the BranchPoint snapshot directory. A checkpoint's observable context includes the accumulated conversation from earlier Runs and checkpoints up to that point.</small>
-                  </section>
-                  <div className="trace-rule-note">No checkpoint is created when a Run leaves the workspace unchanged. Context from previous checkpoints is implicitly carried forward in later context snapshots; each workspace snapshot remains a point-in-time copy.</div>
-                </div>
-              )}
-            </section>
-          )}
-
           <nav className="branchpoint-tabs" aria-label="BranchPoint views">
             {(["history", "branches", "compare"] as const).map((view) => (
               <button
@@ -967,6 +1064,7 @@ export default function App() {
               </button>
             ))}
           </nav>
+
 
           <div className="branchpoint-view">
             <button
@@ -1106,8 +1204,105 @@ export default function App() {
               </div>
             )}
           </div>
+          </>
         </aside>
       )}
+
+      {showBranchPointSettings && (() => {
+        const activeTab = branchPointSettingsTabs.find((tab) => tab.key === settingsTab) ?? branchPointSettingsTabs[0];
+        return (
+          <div className="branchpoint-settings-overlay" onMouseDown={() => setShowBranchPointSettings(false)}>
+            <aside className="branchpoint-settings-panel" onMouseDown={(event) => event.stopPropagation()}>
+              <div className="settings-panel-heading">
+                <div>
+                  <span className="eyebrow">BranchPoint · Beta</span>
+                  <h2>BranchPoint</h2>
+                  <p>Understand how execution is tracked, versioned, and recovered across runs, checkpoints, and branches.</p>
+                </div>
+                <button className="panel-close" type="button" onClick={() => setShowBranchPointSettings(false)} aria-label="Close BranchPoint settings">×</button>
+              </div>
+
+              <section className="how-it-works">
+                <button
+                  className="how-it-works-toggle"
+                  type="button"
+                  onClick={() => setHowItWorksOpen((value) => !value)}
+                  aria-expanded={howItWorksOpen}
+                >
+                  <span>How it works?</span>
+                  <span>{howItWorksOpen ? "⌃" : "›"}</span>
+                </button>
+                {howItWorksOpen && (
+                  <div className="how-it-works-body">
+                    <nav className="settings-main-tabs" aria-label="Settings sections">
+                      {branchPointSettingsTabs.map((tab) => (
+                        <button
+                          key={tab.key}
+                          className={settingsTab === tab.key ? "active" : ""}
+                          type="button"
+                          onClick={() => setSettingsTab(tab.key)}
+                        >
+                          <span>{tab.icon}</span>
+                          {tab.label}
+                        </button>
+                      ))}
+                    </nav>
+                    <div className="settings-main-body">
+                      <div className="settings-main-heading">
+                        <div>
+                          <h1>{activeTab.title}</h1>
+                          <p>{activeTab.subtitle}</p>
+                        </div>
+                      </div>
+                      <div className="settings-callout">{activeTab.intro}</div>
+                      <section>
+                        <h3>{activeTab.recordedHeading}</h3>
+                        <p>{activeTab.recordedDescription}</p>
+                        <div className="settings-badge-grid">
+                          {activeTab.recordedItems.map((item) => (
+                            <div className="settings-badge-card" key={item.label}>
+                              <span>{item.icon}</span>
+                              <strong>{item.label}</strong>
+                              <small>{item.caption}</small>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                      <section>
+                        <h3>How it's stored</h3>
+                        <p>{activeTab.storedText}</p>
+                      </section>
+                      <section>
+                        <h3>Why it matters</h3>
+                        <div className="settings-why-grid">
+                          {activeTab.whyItems.map((item) => (
+                            <div className="settings-why-card" key={item.title}>
+                              <span>{item.icon}</span>
+                              <strong>{item.title}</strong>
+                              <small>{item.caption}</small>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                      <div className="settings-summary">
+                        <span>✦</span>
+                        <p><strong>In short: </strong>{activeTab.summary}</p>
+                      </div>
+                      <div className="settings-tip">
+                        <span className="settings-tip-icon">💡</span>
+                        <div>
+                          <strong>Tip</strong>
+                          <p>{activeTab.tip}</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </section>
+            </aside>
+          </div>
+        );
+      })()}
 
       {checkpointOverlay && (
         <div className="modal-backdrop" onMouseDown={() => setCheckpointOverlay(null)}>
