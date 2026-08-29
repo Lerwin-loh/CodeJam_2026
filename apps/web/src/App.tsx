@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, setAuthToken } from "./api";
-import type { Agent, AgentBranch, AgentCheckpoint, AgentRun, CheckpointDetails, CheckpointDiff, Message, SystemInfo, TraceEvent } from "./types";
+import { api, ApiError, getStoredToken, setAuthToken } from "./api";
+import type { Agent, AgentBranch, AgentCheckpoint, AgentRun, AuditEntry, CheckpointDetails, CheckpointDiff, Message, SystemInfo, TraceEvent, User } from "./types";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -52,8 +52,11 @@ export default function App() {
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [authRequired, setAuthRequired] = useState<boolean | null>(null);
-  const [authInput, setAuthInput] = useState("");
+  const [authChecked, setAuthChecked] = useState(false);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [nameInput, setNameInput] = useState("");
+  const [showAudit, setShowAudit] = useState(false);
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
   const [showBranchPoint, setShowBranchPoint] = useState(false);
   const [selectedCheckpointId, setSelectedCheckpointId] = useState<string | null>(null);
   const [showBranchPointSettings, setShowBranchPointSettings] = useState(false);
@@ -69,6 +72,8 @@ export default function App() {
   const [showCodeChanges, setShowCodeChanges] = useState(false);
   const [runOverlay, setRunOverlay] = useState<import("./types").RunDetails | null>(null);
   const [restoreResult, setRestoreResult] = useState<{ path: string; hash: string } | null>(null);
+  const [checkpointLabel, setCheckpointLabel] = useState("");
+  const [savingCheckpoint, setSavingCheckpoint] = useState(false);
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
   const activeBranchIdRef = useRef<string | null>(null);
@@ -167,14 +172,26 @@ export default function App() {
 
   useEffect(() => {
     mountedRef.current = true;
+    const token = getStoredToken();
+    if (!token) {
+      setAuthChecked(true);
+      return () => {
+        mountedRef.current = false;
+      };
+    }
     void api
-      .auth()
-      .then(async ({ required }) => {
+      .me()
+      .then(async ({ user }) => {
         if (!mountedRef.current) return;
-        setAuthRequired(required);
-        if (!required) await bootstrap();
+        setCurrentUser(user);
+        await bootstrap();
       })
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+      .catch(() => {
+        if (mountedRef.current) setAuthToken("");
+      })
+      .finally(() => {
+        if (mountedRef.current) setAuthChecked(true);
+      });
     return () => {
       mountedRef.current = false;
       for (const controller of traceStreamControllers.current.values()) controller.abort();
@@ -350,6 +367,22 @@ export default function App() {
     }
   };
 
+  const saveCheckpoint = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selected || !checkpointLabel.trim() || savingCheckpoint) return;
+    setSavingCheckpoint(true);
+    setError(null);
+    try {
+      await api.createCheckpoint(selected.id, checkpointLabel.trim());
+      setCheckpointLabel("");
+      await refreshBranchPoint(selected.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSavingCheckpoint(false);
+    }
+  };
+
   const openCheckpointAction = async (kind: "diff" | "details", checkpoint: AgentCheckpoint) => {
     setError(null);
     try {
@@ -419,27 +452,51 @@ export default function App() {
     }
   };
 
-  const unlock = async (event: React.FormEvent) => {
+  const signIn = async (event: React.FormEvent) => {
     event.preventDefault();
+    const name = nameInput.trim();
+    if (!name) return;
     setBusy(true);
     setError(null);
-    setAuthToken(authInput);
     try {
+      const { user } = await api.createUser(name);
+      setAuthToken(user.token);
+      setCurrentUser({ id: user.id, name: user.name });
+      setNameInput("");
       await bootstrap();
-      setAuthRequired(false);
-      setAuthInput("");
     } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 401) {
-        setError("The access token is not valid.");
-      } else {
-        setError(reason instanceof Error ? reason.message : String(reason));
-      }
+      setAuthToken("");
+      setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy(false);
     }
   };
 
-  if (authRequired === null) {
+  const signOut = () => {
+    setAuthToken("");
+    setCurrentUser(null);
+    setAgents([]);
+    setSelectedId(null);
+    setMessages([]);
+    setRuns([]);
+    setCheckpoints([]);
+    setTraceEvents([]);
+    setAuditEntries([]);
+    setShowAudit(false);
+    setShowBranchPoint(false);
+  };
+
+  const openAudit = async () => {
+    setShowAudit(true);
+    try {
+      const { entries } = await api.audit();
+      setAuditEntries(entries);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  if (!authChecked) {
     return (
       <main className="auth-screen">
         <section className="auth-card" aria-live="polite">
@@ -452,28 +509,27 @@ export default function App() {
     );
   }
 
-  if (authRequired) {
+  if (!currentUser) {
     return (
       <main className="auth-screen">
-        <form className="auth-card" onSubmit={unlock}>
+        <form className="auth-card" onSubmit={signIn}>
           <div className="brand-mark">A</div>
           <span className="eyebrow">Agent Launchpad</span>
-          <h1>Enter the access token</h1>
-          <p>This shared demo token is configured by the platform operator.</p>
+          <h1>Who's working?</h1>
+          <p>Enter your name. You see and control only the Agents you own.</p>
           {error && <div className="error-banner" role="alert">{error}</div>}
           <label>
-            Access token
+            Your name
             <input
               autoFocus
-              type="password"
-              value={authInput}
-              onChange={(event) => setAuthInput(event.target.value)}
-              autoComplete="current-password"
+              value={nameInput}
+              onChange={(event) => setNameInput(event.target.value)}
+              maxLength={60}
               required
             />
           </label>
-          <button className="button button-primary" disabled={busy || !authInput.trim()}>
-            {busy ? <Spinner /> : "Open Launchpad"}
+          <button className="button button-primary" disabled={busy || !nameInput.trim()}>
+            {busy ? <Spinner /> : "Continue"}
           </button>
         </form>
       </main>
@@ -531,6 +587,21 @@ export default function App() {
             </div>
           )}
         </nav>
+
+        <div className="user-card">
+          <div className="user-card-copy">
+            <span className="eyebrow">Signed in</span>
+            <strong>{currentUser.name}</strong>
+          </div>
+          <div className="user-card-actions">
+            <button className="button button-ghost" onClick={openAudit}>
+              Access log
+            </button>
+            <button className="button button-ghost" onClick={signOut}>
+              Switch
+            </button>
+          </div>
+        </div>
 
         <div className="runtime-card">
           <span className="eyebrow">Runtime</span>
@@ -907,7 +978,40 @@ export default function App() {
               <span>{expandedBranchPointView === activeBranchPointView ? "−" : "+"}</span>
             </button>
             {expandedBranchPointView === activeBranchPointView && activeBranchPointView === "history" && (
+              <>
+              <form className="checkpoint-create" onSubmit={saveCheckpoint}>
+                <input
+                  value={checkpointLabel}
+                  onChange={(event) => setCheckpointLabel(event.target.value)}
+                  placeholder="Name a checkpoint for the current workspace…"
+                  maxLength={120}
+                  disabled={
+                    !selected ||
+                    selected.status === "busy" ||
+                    savingCheckpoint ||
+                    runs.length === 0
+                  }
+                />
+                <button
+                  className="button button-primary"
+                  disabled={
+                    !selected ||
+                    selected.status === "busy" ||
+                    savingCheckpoint ||
+                    !checkpointLabel.trim() ||
+                    runs.length === 0
+                  }
+                >
+                  {savingCheckpoint ? <Spinner /> : "Save checkpoint"}
+                </button>
+              </form>
+              {selected && runs.length === 0 && (
+                <p className="checkpoint-create-hint">
+                  Send this Agent an instruction first — a checkpoint snapshots the workspace a run produces.
+                </p>
+              )}
               <div className={"checkpoint-list " + (historyItems.length === 0 ? "is-empty" : "")}>
+
                 {historyItems.map((item) => {
               if (item.kind === "run") {
                 return (
@@ -937,7 +1041,10 @@ export default function App() {
                   >
                     <span className="checkpoint-marker" />
                     <span className="checkpoint-copy">
-                      <strong>Checkpoint event · Recoverable <em>{checkpoint.status === "partial" ? "Partial Run state" : "Workspace mutation"}</em></strong>
+                      <strong>
+                        {checkpoint.label ?? "Checkpoint event · Recoverable"}
+                        <em>{checkpoint.reason === "explicit" ? "Named checkpoint" : checkpoint.status === "partial" ? "Partial Run state" : "Workspace mutation"}</em>
+                      </strong>
                       <span>{formatTime(checkpoint.createdAt)}</span>
                       <span>Run {checkpoint.runId.slice(0, 8)} · {checkpoint.reason === "auto-mutation" ? "Automatic" : "Explicit"}</span>
                     </span>
@@ -965,6 +1072,7 @@ export default function App() {
                   </div>
                 )}
               </div>
+              </>
             )}
             {expandedBranchPointView === activeBranchPointView && activeBranchPointView === "branches" && (
               branches.length > 0 ? <>
@@ -1045,6 +1153,12 @@ export default function App() {
             {checkpointOverlay.kind === "details" && checkpointOverlay.details && (
               <div className="inspection-section">
                 <p className="inspection-message">Run {checkpointOverlay.details.run.id.slice(0, 8)} · {checkpointOverlay.details.run.status} · {checkpointOverlay.details.checkpoint.status}</p>
+                {checkpointOverlay.details.checkpoint.label && (
+                  <>
+                    <h3>Checkpoint name</h3>
+                    <p className="inspection-copy">{checkpointOverlay.details.checkpoint.label} · {checkpointOverlay.details.checkpoint.reason === "explicit" ? "Saved by a user" : "Automatic"}</p>
+                  </>
+                )}
                 <h3>Observable context</h3>
                 <p className="inspection-muted">{checkpointOverlay.details.context.agentName} · {checkpointOverlay.details.context.instructions.length} instruction characters · source session {checkpointOverlay.details.context.sourceThreadId?.slice(0, 12) ?? "not available"}</p>
                 <p className="inspection-disclaimer">This context snapshot includes the observable conversation accumulated through previous Runs and checkpoints. It does not include hidden model reasoning.</p>
@@ -1088,6 +1202,36 @@ export default function App() {
             <p className="inspection-message">The original workspace was not changed.</p>
             <label>Restored workspace<input readOnly value={restoreResult.path} /></label>
             <p className="inspection-muted">Workspace hash: {restoreResult.hash}</p>
+          </section>
+        </div>
+      )}
+
+      {showAudit && (
+        <div className="modal-backdrop" onMouseDown={() => setShowAudit(false)}>
+          <section className="modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">Authorization</span>
+                <h2>Access log</h2>
+                <p>Every action you take on an Agent, and every denied attempt on Agents you own.</p>
+              </div>
+              <button type="button" onClick={() => setShowAudit(false)} aria-label="Close access log">×</button>
+            </div>
+            <div className="audit-list">
+              {auditEntries.map((entry) => (
+                <article className={"audit-row audit-" + entry.decision} key={entry.id}>
+                  <span className="audit-decision">{entry.decision}</span>
+                  <div className="audit-copy">
+                    <strong>{entry.userName} · {entry.action}</strong>
+                    <span>{entry.resource} · {formatTime(entry.timestamp)}</span>
+                    <p>{entry.reason}</p>
+                  </div>
+                </article>
+              ))}
+              {auditEntries.length === 0 && (
+                <p className="audit-empty">No access events recorded yet.</p>
+              )}
+            </div>
           </section>
         </div>
       )}

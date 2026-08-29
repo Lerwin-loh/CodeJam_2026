@@ -1,4 +1,4 @@
-import type { Agent, AgentCheckpoint, AgentRun, CheckpointDetails, CheckpointDiff, Message, RunDetails, SystemInfo, TraceEvent } from "./types";
+import type { Agent, AgentCheckpoint, AgentRun, AuditEntry, CheckpointDetails, CheckpointDiff, Message, RunDetails, SystemInfo, TraceEvent, User } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -9,10 +9,30 @@ export class ApiError extends Error {
   }
 }
 
-let authToken = "";
+const TOKEN_KEY = "launchpad.userToken";
+
+function readStoredToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+let authToken = readStoredToken();
 
 export function setAuthToken(token: string): void {
   authToken = token.trim();
+  try {
+    if (authToken) localStorage.setItem(TOKEN_KEY, authToken);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* storage unavailable — keep the in-memory token only */
+  }
+}
+
+export function getStoredToken(): string {
+  return authToken;
 }
 
 function branchUrl(url: string, branchId: string | null): string {
@@ -37,7 +57,13 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  auth: () => request<{ required: boolean }>("/api/auth"),
+  createUser: (name: string) =>
+    request<{ user: User & { token: string } }>("/api/users", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  me: () => request<{ user: User }>("/api/me"),
+  audit: () => request<{ entries: AuditEntry[] }>("/api/audit"),
   system: () => request<SystemInfo>("/api/system"),
   listAgents: () => request<{ agents: Agent[] }>("/api/agents"),
   createAgent: (body: {
@@ -75,6 +101,11 @@ export const api = {
     request<{ runs: AgentRun[] }>(branchUrl("/api/agents/" + id + "/runs", branchId)),
   checkpoints: (id: string, branchId: string | null = null) =>
     request<{ checkpoints: AgentCheckpoint[] }>(branchUrl("/api/agents/" + id + "/checkpoints", branchId)),
+  createCheckpoint: (id: string, label: string) =>
+    request<{ checkpoint: AgentCheckpoint }>("/api/agents/" + id + "/checkpoints", {
+      method: "POST",
+      body: JSON.stringify({ label }),
+    }),
   branches: (id: string) =>
     request<{ branches: import("./types").AgentBranch[] }>("/api/agents/" + id + "/branches"),
   trace: (id: string, branchId: string | null = null) =>

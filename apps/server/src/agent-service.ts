@@ -10,6 +10,8 @@ import type {
   AgentRun,
   AgentRunner,
   AgentCheckpoint,
+  AuditDecision,
+  AuditEntry,
   CheckpointDetails,
   CheckpointDiff,
   CreateAgentInput,
@@ -19,6 +21,7 @@ import type {
   TraceEvent,
   TraceEventType,
   RunDetails,
+  User,
   WorkspaceManifest,
   UpdateAgentInput,
 } from "./types.js";
@@ -91,13 +94,137 @@ export class AgentService {
           agent.updatedAt = now();
         }
       }
+      const orphans = database.agents.filter((agent) => !agent.ownerId);
+      if (orphans.length > 0) {
+        let demo = database.users.find(
+          (user) => user.name.toLowerCase() === "demo",
+        );
+        if (!demo) {
+          demo = {
+            id: randomUUID(),
+            name: "demo",
+            token: randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, ""),
+            createdAt: now(),
+          };
+          database.users.push(demo);
+        }
+        for (const agent of orphans) agent.ownerId = demo.id;
+      }
     });
   }
 
-  listAgents(): Agent[] {
+  listUsers(): Array<Pick<User, "id" | "name" | "createdAt">> {
     return this.store
       .snapshot()
-      .agents.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      .users.map(({ id, name, createdAt }) => ({ id, name, createdAt }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  getUserByToken(token: string): User | null {
+    const trimmed = token.trim();
+    if (!trimmed) return null;
+    return (
+      this.store.snapshot().users.find((user) => user.token === trimmed) ?? null
+    );
+  }
+
+  async createUser(name: string): Promise<User> {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      throw new HttpError(400, "Enter a name to continue.");
+    }
+    if (trimmed.length > 60) {
+      throw new HttpError(400, "Name must be 60 characters or fewer.");
+    }
+    return this.store.mutate((database) => {
+      const existing = database.users.find(
+        (user) => user.name.toLowerCase() === trimmed.toLowerCase(),
+      );
+      if (existing) return structuredClone(existing);
+      const user: User = {
+        id: randomUUID(),
+        name: trimmed,
+        token: randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, ""),
+        createdAt: now(),
+      };
+      database.users.push(user);
+      return structuredClone(user);
+    });
+  }
+
+  async recordAudit(entry: {
+    user: User;
+    agentId: string | null;
+    action: string;
+    resource: string;
+    decision: AuditDecision;
+    reason: string;
+  }): Promise<void> {
+    await this.store.mutate((database) => {
+      database.audit.push({
+        id: randomUUID(),
+        userId: entry.user.id,
+        userName: entry.user.name,
+        agentId: entry.agentId,
+        action: entry.action,
+        resource: entry.resource,
+        decision: entry.decision,
+        reason: entry.reason,
+        timestamp: now(),
+      });
+      if (database.audit.length > 2_000) {
+        database.audit.splice(0, database.audit.length - 2_000);
+      }
+    });
+  }
+
+  listAudit(user: User): AuditEntry[] {
+    const database = this.store.snapshot();
+    const ownedAgentIds = new Set(
+      database.agents
+        .filter((agent) => agent.ownerId === user.id)
+        .map((agent) => agent.id),
+    );
+    return database.audit
+      .filter(
+        (entry) =>
+          entry.userId === user.id ||
+          (entry.agentId !== null && ownedAgentIds.has(entry.agentId)),
+      )
+      .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
+      .slice(0, 200);
+  }
+
+  async assertAgentAccess(
+    agentId: string,
+    user: User,
+    action: string,
+  ): Promise<Agent> {
+    const agent = this.store
+      .snapshot()
+      .agents.find((item) => item.id === agentId);
+    if (!agent) {
+      throw new HttpError(404, "Agent not found");
+    }
+    if (agent.ownerId !== user.id) {
+      await this.recordAudit({
+        user,
+        agentId: agent.id,
+        action,
+        resource: "agent:" + agent.id,
+        decision: "deny",
+        reason: "Agent belongs to a different user",
+      });
+      throw new HttpError(403, "You do not have access to this Agent");
+    }
+    return agent;
+  }
+
+  listAgents(ownerId: string): Agent[] {
+    return this.store
+      .snapshot()
+      .agents.filter((agent) => agent.ownerId === ownerId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   getAgent(id: string): Agent {
@@ -108,7 +235,7 @@ export class AgentService {
     return agent;
   }
 
-  async createAgent(input: CreateAgentInput): Promise<Agent> {
+  async createAgent(input: CreateAgentInput, ownerId: string): Promise<Agent> {
     const timestamp = now();
     const id = randomUUID();
     const agent: Agent = {
@@ -116,6 +243,7 @@ export class AgentService {
       name: input.name.trim(),
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
+      ownerId,
       status: "ready",
       workspacePath: this.workspaces.workspacePath(id),
       codexThreadId: null,
@@ -206,6 +334,7 @@ export class AgentService {
         changedFiles,
         status,
         reason: "auto-mutation",
+        label: null,
         createdAt: now(),
       };
       await this.store.mutate((database) => {
@@ -439,6 +568,106 @@ export class AgentService {
   getCheckpoint(id: string): AgentCheckpoint {
     const checkpoint = this.store.snapshot().checkpoints.find((item) => item.id === id);
     if (!checkpoint) throw new HttpError(404, "Checkpoint not found");
+    return checkpoint;
+  }
+
+  async createExplicitCheckpoint(
+    agentId: string,
+    label: string,
+  ): Promise<AgentCheckpoint> {
+    const agent = this.getAgent(agentId);
+    if (agent.status === "busy") {
+      throw new HttpError(
+        409,
+        "This Agent has a run in progress. Wait for it to finish, then save the checkpoint.",
+      );
+    }
+    const name = label.trim();
+    if (!name) {
+      throw new HttpError(400, "Enter a name for the checkpoint.");
+    }
+
+    const database = this.store.snapshot();
+    const latestRun = database.runs
+      .filter((run) => run.agentId === agentId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
+    if (!latestRun) {
+      throw new HttpError(
+        409,
+        "Send the Agent at least one instruction before saving a checkpoint. Checkpoints snapshot the workspace produced by a run.",
+      );
+    }
+    const latestCheckpoint = database.checkpoints
+      .filter((checkpoint) => checkpoint.agentId === agentId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
+    const parentSnapshot = latestCheckpoint
+      ? database.snapshots.find((item) => item.id === latestCheckpoint.snapshotId) ?? null
+      : null;
+
+    const after = await this.history.manifest(agent.workspacePath);
+    const baseline: WorkspaceManifest = parentSnapshot?.manifest ?? {
+      workspaceHash: "",
+      files: [],
+      createdAt: now(),
+    };
+    const changedFiles = this.history.diff(baseline, after);
+    // An explicit checkpoint is a user-intent marker: always save it. When the
+    // workspace is identical to the last checkpoint, reuse its snapshot instead
+    // of copying the same files again.
+    const unchanged =
+      parentSnapshot !== null &&
+      changedFiles.created.length +
+        changedFiles.modified.length +
+        changedFiles.deleted.length ===
+        0;
+    const snapshot = unchanged
+      ? null
+      : await this.history.createSnapshot(
+          agent.id,
+          latestRun.id,
+          agent.workspacePath,
+          after,
+        );
+    const snapshotId = snapshot?.id ?? parentSnapshot!.id;
+    const context: AgentContextSnapshot = {
+      id: randomUUID(),
+      agentId: agent.id,
+      runId: latestRun.id,
+      agentName: agent.name,
+      agentDescription: agent.description,
+      instructions: agent.instructions,
+      messages: this.getMessages(agent.id),
+      sourceThreadId: agent.codexThreadId,
+      createdAt: now(),
+    };
+    const checkpoint: AgentCheckpoint = {
+      id: randomUUID(),
+      agentId: agent.id,
+      branchId: latestRun.branchId,
+      runId: latestRun.id,
+      parentCheckpointId: latestCheckpoint?.id ?? null,
+      snapshotId,
+      contextId: context.id,
+      workspaceHash: after.workspaceHash,
+      changedFiles,
+      status: "complete",
+      reason: "explicit",
+      label: name,
+      createdAt: now(),
+    };
+    await this.store.mutate((db) => {
+      if (snapshot) db.snapshots.push(snapshot);
+      db.contexts.push(context);
+      db.checkpoints.push(checkpoint);
+    });
+    await this.trace(latestRun, "checkpoint.created", {
+      checkpointId: checkpoint.id,
+      snapshotId,
+      status: "complete",
+      workspaceHash: after.workspaceHash,
+      reason: "explicit",
+      label: name,
+    });
     return checkpoint;
   }
 

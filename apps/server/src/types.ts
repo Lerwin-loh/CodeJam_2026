@@ -2,11 +2,33 @@ export type AgentStatus = "ready" | "busy" | "stopped" | "error";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type MessageRole = "user" | "assistant";
 
+export interface User {
+  id: string;
+  name: string;
+  token: string;
+  createdAt: string;
+}
+
+export type AuditDecision = "allow" | "deny";
+
+export interface AuditEntry {
+  id: string;
+  userId: string;
+  userName: string;
+  agentId: string | null;
+  action: string;
+  resource: string;
+  decision: AuditDecision;
+  reason: string;
+  timestamp: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
   description: string;
   instructions: string;
+  ownerId: string;
   status: AgentStatus;
   workspacePath: string;
   codexThreadId: string | null;
@@ -131,6 +153,7 @@ export interface AgentCheckpoint {
   changedFiles: ChangedFiles;
   status: "complete" | "partial";
   reason: "auto-mutation" | "explicit";
+  label: string | null;
   createdAt: string;
 }
 
@@ -164,6 +187,8 @@ export interface RunDetails {
 
 export interface Database {
   version: 1;
+  users: User[];
+  audit: AuditEntry[];
   agents: Agent[];
   branches: AgentBranch[];
   messages: Message[];
