@@ -113,6 +113,34 @@ export class WorkspaceHistory {
     }
   }
 
+  async archiveSnapshots(
+    projectId: string,
+    snapshots: WorkspaceSnapshot[],
+  ): Promise<number> {
+    if (snapshots.length === 0) return 0;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const archiveRoot = path.join(
+      this.root,
+      ".deleted",
+      projectId + "-" + timestamp,
+      "snapshots",
+    );
+    const snapshotRoot = path.resolve(this.root, "snapshots") + path.sep;
+    let archived = 0;
+    for (const snapshot of snapshots) {
+      const source = path.resolve(snapshot.directory);
+      if (!source.startsWith(snapshotRoot)) continue;
+      await mkdir(archiveRoot, { recursive: true });
+      try {
+        await rename(source, path.join(archiveRoot, snapshot.id));
+        archived += 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    return archived;
+  }
+
   private async removeUnexpectedFiles(workspacePath: string, allowedFiles: Set<string>): Promise<void> {
     const entries = await readdir(workspacePath, { withFileTypes: true });
     for (const entry of entries) {

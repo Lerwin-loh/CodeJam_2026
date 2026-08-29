@@ -22,6 +22,7 @@ const now = () => new Date().toISOString();
 /** Minimum capability each project action needs. Unlisted -> owner only. */
 const PROJECT_ACTIONS: Record<string, "owner" | "member" | "member-own"> = {
   "project.read": "member",
+  "project.delete": "owner",
   "project.tree.read": "member",
   "file.read": "member",
   "members.read": "member",
@@ -202,6 +203,74 @@ export class ProjectService {
     return database.projects
       .filter((item) => item.ownerId === userId || memberProjectIds.has(item.id))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  projectAgentIds(projectId: string): string[] {
+    this.getProjectOrThrow(projectId);
+    return this.store
+      .snapshot()
+      .agents.filter((agent) => agent.projectId === projectId)
+      .map((agent) => agent.id);
+  }
+
+  async deleteProject(
+    projectId: string,
+    actor: User,
+  ): Promise<{
+    archivedWorkspace: string | null;
+    archivedSnapshots: number;
+  }> {
+    const database = this.store.snapshot();
+    const project = database.projects.find((item) => item.id === projectId);
+    if (!project) throw new HttpError(404, "Project not found");
+    if (project.ownerId !== actor.id) {
+      throw new HttpError(403, "Only the project owner can delete this project");
+    }
+
+    const agentIds = new Set(
+      database.agents
+        .filter((agent) => agent.projectId === projectId)
+        .map((agent) => agent.id),
+    );
+    const snapshots = database.snapshots.filter((snapshot) =>
+      agentIds.has(snapshot.agentId),
+    );
+
+    // Archive recoverable filesystem state before removing its metadata. A
+    // manually deleted project directory is treated as an already-empty archive.
+    const archivedWorkspace = await this.workspaces.archiveProject(projectId);
+    const archivedSnapshots = await this.history.archiveSnapshots(projectId, snapshots);
+
+    await this.store.mutate((next) => {
+      next.projects = next.projects.filter((item) => item.id !== projectId);
+      next.projectMembers = next.projectMembers.filter((item) => item.projectId !== projectId);
+      next.commitRequests = next.commitRequests.filter((item) => item.projectId !== projectId);
+      next.agents = next.agents.filter((item) => !agentIds.has(item.id));
+      next.branches = next.branches.filter((item) => !agentIds.has(item.agentId));
+      next.messages = next.messages.filter((item) => !agentIds.has(item.agentId));
+      next.runs = next.runs.filter((item) => !agentIds.has(item.agentId));
+      next.traces = next.traces.filter((item) => !agentIds.has(item.agentId));
+      next.snapshots = next.snapshots.filter((item) => !agentIds.has(item.agentId));
+      next.contexts = next.contexts.filter((item) => !agentIds.has(item.agentId));
+      next.checkpoints = next.checkpoints.filter((item) => !agentIds.has(item.agentId));
+      next.audit = next.audit.filter(
+        (item) => item.resource !== "project:" + projectId &&
+          (item.agentId === null || !agentIds.has(item.agentId)),
+      );
+      next.audit.push({
+        id: randomUUID(),
+        userId: actor.id,
+        userName: actor.name,
+        agentId: null,
+        action: "project.delete",
+        resource: "project:" + projectId,
+        decision: "allow",
+        reason: "Owner deleted project " + project.name,
+        timestamp: now(),
+      });
+    });
+
+    return { archivedWorkspace, archivedSnapshots };
   }
 
   getProject(projectId: string, user: User): {

@@ -125,9 +125,26 @@ export async function createApp(
 
   app.get("/api/system", async () => service.systemInfo());
 
-  // Agents only exist inside a project — the parent agent for the owner, a child
-  // agent per member. They are created through the project routes below, never
-  // standalone. The per-agent routes that follow serve those project agents.
+  app.get("/api/agents", async (request) => ({
+    agents: service.listAgents(request.user.id),
+  }));
+
+  app.post("/api/agents", async (request, reply) => {
+    const body = createAgentBody.parse(request.body);
+    const agent = await service.createAgent(body, request.user.id);
+    await service.recordAudit({
+      user: request.user,
+      agentId: agent.id,
+      action: "agent.create",
+      resource: "agent:" + agent.id,
+      decision: "allow",
+      reason: "Owner created the Agent",
+    });
+    return reply.code(201).send({ agent });
+  });
+
+  // Standalone Agents use the collection routes above. Project parent and child
+  // Agents are created through project routes and share these per-Agent routes.
 
   app.get("/api/agents/:id", async (request) => {
     const { id } = agentIdParams.parse(request.params);
@@ -371,6 +388,15 @@ export async function createApp(
   app.get("/api/projects/:id", async (request) => {
     const { id } = projectIdParams.parse(request.params);
     return projects.getProject(id, request.user);
+  });
+
+  app.delete("/api/projects/:id", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.delete");
+    for (const agentId of projects.projectAgentIds(id)) {
+      await service.stopAgent(agentId);
+    }
+    return projects.deleteProject(id, request.user);
   });
 
   app.get("/api/projects/:id/tree", async (request) => {

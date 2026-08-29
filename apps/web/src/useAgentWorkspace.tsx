@@ -550,10 +550,12 @@ export function AgentPlayground({
   ws,
   title,
   subtitle,
+  showDelete = true,
 }: {
   ws: WorkspaceApi;
   title: string;
   subtitle: string;
+  showDelete?: boolean;
 }) {
   const canManage = ws.canManage;
   const messageEnd = useRef<HTMLDivElement>(null);
@@ -600,13 +602,15 @@ export function AgentPlayground({
           >
             {ws.status === "stopped" ? "Start" : "Stop"}
           </button>
-          <button
-            className="button button-danger"
-            onClick={() => void ws.deleteAgent()}
-            disabled={!canManage || ws.busy || ws.status === "busy"}
-          >
-            Delete
-          </button>
+          {showDelete && (
+            <button
+              className="button button-danger"
+              onClick={() => void ws.deleteAgent()}
+              disabled={!canManage || ws.busy || ws.status === "busy"}
+            >
+              Delete
+            </button>
+          )}
         </div>
       </header>
 
@@ -815,7 +819,7 @@ export function AgentPlayground({
 }
 
 /* ------------------------------------------------------------------ */
-/* BranchPoint drawer: History / Branches / Compare. Sibling of <main> */
+/* BranchPoint drawer: History / Branches / Compare. */
 /* ------------------------------------------------------------------ */
 
 export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {

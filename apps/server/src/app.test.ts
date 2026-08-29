@@ -174,14 +174,32 @@ describe("Project access enforcement (end to end)", () => {
     });
     expect(bobMessagesParentAgent.statusCode).toBe(403);
 
-    // There is no way to create a standalone agent.
+    // Standalone agents remain scoped to their owner and power Individual mode.
     const standalone = await app.inject({
       method: "POST",
       url: "/api/agents",
       headers: asAlice,
       payload: JSON.stringify({ name: "loose agent" }),
     });
-    expect(standalone.statusCode).toBe(404);
+    expect(standalone.statusCode).toBe(201);
+
+    const aliceAgents = await app.inject({
+      method: "GET",
+      url: "/api/agents",
+      headers: asAlice,
+    });
+    expect(aliceAgents.statusCode).toBe(200);
+    expect(aliceAgents.json().agents.map((agent: { name: string }) => agent.name)).toEqual([
+      "loose agent",
+    ]);
+
+    const bobAgents = await app.inject({
+      method: "GET",
+      url: "/api/agents",
+      headers: asBob,
+    });
+    expect(bobAgents.statusCode).toBe(200);
+    expect(bobAgents.json().agents).toEqual([]);
 
     const auditAsAlice = await app.inject({ method: "GET", url: "/api/audit", headers: asAlice });
     const entries = auditAsAlice.json().entries as Array<{
@@ -192,6 +210,28 @@ describe("Project access enforcement (end to end)", () => {
     expect(
       entries.some((entry) => entry.decision === "deny" && entry.userName === "Bob"),
     ).toBe(true);
+
+    const bobDeletesProject = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/" + project.id,
+      headers: { authorization: "Bearer " + bob },
+    });
+    expect(bobDeletesProject.statusCode).toBe(403);
+
+    const aliceDeletesProject = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/" + project.id,
+      headers: { authorization: "Bearer " + alice },
+    });
+    expect(aliceDeletesProject.statusCode).toBe(200);
+    expect(aliceDeletesProject.json()).toMatchObject({ archivedSnapshots: 1 });
+
+    const projectsAfterDelete = await app.inject({
+      method: "GET",
+      url: "/api/projects",
+      headers: asAlice,
+    });
+    expect(projectsAfterDelete.json().projects).toEqual([]);
 
     await app.close();
   });

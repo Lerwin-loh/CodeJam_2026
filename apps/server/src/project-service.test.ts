@@ -120,6 +120,131 @@ describe("Part 1 — projects & membership", () => {
     expect(db.projectMembers).toHaveLength(0);
     expect(db.agents.some((a) => a.id === member.childAgentId)).toBe(false);
   });
+
+  it("deletes a project, archives its workspaces, and removes linked metadata", async () => {
+    const { projects, agents, store } = await makeStack();
+    const owner = await agents.createUser("Owner");
+    await agents.createUser("Dana");
+    const project = await projects.createProject("App", owner.id);
+    const member = await projects.addMember(project.id, owner, {
+      userName: "Dana",
+      role: "Frontend",
+    });
+    const timestamp = new Date().toISOString();
+    const runId = "11111111-1111-4111-8111-111111111111";
+    const branchId = "22222222-2222-4222-8222-222222222222";
+    const contextId = "33333333-3333-4333-8333-333333333333";
+    const checkpointId = "44444444-4444-4444-8444-444444444444";
+    const snapshot = store.snapshot().snapshots.find((item) => item.agentId === member.childAgentId)!;
+
+    await store.mutate((db) => {
+      db.branches.push({
+        id: branchId,
+        agentId: member.childAgentId,
+        name: "work",
+        parentBranchId: null,
+        parentCheckpointId: null,
+        workspacePath: member.workspacePath + "/branches/" + branchId,
+        codexThreadId: null,
+        status: "ready",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      db.runs.push({
+        id: runId,
+        agentId: member.childAgentId,
+        branchId,
+        status: "completed",
+        prompt: "test",
+        output: "done",
+        error: null,
+        usage: null,
+        startedAt: timestamp,
+        completedAt: timestamp,
+        createdAt: timestamp,
+        beforeWorkspaceHash: null,
+        afterWorkspaceHash: null,
+        checkpointId,
+      });
+      db.messages.push({
+        id: "55555555-5555-4555-8555-555555555555",
+        agentId: member.childAgentId,
+        runId,
+        branchId,
+        role: "user",
+        content: "test",
+        createdAt: timestamp,
+      });
+      db.traces.push({
+        id: "66666666-6666-4666-8666-666666666666",
+        runId,
+        agentId: member.childAgentId,
+        branchId,
+        type: "run.completed",
+        timestamp,
+        metadata: {},
+      });
+      db.contexts.push({
+        id: contextId,
+        agentId: member.childAgentId,
+        runId,
+        agentName: "Child",
+        agentDescription: "",
+        instructions: "",
+        messages: [],
+        sourceThreadId: null,
+        sessionRolloutPath: null,
+        sessionLineOffset: null,
+        createdAt: timestamp,
+      });
+      db.checkpoints.push({
+        id: checkpointId,
+        agentId: member.childAgentId,
+        branchId,
+        runId,
+        parentCheckpointId: null,
+        snapshotId: snapshot.id,
+        contextId,
+        workspaceHash: snapshot.manifest.workspaceHash,
+        changedFiles: { created: [], modified: [], deleted: [] },
+        status: "complete",
+        reason: "explicit",
+        label: "test",
+        createdAt: timestamp,
+      });
+    });
+
+    const result = await projects.deleteProject(project.id, owner);
+    expect(result.archivedWorkspace).not.toBeNull();
+    expect(result.archivedSnapshots).toBeGreaterThan(0);
+    expect(
+      await readFile(path.join(result.archivedWorkspace!, "main", "README.md"), "utf8"),
+    ).toContain("App");
+
+    const db = store.snapshot();
+    expect(db.projects.some((item) => item.id === project.id)).toBe(false);
+    expect(db.projectMembers.some((item) => item.projectId === project.id)).toBe(false);
+    expect(db.agents.some((item) => item.projectId === project.id)).toBe(false);
+    expect(db.branches.some((item) => item.agentId === member.childAgentId)).toBe(false);
+    expect(db.messages.some((item) => item.agentId === member.childAgentId)).toBe(false);
+    expect(db.runs.some((item) => item.agentId === member.childAgentId)).toBe(false);
+    expect(db.traces.some((item) => item.agentId === member.childAgentId)).toBe(false);
+    expect(db.snapshots.some((item) => item.agentId === member.childAgentId)).toBe(false);
+    expect(db.contexts.some((item) => item.agentId === member.childAgentId)).toBe(false);
+    expect(db.checkpoints.some((item) => item.agentId === member.childAgentId)).toBe(false);
+    expect(db.audit.some((item) => item.action === "project.delete")).toBe(true);
+  });
+
+  it("deletes an orphaned project whose workspace folder is already missing", async () => {
+    const { projects, agents, store, workspaces } = await makeStack();
+    const owner = await agents.createUser("Owner");
+    const project = await projects.createProject("Orphaned", owner.id);
+    await rm(workspaces.projectPath(project.id), { recursive: true, force: true });
+
+    const result = await projects.deleteProject(project.id, owner);
+    expect(result.archivedWorkspace).toBeNull();
+    expect(store.snapshot().projects).toEqual([]);
+  });
 });
 
 describe("Part 1 — permission model", () => {

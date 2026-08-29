@@ -440,6 +440,12 @@ export class AgentService {
 
   async deleteAgent(id: string): Promise<{ archivedWorkspace: string }> {
     const agent = this.getAgent(id);
+    if (agent.projectId !== null) {
+      throw new HttpError(
+        409,
+        "Project Agents must be removed through their Project or membership",
+      );
+    }
     await this.cancelExecution(id);
     const archivedWorkspace = await this.workspaces.archive(agent);
     await this.store.mutate((database) => {

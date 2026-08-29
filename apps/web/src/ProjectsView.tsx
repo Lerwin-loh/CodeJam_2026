@@ -7,7 +7,6 @@ import {
   WorkspaceOverlays,
 } from "./useAgentWorkspace";
 import type {
-  AuditEntry,
   CommitRequest,
   ParentAgentView,
   Project,
@@ -56,9 +55,6 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
   const [securityRunning, setSecurityRunning] = useState(false);
   const [submittingCommit, setSubmittingCommit] = useState(false);
 
-  const [showAudit, setShowAudit] = useState(false);
-  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
-
   const [mUserName, setMUserName] = useState("");
   const [mRole, setMRole] = useState("");
 
@@ -97,16 +93,6 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     try {
       const view = await api.projects.myAgent(projectId);
       if (mounted.current) setChild(view);
-    } catch (reason) {
-      fail(reason);
-    }
-  }, [fail]);
-
-  const openAudit = useCallback(async () => {
-    setShowAudit(true);
-    try {
-      const { entries } = await api.audit();
-      if (mounted.current) setAuditEntries(entries);
     } catch (reason) {
       fail(reason);
     }
@@ -193,6 +179,30 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
       fail(reason);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const deleteProject = async () => {
+    if (!selectedId || !detail || detail.role !== "owner") return;
+    const confirmed = window.confirm(
+      "Delete " + detail.project.name +
+        "? Its project and member workspaces will be archived, and all project history will be removed.",
+    );
+    if (!confirmed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.projects.delete(selectedId);
+      setSelectedId(null);
+      setDetail(null);
+      setParent(null);
+      setChild(null);
+      setCommitRequests([]);
+      await refreshProjects();
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      if (mounted.current) setBusy(false);
     }
   };
 
@@ -295,8 +305,13 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     { key: "team", label: "Team", show: !!isOwner },
   ];
 
+  const closeBranchPointAndSelectTab = (nextTab: ProjectTab) => {
+    ws.setShowBranchPoint(false);
+    setTab(nextTab);
+  };
+
   return (
-    <div className={"app-shell " + (ws.showBranchPoint && !ws.showBpSettings ? "branchpoint-open" : "")}>
+    <div className="app-shell project-app-shell">
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">P</div>
@@ -345,9 +360,6 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
             <button className="button button-ghost" onClick={onToggleMode}>
               Individual mode
             </button>
-            <button className="button button-ghost" onClick={() => void openAudit()}>
-              Access log
-            </button>
             <button className="button button-ghost" onClick={onSignOut}>
               Sign out
             </button>
@@ -387,6 +399,15 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                     : "You are the " + (myMember?.role ?? "member") + " on this project."}
                 </p>
               </div>
+              {isOwner && (
+                <button
+                  className="button button-danger"
+                  onClick={() => void deleteProject()}
+                  disabled={busy}
+                >
+                  {busy ? <Spinner /> : "Delete project"}
+                </button>
+              )}
             </header>
 
             <nav className="project-tabs">
@@ -396,7 +417,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                   <button
                     key={t.key}
                     className={tab === t.key ? "active" : ""}
-                    onClick={() => setTab(t.key)}
+                    onClick={() => closeBranchPointAndSelectTab(t.key)}
                   >
                     {t.label}
                   </button>
@@ -406,7 +427,15 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
             <section className="project-panel">
               {tab === "parent" &&
                 (activeAgent ? (
-                  <AgentPlayground ws={ws} title={activeAgent.title} subtitle={activeAgent.subtitle} />
+                  <div
+                    className={
+                      "project-agent-layout " +
+                      (ws.showBranchPoint && !ws.showBpSettings ? "branchpoint-open" : "")
+                    }
+                  >
+                    <AgentPlayground ws={ws} title={activeAgent.title} subtitle={activeAgent.subtitle} showDelete={false} />
+                    {ws.showBranchPoint && <BranchPointPanel ws={ws} />}
+                  </div>
                 ) : (
                   <p className="muted-note">The parent agent is not available for this project.</p>
                 ))}
@@ -457,7 +486,15 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                   )}
 
                   {activeAgent && activeAgent.id === childId && (
-                    <AgentPlayground ws={ws} title={activeAgent.title} subtitle={activeAgent.subtitle} />
+                    <div
+                      className={
+                        "project-agent-layout " +
+                        (ws.showBranchPoint && !ws.showBpSettings ? "branchpoint-open" : "")
+                      }
+                    >
+                      <AgentPlayground ws={ws} title={activeAgent.title} subtitle={activeAgent.subtitle} showDelete={false} />
+                      {ws.showBranchPoint && <BranchPointPanel ws={ws} />}
+                    </div>
                   )}
                 </div>
               )}
@@ -569,42 +606,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
         )}
       </main>
 
-      {ws.showBranchPoint && <BranchPointPanel ws={ws} />}
       <WorkspaceOverlays ws={ws} />
-
-      {showAudit && (
-        <div className="modal-backdrop" onMouseDown={() => setShowAudit(false)}>
-          <section className="modal" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="modal-heading">
-              <div>
-                <span className="eyebrow">Access log</span>
-                <h2>Your access events</h2>
-                <p>Every action you take, and every denied attempt on agents you own.</p>
-              </div>
-              <button type="button" onClick={() => setShowAudit(false)} aria-label="Close access log">
-                ×
-              </button>
-            </div>
-            <div className="audit-list">
-              {auditEntries.map((entry) => (
-                <article className={"audit-row audit-" + entry.decision} key={entry.id}>
-                  <span className="audit-decision">{entry.decision}</span>
-                  <div className="audit-copy">
-                    <strong>
-                      {entry.userName} · {entry.action}
-                    </strong>
-                    <span>
-                      {entry.resource} · {formatTime(entry.timestamp)}
-                    </span>
-                    <p>{entry.reason}</p>
-                  </div>
-                </article>
-              ))}
-              {auditEntries.length === 0 && <p className="audit-empty">No access events recorded yet.</p>}
-            </div>
-          </section>
-        </div>
-      )}
 
       {showCreate && (
         <div className="modal-backdrop" onMouseDown={() => setShowCreate(false)}>

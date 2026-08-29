@@ -158,6 +158,11 @@ export const api = {
         body: JSON.stringify({ name }),
       }),
     get: (id: string) => request<ProjectDetail>("/api/projects/" + id),
+    delete: (id: string) =>
+      request<{ archivedWorkspace: string | null; archivedSnapshots: number }>(
+        "/api/projects/" + id,
+        { method: "DELETE" },
+      ),
     tree: (id: string) => request<{ files: string[] }>("/api/projects/" + id + "/tree"),
     file: (id: string, path: string) =>
       request<{ path: string; content: string }>(

@@ -6,7 +6,6 @@ import type {
   AgentBranch,
   AgentCheckpoint,
   AgentRun,
-  AuditEntry,
   CheckpointDetails,
   CheckpointDiff,
   Message,
@@ -72,8 +71,6 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showAudit, setShowAudit] = useState(false);
-  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
   const [showBranchPoint, setShowBranchPoint] = useState(false);
   const [selectedCheckpointId, setSelectedCheckpointId] = useState<string | null>(null);
   const [showBranchPointSettings, setShowBranchPointSettings] = useState(false);
@@ -458,20 +455,8 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
     setRuns([]);
     setCheckpoints([]);
     setTraceEvents([]);
-    setAuditEntries([]);
-    setShowAudit(false);
     setShowBranchPoint(false);
     onSignOut();
-  };
-
-  const openAudit = async () => {
-    setShowAudit(true);
-    try {
-      const { entries } = await api.audit();
-      setAuditEntries(entries);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    }
   };
 
   return (
@@ -533,10 +518,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
           </div>
           <div className="user-card-actions">
             <button className="button button-ghost" onClick={onToggleMode}>
-              Collaboration mode
-            </button>
-            <button className="button button-ghost" onClick={openAudit}>
-              Access log
+              Project mode
             </button>
             <button className="button button-ghost" onClick={handleSignOut}>
               Switch
@@ -1205,36 +1187,6 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
             <p className="inspection-message">The original workspace was not changed.</p>
             <label>Restored workspace<input readOnly value={restoreResult.path} /></label>
             <p className="inspection-muted">Workspace hash: {restoreResult.hash}</p>
-          </section>
-        </div>
-      )}
-
-      {showAudit && (
-        <div className="modal-backdrop" onMouseDown={() => setShowAudit(false)}>
-          <section className="modal" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-heading">
-              <div>
-                <span className="eyebrow">Authorization</span>
-                <h2>Access log</h2>
-                <p>Every action you take on an Agent, and every denied attempt on Agents you own.</p>
-              </div>
-              <button type="button" onClick={() => setShowAudit(false)} aria-label="Close access log">×</button>
-            </div>
-            <div className="audit-list">
-              {auditEntries.map((entry) => (
-                <article className={"audit-row audit-" + entry.decision} key={entry.id}>
-                  <span className="audit-decision">{entry.decision}</span>
-                  <div className="audit-copy">
-                    <strong>{entry.userName} · {entry.action}</strong>
-                    <span>{entry.resource} · {formatTime(entry.timestamp)}</span>
-                    <p>{entry.reason}</p>
-                  </div>
-                </article>
-              ))}
-              {auditEntries.length === 0 && (
-                <p className="audit-empty">No access events recorded yet.</p>
-              )}
-            </div>
           </section>
         </div>
       )}
