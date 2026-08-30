@@ -53,7 +53,7 @@ export class WorkspaceHistory {
 
   async createSnapshot(
     agentId: string,
-    runId: string,
+    runId: string | null,
     workspacePath: string,
     manifest: WorkspaceManifest,
   ): Promise<WorkspaceSnapshot> {

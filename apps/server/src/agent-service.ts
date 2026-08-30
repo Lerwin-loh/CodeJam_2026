@@ -27,6 +27,8 @@ import type {
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 import { WorkspaceHistory } from "./workspace-history.js";
+import { MergeEngine, outcomeDetails, outcomeSummary } from "./merge-engine.js";
+import type { MergeResolution } from "./types.js";
 import { captureSessionOffset, forkSessionAtOffset } from "./codex-session-fork.js";
 
 const now = () => new Date().toISOString();
@@ -87,6 +89,7 @@ export class AgentService {
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
     private readonly history = new WorkspaceHistory(path.join(config.dataDirectory, "branchpoint")),
+    private readonly mergeEngine = new MergeEngine(history),
   ) {}
 
   async initialize(): Promise<void> {
@@ -602,6 +605,51 @@ export class AgentService {
     const branch = this.store.snapshot().branches.find((item) => item.id === id);
     if (!branch) throw new HttpError(404, "Branch not found");
     return branch;
+  }
+
+  private async mergeSide(agent: Agent, workspacePath: string, id: string, label: string, baseSnapshotId: string | null, branchId: string | null = null) {
+    const database = this.store.snapshot();
+    const runs = database.runs.filter((run) => run.agentId === agent.id && run.branchId === branchId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const prompts = this.getMessages(agent.id, branchId).filter((message) => message.role === "user").map((message) => message.content);
+    const baseSnapshot = baseSnapshotId ? database.snapshots.find((snapshot) => snapshot.id === baseSnapshotId) ?? null : null;
+    const changed = baseSnapshot ? this.history.diff(baseSnapshot.manifest, await this.history.manifest(workspacePath)) : { created: [], modified: [], deleted: [] };
+    const fileSummary = [
+      changed.created.length ? "created " + changed.created.join(", ") : "",
+      changed.modified.length ? "updated " + changed.modified.join(", ") : "",
+      changed.deleted.length ? "deleted " + changed.deleted.join(", ") : "",
+    ].filter(Boolean).join("; ");
+    return {
+      id, label, workspacePath,
+      outcome: { id, label, summary: outcomeSummary(runs[0]?.output ?? "", fileSummary), details: outcomeDetails(runs[0]?.output ?? "", fileSummary), requestedFeatures: prompts },
+      prompts,
+      baseSnapshot,
+    };
+  }
+
+  async previewBranchMerge(agentId: string, branchId: string) {
+    const agent = this.getAgent(agentId);
+    const branch = this.getBranch(branchId);
+    if (branch.agentId !== agentId) throw new HttpError(403, "This branch belongs to another Agent");
+    const baseId = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null;
+    return this.mergeEngine.preview(await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId), await this.mergeSide(agent, branch.workspacePath, branch.id, branch.name, baseId, branch.id));
+  }
+
+  async mergeBranch(agentId: string, branchId: string, resolution: MergeResolution) {
+    const agent = this.getAgent(agentId);
+    const branch = this.getBranch(branchId);
+    if (branch.agentId !== agentId) throw new HttpError(403, "This branch belongs to another Agent");
+    const baseId = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null;
+    const target = await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId);
+    const source = await this.mergeSide(agent, branch.workspacePath, branch.id, branch.name, baseId, branch.id);
+    return this.mergeEngine.apply(target, source, resolution, async (manifest, keptPrompts) => {
+      const snapshot = await this.history.createSnapshot(agent.id, null, agent.workspacePath, manifest);
+      await this.store.mutate((database) => {
+        database.snapshots.push(snapshot);
+        const row = database.agents.find((item) => item.id === agent.id);
+        if (row) row.mergedContext = keptPrompts;
+      });
+      return snapshot;
+    });
   }
 
   async createBranchFromCheckpoint(

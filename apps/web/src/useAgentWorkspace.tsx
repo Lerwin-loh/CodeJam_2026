@@ -413,25 +413,6 @@ export function useAgentWorkspace(
     [agentId, fail],
   );
 
-  const mergeBranches = useCallback(
-    async (branchIds: string[]): Promise<{ mergedBranchIds: string[]; changedFiles: string[] }> => {
-      const empty = { mergedBranchIds: [] as string[], changedFiles: [] as string[] };
-      if (!agentId || branchIds.length === 0) return empty;
-      setError(null);
-      try {
-        const result = await api.mergeBranches(agentId, branchIds);
-        const merged = new Set(result.mergedBranchIds);
-        setBranches((current) => current.filter((item) => !merged.has(item.id)));
-        setActiveBranchId((current) => (current && merged.has(current) ? null : current));
-        return result;
-      } catch (reason) {
-        fail(reason);
-        return empty;
-      }
-    },
-    [agentId, fail],
-  );
-
   const toggleAgent = useCallback(async () => {
     if (!agentId) return;
     setBusy(true);
@@ -555,7 +536,6 @@ export function useAgentWorkspace(
     historyItems,
     branchGraphRows,
     selectBranch,
-    mergeBranches,
     send,
     sendText,
     saveCheckpoint,
@@ -863,7 +843,7 @@ export function AgentPlayground({
 /* BranchPoint drawer: History / Branches / Compare. */
 /* ------------------------------------------------------------------ */
 
-export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
+export function BranchPointPanel({ ws, onMergeBranch }: { ws: WorkspaceApi; onMergeBranch?: (branchId: string) => void }) {
   const canManage = ws.canManage;
   return (
     <>
@@ -1144,21 +1124,12 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
               </div>
               <div className="branch-list">
                 {ws.branches.map((branch) => (
-                  <button
-                    className={"branch-card " + (branch.id === ws.activeBranchId ? "active" : "")}
-                    type="button"
-                    key={branch.id}
-                    onClick={() => ws.selectBranch(branch.id)}
-                  >
-                    <span className="branch-card-icon">⑂</span>
-                    <span>
-                      <strong>{branch.name}</strong>
-                      <small>
-                        {branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}
-                      </small>
-                    </span>
-                    <span>›</span>
-                  </button>
+                  <div className="branch-card-row" key={branch.id}>
+                    <button className={"branch-card " + (branch.id === ws.activeBranchId ? "active" : "")} type="button" onClick={() => ws.selectBranch(branch.id)}>
+                      <span className="branch-card-icon">⑂</span><span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span><span>›</span>
+                    </button>
+                    {onMergeBranch && <button className="button button-ghost" type="button" onClick={() => onMergeBranch(branch.id)}>Merge to main</button>}
+                  </div>
                 ))}
               </div>
             </>

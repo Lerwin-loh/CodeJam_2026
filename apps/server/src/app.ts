@@ -8,6 +8,7 @@ import { HttpError } from "./errors.js";
 import type { AgentService } from "./agent-service.js";
 import { OWASP_ANALYSIS_PROMPT, type ProjectService } from "./project-service.js";
 import type { User } from "./types.js";
+import { MergeConflictError } from "./merge-engine.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -38,9 +39,6 @@ const branchMessageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
   branchId: z.string().uuid().nullable().optional(),
 });
-const mergeBranchesBody = z.object({
-  branchIds: z.array(z.string().uuid()).min(1).max(50),
-});
 const branchQuery = z.object({ branchId: z.string().uuid().optional() });
 const createCheckpointBody = z.object({
   label: z.string().trim().min(1).max(120),
@@ -63,6 +61,12 @@ const commitRequestBody = z.object({
   note: z.string().trim().max(2000).optional(),
 });
 const decideCommitBody = z.object({ decision: z.enum(["approved", "rejected"]) });
+const mergeResolution = z.object({
+  workspace: z.record(z.string(), z.enum(["target", "source", "ai"])),
+  context: z.record(z.string(), z.enum(["target", "source", "ai"])),
+});
+const agentMergeBody = z.object({ branchId: z.string().uuid(), resolution: mergeResolution.optional() });
+const projectMergeBody = z.object({ memberId: z.string().uuid(), branchId: z.string().uuid().nullable().optional(), resolution: mergeResolution.optional() });
 const commitRequestParams = z.object({ id: z.string().uuid() });
 
 const publicPaths = new Set(["/api/health", "/api/auth"]);
@@ -251,11 +255,19 @@ export async function createApp(
     return reply.code(201).send({ branch });
   });
 
-  app.post("/api/agents/:id/branches/merge", async (request) => {
+  app.post("/api/agents/:id/merge-preview", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    await service.assertAgentAccess(id, request.user, "branch.merge");
-    const { branchIds } = mergeBranchesBody.parse(request.body);
-    return service.mergeBranches(id, branchIds);
+    await service.assertAgentAccess(id, request.user, "agent.read");
+    const body = agentMergeBody.parse(request.body);
+    return service.previewBranchMerge(id, body.branchId);
+  });
+
+  app.post("/api/agents/:id/merge", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "agent.run");
+    const body = agentMergeBody.parse(request.body);
+    if (!body.resolution) throw new HttpError(400, "Merge resolutions are required.");
+    return service.mergeBranch(id, body.branchId, body.resolution);
   });
 
   app.post("/api/agents/:id/checkpoints", async (request, reply) => {
@@ -552,6 +564,21 @@ export async function createApp(
     return reply.code(201).send({ request: created });
   });
 
+  app.post("/api/projects/:id/merge-preview", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.decide");
+    const body = projectMergeBody.parse(request.body);
+    return projects.previewChildMerge(id, body.memberId, body.branchId ?? null);
+  });
+
+  app.post("/api/projects/:id/merge", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.decide");
+    const body = projectMergeBody.parse(request.body);
+    if (!body.resolution) throw new HttpError(400, "Merge resolutions are required.");
+    return projects.mergeChild(id, body.memberId, body.branchId ?? null, body.resolution);
+  });
+
   app.get("/api/projects/:id/commit-requests", async (request) => {
     const { id } = projectIdParams.parse(request.params);
     const { role, member } = await projects.assertProjectAccess(
@@ -599,8 +626,10 @@ export async function createApp(
         ? (error as { statusCode: number }).statusCode
         : null;
     const statusCode =
-      error instanceof HttpError
-        ? error.statusCode
+      error instanceof MergeConflictError
+        ? 409
+        : error instanceof HttpError
+          ? error.statusCode
         : validationError
           ? 400
           : frameworkStatus && frameworkStatus >= 400 && frameworkStatus <= 599
@@ -611,6 +640,7 @@ export async function createApp(
     }
     return reply.code(statusCode).send({
       error: appError.message,
+      ...(appError instanceof MergeConflictError ? { preview: appError.preview } : {}),
       ...(validationError ? { details: error.issues } : {}),
     });
   });

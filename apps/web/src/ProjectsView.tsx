@@ -7,7 +7,6 @@ import {
   WorkspaceOverlays,
 } from "./useAgentWorkspace";
 import type {
-  AgentBranch,
   CommitRequest,
   MemberSecurityView,
   ParentAgentView,
@@ -17,7 +16,9 @@ import type {
   SecurityAnalysis,
   SecurityAnalysisPoint,
   User,
+  MergePreview,
 } from "./types";
+import { MergeReview } from "./MergeReview";
 
 function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
@@ -102,10 +103,6 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
 
   const [showCreate, setShowCreate] = useState(false);
   const [fixPoint, setFixPoint] = useState<SecurityAnalysisPoint | null>(null);
-  const [showMerge, setShowMerge] = useState(false);
-  const [mergeSel, setMergeSel] = useState<Set<string>>(new Set());
-  const [merging, setMerging] = useState(false);
-  const [mergeNote, setMergeNote] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
 
   const [parent, setParent] = useState<ParentAgentView | null>(null);
@@ -116,6 +113,8 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
   const [securityExpanded, setSecurityExpanded] = useState(false);
   const [securityRunning, setSecurityRunning] = useState(false);
   const [submittingCommit, setSubmittingCommit] = useState(false);
+  const [mergePreview, setMergePreview] = useState<{ preview: MergePreview; memberId: string; branchId: string | null } | null>(null);
+  const [mergeBusy, setMergeBusy] = useState(false);
 
   const [mUserName, setMUserName] = useState("");
   const [mRole, setMRole] = useState("");
@@ -353,7 +352,6 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     if (!selectedId || !myMember) return;
     setSecurityRunning(true);
     setError(null);
-    setMergeNote(null);
     try {
       const { security: next } = await api.projects.securityAnalysis(selectedId, myMember.id);
       if (mounted.current) setSecurity(next);
@@ -377,37 +375,6 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     setFixPoint(null);
     setTab("mine");
     void ws.sendText(buildFixAllPrompt(points));
-  };
-
-  const openMerge = () => {
-    setMergeSel(new Set());
-    setShowMerge(true);
-  };
-
-  const doMerge = async () => {
-    if (mergeSel.size === 0) return;
-    setMerging(true);
-    setError(null);
-    setMergeNote(null);
-    try {
-      const result = await ws.mergeBranches([...mergeSel]);
-      setShowMerge(false);
-      setMergeSel(new Set());
-      if (selectedId) await loadChild(selectedId);
-      if (mounted.current && result.mergedBranchIds.length > 0) {
-        const n = result.mergedBranchIds.length;
-        const f = result.changedFiles.length;
-        setMergeNote(
-          "Merged " + n + " sub-branch" + (n === 1 ? "" : "es") + " and deleted them" +
-            (f > 0
-              ? " — " + f + " file" + (f === 1 ? "" : "s") +
-                " changed, re-run the security analysis before committing."
-              : " (no file changes)."),
-        );
-      }
-    } finally {
-      if (mounted.current) setMerging(false);
-    }
   };
 
   const submitCommitRequest = async () => {
@@ -436,6 +403,22 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     } catch (reason) {
       fail(reason);
     }
+  };
+
+  const openChildMerge = async (memberId: string, branchId: string | null = null) => {
+    if (!selectedId) return;
+    setMergeBusy(true); setError(null);
+    try { setMergePreview({ preview: await api.projects.mergePreview(selectedId, memberId, branchId), memberId, branchId }); }
+    catch (reason) { fail(reason); }
+    finally { if (mounted.current) setMergeBusy(false); }
+  };
+
+  const applyChildMerge = async (resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => {
+    if (!selectedId || !mergePreview) return;
+    setMergeBusy(true); setError(null);
+    try { await api.projects.merge(selectedId, mergePreview.memberId, mergePreview.branchId, resolution); setMergePreview(null); await loadDetail(selectedId); }
+    catch (reason) { fail(reason); }
+    finally { if (mounted.current) setMergeBusy(false); }
   };
 
   const ownerMembers = useMemo<ProjectMemberView[]>(
@@ -637,23 +620,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                     >
                       {submittingCommit ? <Spinner /> : "Submit commit request"}
                     </button>
-                    <button
-                      className="button button-ghost"
-                      onClick={openMerge}
-                      disabled={busy || isArchived || ws.status === "busy" || ws.branches.length === 0}
-                      title={
-                        ws.branches.length === 0
-                          ? "You have no sub-branches to merge"
-                          : ws.status === "busy"
-                            ? "Wait for the current agent run to finish"
-                            : undefined
-                      }
-                    >
-                      Merge sub-branches{ws.branches.length ? " (" + ws.branches.length + ")" : ""}
-                    </button>
                   </div>
-
-                  {mergeNote && <p className="muted-note">{mergeNote}</p>}
 
                   {securityRunning && (
                     <p className="muted-note">
@@ -748,7 +715,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                         title={activeAgent.title}
                         subtitle={activeAgent.subtitle}
                         showDelete={false}
-                        sidePanel={ws.showBranchPoint ? <BranchPointPanel ws={ws} /> : undefined}
+                        sidePanel={ws.showBranchPoint ? <BranchPointPanel ws={ws} onMergeBranch={myMember ? (branchId) => void openChildMerge(myMember.id, branchId) : undefined} /> : undefined}
                       />
                     </div>
                   )}
@@ -820,6 +787,9 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                             Reject
                           </button>
                         </div>
+                      )}
+                      {isOwner && cr.status === "approved" && !isArchived && (
+                        <div className="commit-actions"><button className="button button-primary" onClick={() => void openChildMerge(cr.memberId)}>Review merge into main</button></div>
                       )}
                       {isOwner && cr.status === "pending" && isArchived && (
                         <p className="muted-note">
@@ -967,95 +937,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
         </div>
       )}
 
-      {showMerge && (
-        <div className="modal-backdrop" onMouseDown={() => !merging && setShowMerge(false)}>
-          <div className="modal merge-modal" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="modal-heading">
-              <div>
-                <span className="eyebrow">Your agent · sub-branches</span>
-                <h2>Merge sub-branches</h2>
-                <p>
-                  Picked branches are folded into your workspace, then deleted. Overlapping
-                  files: the newer branch wins. Re-run the security analysis afterwards —
-                  anything not in your workspace at commit time is not committed.
-                </p>
-              </div>
-              <button type="button" onClick={() => !merging && setShowMerge(false)}>
-                ×
-              </button>
-            </div>
-
-            {ws.branches.length === 0 ? (
-              <p className="muted-note">No sub-branches.</p>
-            ) : (
-              <>
-                <div className="merge-select-all">
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={mergeSel.size === ws.branches.length}
-                      onChange={(e) =>
-                        setMergeSel(
-                          e.target.checked
-                            ? new Set(ws.branches.map((b) => b.id))
-                            : new Set(),
-                        )
-                      }
-                    />
-                    Select all ({ws.branches.length})
-                  </label>
-                </div>
-                <ul className="merge-branch-list">
-                  {[...ws.branches]
-                    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-                    .map((b: AgentBranch) => (
-                      <li key={b.id}>
-                        <label>
-                          <input
-                            type="checkbox"
-                            checked={mergeSel.has(b.id)}
-                            onChange={(e) =>
-                              setMergeSel((cur) => {
-                                const next = new Set(cur);
-                                if (e.target.checked) next.add(b.id);
-                                else next.delete(b.id);
-                                return next;
-                              })
-                            }
-                          />
-                          <span className="merge-branch-name">{b.name}</span>
-                          <span className="merge-branch-meta">
-                            {b.status === "busy" ? "running · " : ""}
-                            {formatTime(b.createdAt)}
-                          </span>
-                        </label>
-                      </li>
-                    ))}
-                </ul>
-              </>
-            )}
-
-            <div className="modal-footer">
-              <button
-                type="button"
-                className="button button-ghost"
-                onClick={() => setShowMerge(false)}
-                disabled={merging}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="button button-primary"
-                onClick={() => void doMerge()}
-                disabled={merging || mergeSel.size === 0}
-              >
-                {merging ? <Spinner /> : "Merge " + mergeSel.size + " & delete"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {mergePreview && <MergeReview preview={mergePreview.preview} busy={mergeBusy} onCancel={() => setMergePreview(null)} onMerge={(resolution) => void applyChildMerge(resolution)} />}
     </div>
   );
 }

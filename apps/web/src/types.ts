@@ -157,6 +157,18 @@ export interface AgentBranch {
   updatedAt: string;
 }
 
+export interface MergeOutcome { id: string; label: string; summary: string; details: string[]; requestedFeatures: string[]; }
+export interface MergeWorkspaceConflict { path: string; targetContent: string | null; sourceContent: string | null; baseContent: string | null; targetPaths?: string[]; sourcePaths?: string[]; }
+export interface MergeContextConflict { id: string; targetPrompt: string; sourcePrompt: string; targetSideId: string; sourceSideId: string; }
+export interface MergePreview {
+  target: MergeOutcome;
+  source: MergeOutcome;
+  acceptanceCriteria: string[];
+  changedFiles: ChangedFiles;
+  workspaceConflicts: MergeWorkspaceConflict[];
+  contextConflicts: MergeContextConflict[];
+}
+
 export interface Message {
   id: string;
   agentId: string;

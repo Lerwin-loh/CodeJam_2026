@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { branchPointSettingsTabs, type BranchPointSettingsTabKey } from "./branchPointSettingsContent";
+import { MergeReview } from "./MergeReview";
 import type {
   Agent,
   AgentBranch,
@@ -12,6 +13,7 @@ import type {
   SystemInfo,
   TraceEvent,
   User,
+  MergePreview,
 } from "./types";
 
 const starterPrompts = [
@@ -89,6 +91,8 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
   const [restoreResult, setRestoreResult] = useState<{ path: string; hash: string } | null>(null);
   const [checkpointLabel, setCheckpointLabel] = useState("");
   const [savingCheckpoint, setSavingCheckpoint] = useState(false);
+  const [mergePreview, setMergePreview] = useState<MergePreview | null>(null);
+  const [mergeBusy, setMergeBusy] = useState(false);
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
   const activeBranchIdRef = useRef<string | null>(null);
@@ -446,6 +450,25 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
+  };
+
+  const openBranchMerge = async (branch: AgentBranch) => {
+    if (!selected) return;
+    setMergeBusy(true); setError(null);
+    try { setMergePreview(await api.mergePreview(selected.id, branch.id)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { if (mountedRef.current) setMergeBusy(false); }
+  };
+
+  const applyBranchMerge = async (branch: AgentBranch, resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => {
+    if (!selected) return;
+    setMergeBusy(true); setError(null);
+    try {
+      await api.merge(selected.id, branch.id, resolution);
+      setMergePreview(null); setActiveBranchId(null);
+      await Promise.all([refreshMessages(selected.id), refreshBranchPoint(selected.id)]);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { if (mountedRef.current) setMergeBusy(false); }
   };
 
   const handleSignOut = () => {
@@ -979,7 +1002,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
                     ))}
                   </div>
                 </div>
-                <div className="branch-list">{branches.map((branch) => <button className={"branch-card " + (branch.id === activeBranchId ? "active" : "")} type="button" key={branch.id} onClick={() => { setActiveBranchId(branch.id); setActiveBranchPointView("history"); }}><span className="branch-card-icon">⑂</span><span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span><span>›</span></button>)}</div>
+                <div className="branch-list">{branches.map((branch) => <div className="branch-card-row" key={branch.id}><button className={"branch-card " + (branch.id === activeBranchId ? "active" : "")} type="button" onClick={() => { setActiveBranchId(branch.id); setActiveBranchPointView("history"); }}><span className="branch-card-icon">⑂</span><span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span><span>›</span></button><button className="button button-ghost" type="button" onClick={() => void openBranchMerge(branch)}>Merge to main</button></div>)}</div>
               </> : <div className="branchpoint-empty-state">
                 <span className="branchpoint-empty-icon">⑂</span>
                 <strong>No branch workspaces yet</strong>
@@ -1190,6 +1213,8 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
           </section>
         </div>
       )}
+
+      {mergePreview && selected && <MergeReview preview={mergePreview} busy={mergeBusy} onCancel={() => setMergePreview(null)} onMerge={(resolution) => { const branch = branches.find((item) => item.id === mergePreview.source.id); if (branch) void applyBranchMerge(branch, resolution); }} />}
 
       {showCreate && (
         <div className="modal-backdrop" onMouseDown={() => setShowCreate(false)}>

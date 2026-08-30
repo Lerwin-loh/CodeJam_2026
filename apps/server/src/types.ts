@@ -43,6 +43,7 @@ export interface Agent {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  mergedContext?: string[];
 }
 
 /** A collaboration project: one canonical `main` tree, one owner, many members. */
@@ -58,6 +59,7 @@ export interface Project {
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  mergedContext?: string[];
 }
 
 /** A human on a project. The owner is implicit (Project.ownerId) and has no row. */
@@ -132,6 +134,60 @@ export interface CommitRequest {
   decidedBy: string | null;
   decidedAt: string | null;
   createdAt: string;
+}
+
+export interface MergeOutcome {
+  id: string;
+  label: string;
+  summary: string;
+  details: string[];
+  requestedFeatures: string[];
+}
+
+export interface MergeSide {
+  id: string;
+  label: string;
+  workspacePath: string;
+  outcome: MergeOutcome;
+  prompts: string[];
+  baseSnapshot?: WorkspaceSnapshot | null;
+}
+
+export interface MergeWorkspaceConflict {
+  path: string;
+  targetContent: string | null;
+  sourceContent: string | null;
+  baseContent: string | null;
+  targetPaths?: string[];
+  sourcePaths?: string[];
+}
+
+export interface MergeContextConflict {
+  id: string;
+  targetPrompt: string;
+  sourcePrompt: string;
+  targetSideId: string;
+  sourceSideId: string;
+}
+
+export interface MergePreview {
+  target: MergeOutcome;
+  source: MergeOutcome;
+  acceptanceCriteria: string[];
+  changedFiles: ChangedFiles;
+  workspaceConflicts: MergeWorkspaceConflict[];
+  contextConflicts: MergeContextConflict[];
+}
+
+export interface MergeResolution {
+  workspace: Record<string, "target" | "source" | "ai">;
+  context: Record<string, "target" | "source" | "ai">;
+}
+
+export interface MergeResult {
+  preview: MergePreview;
+  keptPrompts: string[];
+  snapshot: WorkspaceSnapshot | null;
 }
 
 export interface AgentBranch {

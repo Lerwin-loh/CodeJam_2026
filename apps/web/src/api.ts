@@ -7,6 +7,7 @@ import type {
   CheckpointDiff,
   CommitRequest,
   Message,
+  MergePreview,
   ParentAgentView,
   Project,
   ProjectDetail,
@@ -154,11 +155,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ checkpointId, name }),
     }),
-  mergeBranches: (id: string, branchIds: string[]) =>
-    request<{ mergedBranchIds: string[]; changedFiles: string[] }>(
-      "/api/agents/" + id + "/branches/merge",
-      { method: "POST", body: JSON.stringify({ branchIds }) },
-    ),
+  mergePreview: (agentId: string, branchId: string) => request<MergePreview>("/api/agents/" + agentId + "/merge-preview", { method: "POST", body: JSON.stringify({ branchId }) }),
+  merge: (agentId: string, branchId: string, resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => request<{ preview: MergePreview; keptPrompts: string[] }>("/api/agents/" + agentId + "/merge", { method: "POST", body: JSON.stringify({ branchId, resolution }) }),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
   runDetails: (id: string) => request<RunDetails>("/api/runs/" + id + "/details"),
 
@@ -227,6 +225,8 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ decision }),
       }),
+    mergePreview: (id: string, memberId: string, branchId: string | null = null) => request<MergePreview>("/api/projects/" + id + "/merge-preview", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
+    merge: (id: string, memberId: string, branchId: string | null, resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => request<{ preview: MergePreview; keptPrompts: string[] }>("/api/projects/" + id + "/merge", { method: "POST", body: JSON.stringify({ memberId, branchId, resolution }) }),
   },
   restoreCheckpoint: (id: string) =>
     request<{ checkpoint: AgentCheckpoint; workspacePath: string; workspaceHash: string }>("/api/checkpoints/" + id + "/restore", {

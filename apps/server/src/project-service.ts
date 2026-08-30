@@ -18,6 +18,8 @@ import type {
 } from "./types.js";
 import { WorkspaceHistory } from "./workspace-history.js";
 import { WorkspaceManager } from "./workspace.js";
+import { MergeEngine, outcomeDetails, outcomeSummary } from "./merge-engine.js";
+import type { MergeResolution } from "./types.js";
 
 const now = () => new Date().toISOString();
 
@@ -224,6 +226,7 @@ export class ProjectService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly history: WorkspaceHistory,
+    private readonly mergeEngine = new MergeEngine(history),
   ) {}
 
   // --------------------------------------------------------------------------
@@ -876,6 +879,53 @@ export class ProjectService {
       .commitRequests.find((item) => item.id === id);
     if (!request) throw new HttpError(404, "Commit request not found");
     return request;
+  }
+
+  private async projectMergeSide(agent: Agent, workspacePath: string, id: string, label: string, baseSnapshotId: string | null, branchId: string | null = null) {
+    const database = this.store.snapshot();
+    const runs = database.runs.filter((run) => run.agentId === agent.id && run.branchId === branchId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const prompts = database.messages.filter((message) => message.agentId === agent.id && message.role === "user" && (branchId === null ? message.branchId === null : message.branchId === branchId)).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map((message) => message.content);
+    const baseSnapshot = baseSnapshotId ? database.snapshots.find((snapshot) => snapshot.id === baseSnapshotId) ?? null : null;
+    const changed = baseSnapshot ? this.history.diff(baseSnapshot.manifest, await this.history.manifest(workspacePath)) : { created: [], modified: [], deleted: [] };
+    const fileSummary = [changed.created.length ? "created " + changed.created.join(", ") : "", changed.modified.length ? "updated " + changed.modified.join(", ") : "", changed.deleted.length ? "deleted " + changed.deleted.join(", ") : ""].filter(Boolean).join("; ");
+    return { id, label, workspacePath, outcome: { id, label, summary: outcomeSummary(runs[0]?.output ?? "", fileSummary), details: outcomeDetails(runs[0]?.output ?? "", fileSummary), requestedFeatures: prompts }, prompts, baseSnapshot };
+  }
+
+  async previewChildMerge(projectId: string, memberId: string, branchId: string | null = null) {
+    const database = this.store.snapshot();
+    const project = this.getProjectOrThrow(projectId);
+    const parent = database.agents.find((agent) => agent.id === project.parentAgentId);
+    const member = database.projectMembers.find((item) => item.id === memberId && item.projectId === projectId);
+    const child = member && database.agents.find((agent) => agent.id === member.childAgentId);
+    if (!parent || !member || !child) throw new HttpError(404, "Project member not found");
+    const branch = branchId ? database.branches.find((item) => item.id === branchId && item.agentId === child.id) : null;
+    if (branchId && !branch) throw new HttpError(404, "Branch not found");
+    const childBase = branch ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null : database.snapshots.filter((snapshot) => snapshot.agentId === child.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.id ?? null;
+    return this.mergeEngine.preview(await this.projectMergeSide(parent, project.mainWorkspacePath, parent.id, "main", childBase), await this.projectMergeSide(child, branch?.workspacePath ?? child.workspacePath, branch?.id ?? child.id, branch?.name ?? child.name, childBase, branch?.id ?? null));
+  }
+
+  async mergeChild(projectId: string, memberId: string, branchId: string | null, resolution: MergeResolution) {
+    const database = this.store.snapshot();
+    const project = this.getProjectOrThrow(projectId);
+    const parent = database.agents.find((agent) => agent.id === project.parentAgentId);
+    const member = database.projectMembers.find((item) => item.id === memberId && item.projectId === projectId);
+    const child = member && database.agents.find((agent) => agent.id === member.childAgentId);
+    const branch = branchId ? database.branches.find((item) => item.id === branchId && item.agentId === child?.id) : null;
+    if (!parent || !member || !child || (branchId && !branch)) throw new HttpError(404, "Project merge source not found");
+    const childBase = branch ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null : database.snapshots.filter((snapshot) => snapshot.agentId === child.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.id ?? null;
+    const target = await this.projectMergeSide(parent, project.mainWorkspacePath, parent.id, "main", childBase);
+    const source = await this.projectMergeSide(child, branch?.workspacePath ?? child.workspacePath, branch?.id ?? child.id, branch?.name ?? child.name, childBase, branch?.id ?? null);
+    return this.mergeEngine.apply(target, source, resolution, async (manifest, keptPrompts) => {
+      const snapshot = await this.history.createSnapshot(parent.id, project.id, project.mainWorkspacePath, manifest);
+      await this.store.mutate((db) => {
+        db.snapshots.push(snapshot);
+        const row = db.projects.find((item) => item.id === projectId);
+        if (row) { row.headSnapshotId = snapshot.id; row.updatedAt = now(); row.mergedContext = keptPrompts; }
+        const request = db.commitRequests.find((item) => item.projectId === projectId && item.memberId === memberId && item.status === "approved");
+        if (request) { request.status = "merged"; request.decidedAt = now(); }
+      });
+      return snapshot;
+    });
   }
 
   /**
