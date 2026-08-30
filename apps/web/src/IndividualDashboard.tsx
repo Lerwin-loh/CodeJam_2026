@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { branchPointSettingsTabs, type BranchPointSettingsTabKey } from "./branchPointSettingsContent";
 import { MergeReview } from "./MergeReview";
+import { traceEventDescription, traceEventLabel } from "./tracePresentation";
 import type {
   Agent,
   AgentBranch,
@@ -51,12 +52,14 @@ function Spinner() {
 
 interface Props {
   currentUser: User;
+  onProjectUpgraded: (projectId: string) => void;
   onSignOut: () => void;
+  onDeleteAccount: () => Promise<void>;
   onToggleMode: () => void;
 }
 
 /** Flat, single-Agent-list dashboard — the default "individual" mode of the app. */
-export default function IndividualDashboard({ currentUser, onSignOut, onToggleMode }: Props) {
+export default function IndividualDashboard({ currentUser, onProjectUpgraded, onSignOut, onDeleteAccount, onToggleMode }: Props) {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -68,6 +71,8 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
   const [system, setSystem] = useState<SystemInfo | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showUpgrade, setShowUpgrade] = useState(false);
+  const [upgradeProjectName, setUpgradeProjectName] = useState("");
   const [form, setForm] = useState(emptyForm);
   const [prompt, setPrompt] = useState("");
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
@@ -88,7 +93,11 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
   } | null>(null);
   const [showCodeChanges, setShowCodeChanges] = useState(false);
   const [runOverlay, setRunOverlay] = useState<import("./types").RunDetails | null>(null);
-  const [restoreResult, setRestoreResult] = useState<{ path: string; hash: string } | null>(null);
+  const [restoreResult, setRestoreResult] = useState<{
+    recoveryPath: string;
+    activePath: string;
+    hash: string;
+  } | null>(null);
   const [checkpointLabel, setCheckpointLabel] = useState("");
   const [savingCheckpoint, setSavingCheckpoint] = useState(false);
   const [mergePreview, setMergePreview] = useState<MergePreview | null>(null);
@@ -280,6 +289,22 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
     }
   };
 
+  const upgradeAgentToProject = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selected || !upgradeProjectName.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { project } = await api.upgradeAgentToProject(selected.id, upgradeProjectName.trim());
+      setShowUpgrade(false);
+      onProjectUpgraded(project.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleAgent = async () => {
     if (!selected) return;
     setBusy(true);
@@ -422,7 +447,11 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
     setError(null);
     try {
       const result = await api.restoreCheckpoint(checkpoint.id);
-      setRestoreResult({ path: result.workspacePath, hash: result.workspaceHash });
+      setRestoreResult({
+        recoveryPath: result.workspacePath,
+        activePath: result.activeWorkspacePath,
+        hash: result.workspaceHash,
+      });
       setCheckpointOverlay(null);
       setSelectedCheckpointId(null);
       setError("Workspace restored to checkpoint " + checkpoint.id.slice(0, 8));
@@ -471,6 +500,25 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
     finally { if (mountedRef.current) setMergeBusy(false); }
   };
 
+  const deleteBranch = async (branch: AgentBranch) => {
+    if (!selected) return;
+    const confirmed = window.confirm(
+      `Delete branch "${branch.name}"? Its workspace will be archived for recovery, but its branch history will be removed.`,
+    );
+    if (!confirmed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteBranch(selected.id, branch.id);
+      setBranches((current) => current.filter((item) => item.id !== branch.id));
+      setActiveBranchId((current) => (current === branch.id ? null : current));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleSignOut = () => {
     setAgents([]);
     setSelectedId(null);
@@ -480,6 +528,25 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
     setTraceEvents([]);
     setShowBranchPoint(false);
     onSignOut();
+  };
+
+  const handleDeleteAccount = async () => {
+    const confirmation = window.prompt(
+      `Delete ${currentUser.name}'s account and all dependent Agents and Projects?\n\nType the account name to confirm:`,
+    );
+    if (confirmation === null) return;
+    if (confirmation !== currentUser.name) {
+      setError("Account name did not match. Nothing was deleted.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onDeleteAccount();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setBusy(false);
+    }
   };
 
   return (
@@ -545,6 +612,11 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
             </button>
             <button className="button button-ghost" onClick={handleSignOut}>
               Switch
+            </button>
+          </div>
+          <div className="user-card-danger-row">
+            <button className="button button-danger" disabled={busy} onClick={() => void handleDeleteAccount()}>
+              Delete account
             </button>
           </div>
         </div>
@@ -622,6 +694,16 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
                   disabled={busy}
                 >
                   {selected.status === "stopped" ? "Start" : "Stop"}
+                </button>
+                <button
+                  className="button button-ghost"
+                  onClick={() => {
+                    setUpgradeProjectName(selected.name);
+                    setShowUpgrade(true);
+                  }}
+                  disabled={busy || selected.status === "busy"}
+                >
+                  Upgrade to project
                 </button>
                 <button
                   className="button button-danger"
@@ -755,13 +837,10 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
                     </div>
                     <div className="live-trace-list">
                       {traceEvents.filter((event) => event.runId === activeRun.id).slice(-8).map((event) => {
-                        const label = event.type === "codex.event" && typeof event.metadata.eventType === "string"
-                          ? event.metadata.eventType === "error" ? "Codex error" : event.metadata.eventType
-                          : event.type;
                         return <div className="live-trace-event" key={event.id}>
                           <span className="trace-event-dot" />
-                          <div><strong>{label}</strong><small>{formatTime(event.timestamp)}</small></div>
-                          <p>{typeof event.metadata.explanation === "string" ? event.metadata.explanation : typeof event.metadata.output === "string" ? event.metadata.output : "Observable execution activity recorded."}</p>
+                          <div><strong>{traceEventLabel(event)}</strong><small>{formatTime(event.timestamp)}</small></div>
+                          <p>{traceEventDescription(event)}</p>
                         </div>;
                       })}
                     </div>
@@ -1002,7 +1081,29 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
                     ))}
                   </div>
                 </div>
-                <div className="branch-list">{branches.map((branch) => <div className="branch-card-row" key={branch.id}><button className={"branch-card " + (branch.id === activeBranchId ? "active" : "")} type="button" onClick={() => { setActiveBranchId(branch.id); setActiveBranchPointView("history"); }}><span className="branch-card-icon">⑂</span><span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span><span>›</span></button><button className="button button-ghost" type="button" onClick={() => void openBranchMerge(branch)}>Merge</button></div>)}</div>
+                <div className="branch-list">
+                  {branches.map((branch) => (
+                    <div className="branch-card-row" key={branch.id}>
+                      <div className={"branch-card " + (branch.id === activeBranchId ? "active" : "")}>
+                        <button className="branch-card-select" type="button" onClick={() => { setActiveBranchId(branch.id); setActiveBranchPointView("history"); }}>
+                          <span className="branch-card-icon">⑂</span>
+                          <span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span>
+                        </button>
+                        <button
+                          className="branch-delete-button"
+                          type="button"
+                          disabled={busy || branch.status === "busy"}
+                          title={branch.status === "busy" ? "Stop the branch run before deleting it" : "Delete branch"}
+                          aria-label={`Delete branch ${branch.name}`}
+                          onClick={() => void deleteBranch(branch)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                      <button className="button button-ghost" type="button" disabled={busy || branch.status === "busy"} onClick={() => void openBranchMerge(branch)}>Merge</button>
+                    </div>
+                  ))}
+                </div>
               </> : <div className="branchpoint-empty-state">
                 <span className="branchpoint-empty-icon">⑂</span>
                 <strong>No branch workspaces yet</strong>
@@ -1023,7 +1124,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
                 <div>
                   <span className="eyebrow">BranchPoint · Beta</span>
                   <h2>BranchPoint</h2>
-                  <p>Understand how execution is tracked, versioned, and recovered across runs, checkpoints, and branches.</p>
+                  <p>Understand how execution is tracked, versioned, recovered, and security-checked across runs, checkpoints, and branches.</p>
                 </div>
                 <button className="panel-close" type="button" onClick={() => setShowBranchPointSettings(false)} aria-label="Close BranchPoint settings">×</button>
               </div>
@@ -1169,7 +1270,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
                 <h3>Conversation snapshot</h3>
                 <div className="inspection-conversation">{checkpointOverlay.details.context.messages.map((message) => <div key={message.id}><strong>{message.role}</strong><p>{message.content}</p></div>)}</div>
                 <h3>Trace events</h3>
-                <div className="inspection-trace">{checkpointOverlay.details.trace.map((event) => <div key={event.id}><header><strong>{event.type}</strong><span>{formatTime(event.timestamp)}</span></header><p>{typeof event.metadata.explanation === "string" ? event.metadata.explanation : event.type === "codex.event" ? "Codex reported observable execution activity." : "Recorded BranchPoint activity."}</p>{event.type === "codex.event" && <small>{typeof event.metadata.eventType === "string" ? event.metadata.eventType : "Codex event"}{typeof event.metadata.output === "string" ? " · " + event.metadata.output : ""}</small>}</div>)}</div>
+                <div className="inspection-trace">{checkpointOverlay.details.trace.map((event) => <div key={event.id}><header><strong>{traceEventLabel(event)}</strong><span>{formatTime(event.timestamp)}</span></header><p>{traceEventDescription(event)}</p></div>)}</div>
                 <h3>Verification</h3>
                 <p className="inspection-muted">Workspace hash: {checkpointOverlay.details.checkpoint.workspaceHash}</p>
               </div>
@@ -1189,7 +1290,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
               <p className="inspection-message">Run {runOverlay.run.id.slice(0, 8)} · {runOverlay.run.status} · This event cannot be reverted.</p>
               <h3>Prompt</h3><p className="inspection-copy">{runOverlay.run.prompt}</p>
               <h3>Trace events</h3>
-              <div className="inspection-trace">{runOverlay.trace.map((event) => <div key={event.id}><header><strong>{event.type}</strong><span>{formatTime(event.timestamp)}</span></header><p>{typeof event.metadata.explanation === "string" ? event.metadata.explanation : event.type === "codex.event" ? "Codex reported observable execution activity." : "Recorded BranchPoint activity."}</p>{event.type === "codex.event" && <small>{typeof event.metadata.eventType === "string" ? event.metadata.eventType : "Codex event"}{typeof event.metadata.output === "string" ? " · " + event.metadata.output : ""}</small>}</div>)}</div>
+              <div className="inspection-trace">{runOverlay.trace.map((event) => <div key={event.id}><header><strong>{traceEventLabel(event)}</strong><span>{formatTime(event.timestamp)}</span></header><p>{traceEventDescription(event)}</p></div>)}</div>
               {runOverlay.run.output && <><h3>Agent result</h3><p className="inspection-copy">{runOverlay.run.output}</p></>}
             </div>
           </section>
@@ -1199,9 +1300,10 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
       {restoreResult && (
         <div className="modal-backdrop" onMouseDown={() => setRestoreResult(null)}>
           <section className="modal" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-heading"><div><span className="eyebrow">Checkpoint restored</span><h2>New workspace created</h2></div><button type="button" onClick={() => setRestoreResult(null)} aria-label="Close restore result">×</button></div>
-            <p className="inspection-message">The original workspace was not changed.</p>
-            <label>Restored workspace<input readOnly value={restoreResult.path} /></label>
+            <div className="modal-heading"><div><span className="eyebrow">Checkpoint restored</span><h2>Workspace updated</h2></div><button type="button" onClick={() => setRestoreResult(null)} aria-label="Close restore result">×</button></div>
+            <p className="inspection-message">The active workspace now matches the saved snapshot.</p>
+            <label>Active workspace<input readOnly value={restoreResult.activePath} /></label>
+            <label>Recovery copy<input readOnly value={restoreResult.recoveryPath} /></label>
             <p className="inspection-muted">Workspace hash: {restoreResult.hash}</p>
           </section>
         </div>
@@ -1268,6 +1370,58 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
               </button>
               <button className="button button-primary" disabled={busy}>
                 {busy ? <Spinner /> : "Create Agent"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showUpgrade && selected && (
+        <div className="modal-backdrop" onMouseDown={() => !busy && setShowUpgrade(false)}>
+          <form
+            className="modal"
+            onSubmit={upgradeAgentToProject}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">Agent promotion</span>
+                <h2>Upgrade to a project</h2>
+                <p>
+                  {selected.name} will become the project's parent Agent. Its files,
+                  conversation, Codex session, checkpoints, and branches will be preserved.
+                </p>
+              </div>
+              <button type="button" onClick={() => setShowUpgrade(false)} disabled={busy}>×</button>
+            </div>
+            <label>
+              Project name
+              <input
+                autoFocus
+                value={upgradeProjectName}
+                onChange={(event) => setUpgradeProjectName(event.target.value)}
+                required
+                maxLength={120}
+              />
+            </label>
+            <p className="inspection-muted">
+              The Agent will move from Individual mode into Project mode. This upgrade cannot
+              currently be reversed.
+            </p>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="button button-ghost"
+                onClick={() => setShowUpgrade(false)}
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-primary"
+                disabled={busy || !upgradeProjectName.trim()}
+              >
+                {busy ? <Spinner /> : "Upgrade Agent"}
               </button>
             </div>
           </form>

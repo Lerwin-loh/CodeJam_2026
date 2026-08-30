@@ -1,24 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, api } from "./api";
+import { api, ApiError } from "./api";
 import { MergeReview } from "./MergeReview";
-import type {
-    CommitRequest,
-    MemberSecurityView,
-    MergePreview,
-    ParentAgentView,
-    Project,
-    ProjectDetail,
-    ProjectMemberView,
-    SecurityAnalysis,
-    SecurityAnalysisPoint,
-    User,
-} from "./types";
 import {
-    AgentPlayground,
-    BranchPointPanel,
-    useAgentWorkspace,
-    WorkspaceOverlays,
+  AgentPlayground,
+  BranchPointPanel,
+  useAgentWorkspace,
+  WorkspaceOverlays,
 } from "./useAgentWorkspace";
+import type {
+  ActivityEntry,
+  CommitRequest,
+  MemberSecurityView,
+  MergePreview,
+  ParentAgentView,
+  Project,
+  ProjectDetail,
+  ProjectInvitation,
+  ProjectMemberView,
+  SecurityAnalysis,
+  SecurityAnalysisPoint,
+  User,
+} from "./types";
 
 function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
@@ -34,68 +36,59 @@ function changedCount(cr: CommitRequest): number {
 
 const SECURITY_GATE_TEXT: Record<MemberSecurityView["reason"], string> = {
   ok: "",
-  "never-run": "run the security analysis first",
-  failed: "the last OWASP analysis found an issue — fix it and run again",
-  incomplete: "the last analysis didn't cover all 10 OWASP categories — run it again",
-  "branch-changed": "your branch changed since the last analysis — run it again",
+  "never-run": "run Submit commit request to start the security analysis",
+  failed: "the OWASP analysis found an issue — fix it, then press Submit commit request again",
+  incomplete: "the analysis didn't cover all 10 OWASP categories — press Submit commit request again",
+  "branch-changed": "your branch changed since the analysis — press Submit commit request again",
 };
 
 function owaspFailCount(a: SecurityAnalysis | null): number {
   return a ? a.points.filter((p) => p.status === "fail").length : 0;
 }
 
-function owaspItemBlock(p: SecurityAnalysisPoint, evidenceCap: number): string {
-  const evidence =
-    p.evidence && p.evidence.length > evidenceCap
-      ? p.evidence.slice(0, evidenceCap) + "\n… (truncated)"
-      : p.evidence;
-  return [
-    `OWASP ${p.id} (${p.name})`,
-    p.detail ? `  Problem: ${p.detail}` : "",
-    p.file ? `  File: ${p.file}` : "",
-    evidence ? "  Flagged code:\n```\n" + evidence + "\n```" : "",
-    p.remediation ? `  Recommended fix: ${p.remediation}` : "",
-  ]
-    .filter((line) => line !== "")
-    .join("\n");
+function initials(name: string): string {
+  return name.trim().slice(0, 1).toUpperCase() || "?";
 }
 
-/** The message sent to the member's child agent when they press "Fix" on one row. */
-function buildFixPrompt(p: SecurityAnalysisPoint): string {
-  return [
-    `Fix this OWASP ${p.id} (${p.name}) issue in my branch.`,
-    "",
-    owaspItemBlock(p, 4000),
-    "",
-    "Apply the fix directly to the file(s). Keep the change minimal and don't touch",
-    "unrelated code. When done, briefly say what you changed.",
-  ].join("\n");
+/** Deterministic avatar hue from a name. */
+function avatarHue(name: string): number {
+  let h = 0;
+  for (let i = 0; i < name.length; i += 1) h = (h * 31 + name.charCodeAt(i)) % 360;
+  return h;
 }
 
-/** The message sent when the member presses "Fix all". */
-function buildFixAllPrompt(points: SecurityAnalysisPoint[]): string {
-  return [
-    `Fix all ${points.length} OWASP issues the security analysis found in my branch.`,
-    "Work through them one file at a time and apply each fix directly.",
-    "Keep every change minimal and scoped to its issue.",
-    "",
-    ...points.map((p, index) => `${index + 1}. ` + owaspItemBlock(p, 1000).replace(/\n/g, "\n   ")),
-    "",
-    "When done, summarise what you changed for each item.",
-  ].join("\n");
-}
+const ACTIVITY_LABEL: Record<string, string> = {
+  "project.member.invite": "invited a member",
+  "project.invitation.accept": "joined the project",
+  "project.invitation.decline": "declined an invitation",
+  "project.member.role": "changed a member role",
+  "project.member.remove": "removed a member",
+  "project.member.leave": "left the project",
+  "project.transfer": "transferred ownership",
+  "project.update": "updated project settings",
+  "project.archive": "archived the project",
+  "project.unarchive": "unarchived the project",
+  "project.delete": "deleted the project",
+  "security.check": "ran a security gate",
+  "commit.request.create": "filed a commit request",
+  "commit.request.decide": "decided a commit request",
+  "agent.run": "ran the agent",
+};
 
 type ProjectTab = "parent" | "mine" | "commits" | "team";
+type TeamSection = "members" | "activity" | "danger";
 
 interface Props {
   currentUser: User;
+  initialProjectId: string | null;
   onSignOut: () => void;
+  onDeleteAccount: () => Promise<void>;
   onToggleMode: () => void;
 }
 
-export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: Props) {
+export default function ProjectsView({ currentUser, initialProjectId, onSignOut, onDeleteAccount, onToggleMode }: Props) {
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialProjectId);
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [tab, setTab] = useState<ProjectTab>("mine");
   const [error, setError] = useState<string | null>(null);
@@ -103,6 +96,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
 
   const [showCreate, setShowCreate] = useState(false);
   const [fixPoint, setFixPoint] = useState<SecurityAnalysisPoint | null>(null);
+  const [mergeNote, setMergeNote] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
 
   const [parent, setParent] = useState<ParentAgentView | null>(null);
@@ -111,14 +105,23 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
   const [commitRequests, setCommitRequests] = useState<CommitRequest[]>([]);
   const [security, setSecurity] = useState<MemberSecurityView | null>(null);
   const [securityExpanded, setSecurityExpanded] = useState(false);
-  const [securityRunning, setSecurityRunning] = useState(false);
-  const [submittingCommit, setSubmittingCommit] = useState(false);
   const [mergePreview, setMergePreview] = useState<{ preview: MergePreview; memberId: string; branchId: string | null; requestId?: string } | null>(null);
   const [agentMergePreview, setAgentMergePreview] = useState<{ preview: MergePreview; agentId: string; branchId: string } | null>(null);
   const [mergeBusy, setMergeBusy] = useState(false);
+  // "Submit commit request" now runs the OWASP analysis first, then submits.
+  const [commitPhase, setCommitPhase] = useState<null | "fixing" | "analyzing" | "submitting">(null);
 
   const [mUserName, setMUserName] = useState("");
   const [mRole, setMRole] = useState("");
+
+  const [invitations, setInvitations] = useState<ProjectInvitation[]>([]);
+  const [teamSection, setTeamSection] = useState<TeamSection>("members");
+  const [activity, setActivity] = useState<ActivityEntry[]>([]);
+  const [transferTo, setTransferTo] = useState<ProjectMemberView | null>(null);
+  const [transferConfirm, setTransferConfirm] = useState("");
+  const [pName, setPName] = useState("");
+  const [pDesc, setPDesc] = useState("");
+  const [savingSettings, setSavingSettings] = useState(false);
 
   const mounted = useRef(true);
   useEffect(() => {
@@ -134,9 +137,10 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
 
   const refreshProjects = useCallback(async () => {
     try {
-      const { projects: next } = await api.projects.list();
+      const { projects: next, invitations: invs } = await api.projects.list();
       if (!mounted.current) return;
       setProjects(next);
+      setInvitations(invs);
       setSelectedId((current) => (current && next.some((p) => p.id === current) ? current : next[0]?.id ?? null));
     } catch (reason) {
       fail(reason);
@@ -174,22 +178,35 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     }
   }, [fail]);
 
+  const loadActivity = useCallback(async (id: string) => {
+    try {
+      const { activity: rows } = await api.projects.activity(id);
+      if (mounted.current) setActivity(rows);
+    } catch {
+      /* non-critical */
+    }
+  }, []);
+
   const loadDetail = useCallback(async (id: string) => {
     try {
       const next = await api.projects.get(id);
       if (!mounted.current) return;
       setDetail(next);
       setSecurity(null);
+      setTeamSection("members");
+      setPName(next.project.name);
+      setPDesc(next.project.description);
       const parentView = await api.projects.parentAgent(id).catch(() => null);
       if (mounted.current) setParent(parentView);
       await refreshCommitRequests(id);
+      await loadActivity(id);
       if (next.myMembership) await loadChild(id);
       else setChild(null);
       setTab(next.role === "owner" ? "team" : "mine");
     } catch (reason) {
       fail(reason);
     }
-  }, [fail, loadChild, refreshCommitRequests]);
+  }, [fail, loadChild, loadActivity, refreshCommitRequests]);
 
   useEffect(() => {
     if (selectedId) void loadDetail(selectedId);
@@ -238,10 +255,10 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
   // A child-agent turn (coding or the analysis itself) can change the branch and
   // therefore the commit gate — re-pull the security state whenever a run settles.
   useEffect(() => {
-    if (tab === "mine" && selectedId && childId && ws.status === "ready" && !securityRunning) {
+    if (tab === "mine" && selectedId && childId && ws.status === "ready" && commitPhase === null) {
       void loadChild(selectedId);
     }
-  }, [ws.status, tab, selectedId, childId, securityRunning, loadChild]);
+  }, [ws.status, tab, selectedId, childId, commitPhase, loadChild]);
 
   const createProject = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -282,6 +299,25 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
       fail(reason);
     } finally {
       if (mounted.current) setBusy(false);
+    }
+  };
+
+  const deleteAccount = async () => {
+    const confirmation = window.prompt(
+      `Delete ${currentUser.name}'s account and all dependent Agents and Projects?\n\nType the account name to confirm:`,
+    );
+    if (confirmation === null) return;
+    if (confirmation !== currentUser.name) {
+      setError("Account name did not match. Nothing was deleted.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onDeleteAccount();
+    } catch (reason) {
+      fail(reason);
+      setBusy(false);
     }
   };
 
@@ -327,6 +363,75 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     }
   };
 
+  const respondInvite = async (projectId: string, accept: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (accept) await api.projects.acceptInvite(projectId);
+      else await api.projects.declineInvite(projectId);
+      await refreshProjects();
+      if (accept) setSelectedId(projectId);
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
+
+  const saveSettings = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selectedId || !detail) return;
+    const name = pName.trim();
+    const description = pDesc.trim();
+    if (name === detail.project.name && description === detail.project.description) return;
+    setSavingSettings(true);
+    setError(null);
+    try {
+      await api.projects.update(selectedId, { name, description });
+      await loadDetail(selectedId);
+      await refreshProjects();
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      if (mounted.current) setSavingSettings(false);
+    }
+  };
+
+  const doTransfer = async () => {
+    if (!selectedId || !detail || !transferTo) return;
+    if (transferConfirm.trim() !== detail.project.name) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.projects.transfer(selectedId, transferTo.userId);
+      setTransferTo(null);
+      setTransferConfirm("");
+      await loadDetail(selectedId);
+      await refreshProjects();
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
+
+  const leaveProject = async () => {
+    if (!selectedId || !detail) return;
+    if (!window.confirm("Leave " + detail.project.name + "?")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.projects.leave(selectedId);
+      setSelectedId(null);
+      setDetail(null);
+      await refreshProjects();
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
+
   const saveMemberRole = async (memberId: string, role: string) => {
     if (!selectedId || !role.trim()) return;
     setError(null);
@@ -344,55 +449,92 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     try {
       await api.projects.removeMember(selectedId, memberId);
       await loadDetail(selectedId);
+      await refreshProjects();
     } catch (reason) {
       fail(reason);
     }
   };
 
-  const runSecurityAnalysis = async () => {
+  // One action: run the OWASP analysis, and only submit the commit request if it
+  // passes. On failure the result panel shows the issues and nothing is submitted.
+  // `silent` skips the title prompt (used by the auto-continue after a Fix).
+  const submitCommitRequest = async (silent = false) => {
     if (!selectedId || !myMember) return;
-    setSecurityRunning(true);
     setError(null);
-    try {
-      const { security: next } = await api.projects.securityAnalysis(selectedId, myMember.id);
-      if (mounted.current) setSecurity(next);
-      // the analysis is a child-agent run — refresh its transcript
-      await loadChild(selectedId);
-    } catch (reason) {
-      fail(reason);
-    } finally {
-      if (mounted.current) setSecurityRunning(false);
-    }
-  };
+    setMergeNote(null);
 
-  const fixWithAgent = (p: SecurityAnalysisPoint) => {
-    setFixPoint(null);
-    setTab("mine");
-    void ws.sendText(buildFixPrompt(p));
-  };
-
-  const fixAllWithAgent = (points: SecurityAnalysisPoint[]) => {
-    if (points.length === 0) return;
-    setFixPoint(null);
-    setTab("mine");
-    void ws.sendText(buildFixAllPrompt(points));
-  };
-
-  const submitCommitRequest = async () => {
-    if (!selectedId || !myMember) return;
-    const title = window.prompt("Title for this commit request", myMember.role + " changes");
-    if (title === null) return;
-    setSubmittingCommit(true);
-    setError(null);
-    try {
-      await api.projects.submitCommitRequest(selectedId, myMember.id, { title: title.trim() });
+    const finishSubmit = async () => {
+      setCommitPhase("submitting");
+      const defaultTitle = myMember.role + " changes";
+      const title = silent
+        ? defaultTitle
+        : window.prompt("Title for this commit request", defaultTitle);
+      if (title === null) return;
+      await api.projects.submitCommitRequest(selectedId, myMember.id, {
+        title: title.trim() || defaultTitle,
+      });
       await refreshCommitRequests(selectedId);
       setTab("commits");
+    };
+
+    try {
+      // A passing analysis already bound to the current branch state? Skip the
+      // (token-costly) re-scan and submit straight away. If the server gate
+      // disagrees (stale), fall back to a fresh analysis.
+      if (security?.canCommit) {
+        try {
+          setCommitPhase("submitting");
+          await finishSubmit();
+          return;
+        } catch (reason) {
+          if (!(reason instanceof ApiError) || reason.status !== 409) throw reason;
+        }
+      }
+
+      setCommitPhase("analyzing");
+      const { security: next } = await api.projects.securityAnalysis(selectedId, myMember.id);
+      if (!mounted.current) return;
+      setSecurity(next);
+      if (!next.canCommit) {
+        setSecurityExpanded(true);
+        return;
+      }
+      await finishSubmit();
     } catch (reason) {
       fail(reason);
     } finally {
-      if (mounted.current) setSubmittingCommit(false);
+      if (mounted.current) setCommitPhase(null);
     }
+  };
+
+  // After the agent finishes a fix, auto re-run the analysis + commit — the user
+  // shouldn't have to press Submit again.
+  // Direct model rewrite of the flagged file(s) — no agent run — then auto
+  // re-scan + commit. `pointIds` undefined = fix every flagged finding.
+  const runAutoFix = async (pointIds?: string[]) => {
+    if (!selectedId || !myMember || commitPhase !== null) return;
+    setFixPoint(null);
+    setTab("mine");
+    setError(null);
+    setMergeNote(null);
+    setCommitPhase("fixing");
+    let fixed = false;
+    try {
+      const { security: next } = await api.projects.securityFix(selectedId, myMember.id, pointIds);
+      if (mounted.current) setSecurity(next);
+      if (selectedId) await loadChild(selectedId); // surface the fix turn in chat
+      fixed = true;
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      if (mounted.current) setCommitPhase(null);
+    }
+    if (fixed) await submitCommitRequest(true);
+  };
+
+  const fixWithAgent = (p: SecurityAnalysisPoint) => void runAutoFix([p.id]);
+  const fixAllWithAgent = (points: SecurityAnalysisPoint[]) => {
+    if (points.length > 0) void runAutoFix();
   };
 
   const decideCommit = async (requestId: string, decision: "approved" | "rejected") => {
@@ -456,7 +598,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
       label: "Commit requests" + (pendingCommits > 0 ? " (" + pendingCommits + ")" : ""),
       show: true,
     },
-    { key: "team", label: "Team", show: !!isOwner },
+    { key: "team", label: isOwner ? "Settings" : "Team", show: true },
   ];
 
   const closeBranchPointAndSelectTab = (nextTab: ProjectTab) => {
@@ -478,6 +620,39 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
         <button className="button button-primary create-button" onClick={() => setShowCreate(true)}>
           <span>＋</span> New Project
         </button>
+
+        {invitations.length > 0 && (
+          <div className="invite-list">
+            <div className="sidebar-label">
+              <span>Invitations</span>
+              <span>{invitations.length}</span>
+            </div>
+            {invitations.map((inv) => (
+              <div className="invite-card" key={inv.projectId}>
+                <strong>{inv.projectName}</strong>
+                <span>
+                  {inv.invitedByName} invited you as {inv.role}
+                </span>
+                <div className="invite-actions">
+                  <button
+                    className="button button-primary"
+                    disabled={busy}
+                    onClick={() => void respondInvite(inv.projectId, true)}
+                  >
+                    Accept
+                  </button>
+                  <button
+                    className="button button-ghost"
+                    disabled={busy}
+                    onClick={() => void respondInvite(inv.projectId, false)}
+                  >
+                    Decline
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="sidebar-label">
           <span>Your Projects</span>
@@ -521,6 +696,11 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
               Sign out
             </button>
           </div>
+          <div className="user-card-danger-row">
+            <button className="button button-danger" disabled={busy} onClick={() => void deleteAccount()}>
+              Delete account
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -551,31 +731,32 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                   <span className={"role-badge role-" + detail.role}>{detail.role}</span>
                   {isArchived && <span className="role-badge role-archived">archived</span>}
                 </div>
-                <p>
-                  {isArchived
-                    ? isOwner
-                      ? "This project is archived and read-only. Unarchive it to bring back editing, agents, and commit approvals."
-                      : "This project is archived by the owner. Everything is read-only until they unarchive it."
-                    : isOwner
-                      ? "You own this project. You control the parent agent, the team, and commit approvals."
-                      : "You are the " + (myMember?.role ?? "member") + " on this project."}
-                </p>
+                {detail.project.description ? (
+                  <p>{detail.project.description}</p>
+                ) : (
+                  <p>
+                    {isArchived
+                      ? isOwner
+                        ? "Archived and read-only. Unarchive from Settings › Danger zone."
+                        : "Archived by the owner — everything is read-only."
+                      : isOwner
+                        ? "Owner · " + ownerMembers.filter((m) => m.status === "active").length +
+                          " member" +
+                          (ownerMembers.filter((m) => m.status === "active").length === 1 ? "" : "s")
+                        : "You are the " + (myMember?.role ?? "member") + " · owner: " + detail.owner.name}
+                  </p>
+                )}
               </div>
               {isOwner && (
                 <div className="header-actions">
                   <button
                     className="button button-ghost"
-                    onClick={() => void setArchived(!isArchived)}
-                    disabled={busy}
+                    onClick={() => {
+                      setTab("team");
+                      setTeamSection("danger");
+                    }}
                   >
-                    {busy ? <Spinner /> : isArchived ? "Unarchive" : "Archive"}
-                  </button>
-                  <button
-                    className="button button-danger"
-                    onClick={() => void deleteProject()}
-                    disabled={busy}
-                  >
-                    {busy ? <Spinner /> : "Delete project"}
+                    Settings
                   </button>
                 </div>
               )}
@@ -621,36 +802,43 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                   )}
                   <div className="mine-toolbar">
                     <button
-                      className="button button-ghost"
-                      onClick={() => void runSecurityAnalysis()}
-                      disabled={securityRunning || busy || isArchived || ws.status === "busy"}
-                      title={
-                        ws.status === "busy"
-                          ? "Wait for the current agent run to finish"
-                          : undefined
-                      }
-                    >
-                      {securityRunning ? <Spinner /> : "Run security analysis"}
-                    </button>
-                    <button
                       className="button button-primary"
                       onClick={() => void submitCommitRequest()}
-                      disabled={submittingCommit || busy || isArchived || !security?.canCommit}
-                      title={security?.canCommit ? undefined : SECURITY_GATE_TEXT[security?.reason ?? "never-run"]}
+                      disabled={commitPhase !== null || busy || isArchived || ws.status === "busy"}
+                      title={
+                        ws.status === "busy" ? "Wait for the current agent run to finish" : undefined
+                      }
                     >
-                      {submittingCommit ? <Spinner /> : "Submit commit request"}
+                      {commitPhase === "fixing" ? (
+                        <>
+                          <Spinner /> Applying fix…
+                        </>
+                      ) : commitPhase === "analyzing" ? (
+                        <>
+                          <Spinner /> Running security analysis…
+                        </>
+                      ) : commitPhase === "submitting" ? (
+                        <>
+                          <Spinner /> Submitting…
+                        </>
+                      ) : (
+                        "Submit commit request"
+                      )}
                     </button>
                   </div>
 
-                  {securityRunning && (
+                  {mergeNote && <p className="muted-note">{mergeNote}</p>}
+
+                  {commitPhase === "analyzing" && (
                     <p className="muted-note">
-                      Your child agent is reviewing the branch against the OWASP Top 10… this runs a
-                      full agent turn and can take a minute.
+                      Checking your changed files against the OWASP Top 10… a fast static pass runs
+                      first, then one model call if that's clean. The commit request is submitted only
+                      if every category passes.
                     </p>
                   )}
 
-                  {security && !securityRunning && (() => {
-                    const points = security.analysis?.points ?? [];
+                  {security && security.analysis && commitPhase !== "analyzing" && (() => {
+                    const points = security.analysis.points;
                     const fails = points.filter((p) => p.status === "fail");
                     return (
                       <div
@@ -679,14 +867,8 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                               <button
                                 className="button button-primary"
                                 onClick={() => fixAllWithAgent(fails)}
-                                disabled={isArchived || ws.status === "busy"}
-                                title={
-                                  isArchived
-                                    ? "This project is archived"
-                                    : ws.status === "busy"
-                                      ? "Wait for the current agent run to finish"
-                                      : undefined
-                                }
+                                disabled={isArchived || commitPhase !== null}
+                                title={isArchived ? "This project is archived" : undefined}
                               >
                                 Fix all {fails.length}
                               </button>
@@ -716,6 +898,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                                   <button
                                     className="button button-ghost owasp-fix-btn"
                                     onClick={() => setFixPoint(p)}
+                                    disabled={commitPhase !== null}
                                   >
                                     View &amp; fix
                                   </button>
@@ -821,49 +1004,282 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                 </div>
               )}
 
-              {tab === "team" && isOwner && (
-                <div className="team-panel">
-                  {isArchived && (
-                    <p className="muted-note">
-                      This project is archived. Team changes are disabled until you unarchive it.
-                    </p>
-                  )}
-                  <form className="member-add" onSubmit={addMember}>
-                    <div className="member-add-row">
-                      <input
-                        placeholder="Username (must have signed in)"
-                        value={mUserName}
-                        onChange={(e) => setMUserName(e.target.value)}
-                        maxLength={60}
-                        disabled={isArchived}
-                      />
-                      <input
-                        placeholder="Role — e.g. Frontend"
-                        value={mRole}
-                        onChange={(e) => setMRole(e.target.value)}
-                        maxLength={60}
-                        disabled={isArchived}
-                      />
-                    </div>
+              {tab === "team" && detail && (
+                <div className="settings-layout">
+                  <nav className="settings-rail">
                     <button
-                      className="button button-primary"
-                      disabled={busy || isArchived || !mUserName.trim() || !mRole.trim()}
+                      className={teamSection === "members" ? "active" : ""}
+                      onClick={() => setTeamSection("members")}
                     >
-                      {busy ? <Spinner /> : "Add member"}
+                      Members
                     </button>
-                  </form>
+                    <button
+                      className={teamSection === "activity" ? "active" : ""}
+                      onClick={() => setTeamSection("activity")}
+                    >
+                      Activity
+                    </button>
+                    <button
+                      className={teamSection === "danger" ? "active" : ""}
+                      onClick={() => setTeamSection("danger")}
+                    >
+                      {isOwner ? "Danger zone" : "Membership"}
+                    </button>
+                  </nav>
 
-                  <div className="member-list">
-                    {ownerMembers.map((member) => (
-                      <MemberCard
-                        key={member.id}
-                        member={member}
-                        readOnly={isArchived}
-                        onSaveRole={(role) => void saveMemberRole(member.id, role)}
-                        onRemove={() => void removeMember(member.id, member.name)}
-                      />
-                    ))}
-                    {ownerMembers.length === 0 && <p className="muted-note">No members yet.</p>}
+                  <div className="settings-body">
+                    {teamSection === "members" && (
+                      <section className="settings-section">
+                        <div className="settings-section-head">
+                          <h3>Members</h3>
+                          <p>The owner runs the parent agent. Everyone else gets one child agent.</p>
+                        </div>
+
+                        {isOwner && (
+                          <form className="member-add" onSubmit={addMember}>
+                            <div className="member-add-row">
+                              <input
+                                placeholder="Username (must have signed in)"
+                                value={mUserName}
+                                onChange={(e) => setMUserName(e.target.value)}
+                                maxLength={60}
+                                disabled={isArchived}
+                              />
+                              <input
+                                placeholder="Role — e.g. Frontend"
+                                value={mRole}
+                                onChange={(e) => setMRole(e.target.value)}
+                                maxLength={60}
+                                disabled={isArchived}
+                              />
+                            </div>
+                            <button
+                              className="button button-primary"
+                              disabled={busy || isArchived || !mUserName.trim() || !mRole.trim()}
+                            >
+                              {busy ? <Spinner /> : "Send invite"}
+                            </button>
+                          </form>
+                        )}
+                        {isArchived && isOwner && (
+                          <p className="muted-note">Unarchive the project to change the team.</p>
+                        )}
+
+                        <div className="member-list">
+                          <article className="member-row">
+                            <div
+                              className="member-avatar"
+                              style={{
+                                background: `hsl(${avatarHue(detail.owner.name)} 55% 42%)`,
+                              }}
+                            >
+                              {initials(detail.owner.name)}
+                            </div>
+                            <div className="member-copy">
+                              <div className="member-name-row">
+                                <strong>{detail.owner.name}</strong>
+                                <span className="role-badge role-owner">owner</span>
+                                {detail.owner.id === currentUser.id && (
+                                  <span className="member-you">you</span>
+                                )}
+                              </div>
+                              <span className="member-sec">Controls the parent agent &amp; main</span>
+                            </div>
+                          </article>
+
+                          {isOwner
+                            ? ownerMembers.map((member) => (
+                                <MemberCard
+                                  key={member.id}
+                                  member={member}
+                                  isYou={member.userId === currentUser.id}
+                                  readOnly={isArchived}
+                                  onSaveRole={(role) => void saveMemberRole(member.id, role)}
+                                  onRemove={() => void removeMember(member.id, member.name)}
+                                  onTransfer={
+                                    member.status === "active" && !isArchived
+                                      ? () => {
+                                          setTransferConfirm("");
+                                          setTransferTo(member);
+                                        }
+                                      : undefined
+                                  }
+                                />
+                              ))
+                            : (detail.members as { userId: string; name: string; role: string; status: string }[]).map(
+                                (m) => (
+                                  <article className="member-row" key={m.userId}>
+                                    <div
+                                      className="member-avatar"
+                                      style={{ background: `hsl(${avatarHue(m.name)} 55% 42%)` }}
+                                    >
+                                      {initials(m.name)}
+                                    </div>
+                                    <div className="member-copy">
+                                      <div className="member-name-row">
+                                        <strong>{m.name}</strong>
+                                        <span className="role-badge role-member">{m.role}</span>
+                                        {m.userId === currentUser.id && (
+                                          <span className="member-you">you</span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </article>
+                                ),
+                              )}
+                          {isOwner && ownerMembers.length === 0 && (
+                            <p className="muted-note">No members yet — send an invite above.</p>
+                          )}
+                        </div>
+                      </section>
+                    )}
+
+                    {teamSection === "activity" && (
+                      <section className="settings-section">
+                        <div className="settings-section-head">
+                          <h3>Activity</h3>
+                          <p>Recent audited events on this project.</p>
+                        </div>
+                        {activity.length === 0 && <p className="muted-note">Nothing yet.</p>}
+                        <ul className="activity-list">
+                          {activity.map((e) => (
+                            <li key={e.id} className={"activity-row activity-" + e.decision}>
+                              <span className="activity-dot" />
+                              <span className="activity-text">
+                                <strong>{e.userName}</strong>{" "}
+                                {ACTIVITY_LABEL[e.action] ?? e.action}
+                                {e.reason ? <span className="activity-reason"> — {e.reason}</span> : null}
+                              </span>
+                              <span className="activity-time">{formatTime(e.timestamp)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                    )}
+
+                    {teamSection === "danger" && isOwner && (
+                      <>
+                        <section className="settings-section">
+                          <div className="settings-section-head">
+                            <h3>Project</h3>
+                            <p>Name and description.</p>
+                          </div>
+                          <form className="settings-form" onSubmit={saveSettings}>
+                            <label>
+                              Name
+                              <input
+                                value={pName}
+                                onChange={(e) => setPName(e.target.value)}
+                                maxLength={120}
+                              />
+                            </label>
+                            <label>
+                              Description
+                              <textarea
+                                value={pDesc}
+                                onChange={(e) => setPDesc(e.target.value)}
+                                maxLength={500}
+                                rows={3}
+                              />
+                            </label>
+                            <button
+                              className="button button-primary"
+                              disabled={
+                                savingSettings ||
+                                (pName.trim() === detail.project.name &&
+                                  pDesc.trim() === detail.project.description)
+                              }
+                            >
+                              {savingSettings ? <Spinner /> : "Save"}
+                            </button>
+                          </form>
+                        </section>
+
+                        <section className="settings-section danger-zone">
+                          <div className="settings-section-head">
+                            <h3>Danger zone</h3>
+                          </div>
+                          <div className="danger-row">
+                            <div>
+                              <strong>Transfer ownership</strong>
+                              <p>Pick an active member to make them the owner. You become a member.</p>
+                            </div>
+                            <div className="danger-transfer">
+                              {ownerMembers.filter((m) => m.status === "active").length === 0 ? (
+                                <span className="muted-note">No active members to transfer to.</span>
+                              ) : (
+                                ownerMembers
+                                  .filter((m) => m.status === "active")
+                                  .map((m) => (
+                                    <button
+                                      key={m.id}
+                                      className="button button-ghost"
+                                      disabled={busy || isArchived}
+                                      onClick={() => {
+                                        setTransferConfirm("");
+                                        setTransferTo(m);
+                                      }}
+                                    >
+                                      Make {m.name} owner
+                                    </button>
+                                  ))
+                              )}
+                            </div>
+                          </div>
+                          <div className="danger-row">
+                            <div>
+                              <strong>{isArchived ? "Unarchive" : "Archive"} project</strong>
+                              <p>
+                                {isArchived
+                                  ? "Restore editing, agents, and commit approvals."
+                                  : "Freeze the project — everyone read-only, agents stopped."}
+                              </p>
+                            </div>
+                            <button
+                              className="button button-ghost"
+                              disabled={busy}
+                              onClick={() => void setArchived(!isArchived)}
+                            >
+                              {busy ? <Spinner /> : isArchived ? "Unarchive" : "Archive"}
+                            </button>
+                          </div>
+                          <div className="danger-row">
+                            <div>
+                              <strong>Delete project</strong>
+                              <p>Workspaces are archived; all project history is removed.</p>
+                            </div>
+                            <button
+                              className="button button-danger"
+                              disabled={busy}
+                              onClick={() => void deleteProject()}
+                            >
+                              {busy ? <Spinner /> : "Delete"}
+                            </button>
+                          </div>
+                        </section>
+                      </>
+                    )}
+
+                    {teamSection === "danger" && !isOwner && (
+                      <section className="settings-section danger-zone">
+                        <div className="settings-section-head">
+                          <h3>Membership</h3>
+                        </div>
+                        <div className="danger-row">
+                          <div>
+                            <strong>Leave project</strong>
+                            <p>Your child agent and workspace are archived.</p>
+                          </div>
+                          <button
+                            className="button button-danger"
+                            disabled={busy}
+                            onClick={() => void leaveProject()}
+                          >
+                            {busy ? <Spinner /> : "Leave"}
+                          </button>
+                        </div>
+                      </section>
+                    )}
                   </div>
                 </div>
               )}
@@ -925,12 +1341,16 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
 
             <span className="eyebrow">Flagged code</span>
             <pre className="owasp-fix-code">
-              {fixPoint.evidence || "The analysis did not capture a snippet — the agent will locate it."}
+              {fixPoint.evidence || "The analysis did not capture a snippet."}
             </pre>
 
             <span className="eyebrow">Suggested fix</span>
             <p className="owasp-fix-remediation">
-              {fixPoint.remediation || "No specific remediation was provided; the agent will propose one."}
+              {fixPoint.remediation || "No specific remediation was provided."}
+            </p>
+            <p className="muted-note">
+              Fix rewrites <code>{fixPoint.file || "the file"}</code> in one model call, then re-runs
+              the analysis and commits if it passes.
             </p>
 
             <div className="modal-footer">
@@ -941,14 +1361,8 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                 type="button"
                 className="button button-primary"
                 onClick={() => fixWithAgent(fixPoint)}
-                disabled={isArchived || ws.status === "busy"}
-                title={
-                  isArchived
-                    ? "This project is archived"
-                    : ws.status === "busy"
-                      ? "Wait for the current agent run to finish"
-                      : undefined
-                }
+                disabled={isArchived || commitPhase !== null}
+                title={isArchived ? "This project is archived" : undefined}
               >
                 Fix
               </button>
@@ -960,58 +1374,177 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
       {mergeBusy && !mergePreview && !agentMergePreview && <div className="modal-backdrop merge-loading-backdrop"><section className="merge-loading-card" role="status" aria-live="polite"><span className="spinner" /><div><strong>Preparing merge review…</strong><p>Comparing outcomes, workspace files, and context prompts.</p></div></section></div>}
       {mergePreview && <MergeReview preview={mergePreview.preview} busy={mergeBusy} onCancel={() => setMergePreview(null)} onFixWithAi={() => { if (!selectedId) return Promise.reject(new Error("Project not selected")); return api.projects.mergeAi(selectedId, mergePreview.memberId, mergePreview.branchId); }} onMerge={(resolution) => void applyChildMerge(resolution)} />}
       {agentMergePreview && <MergeReview preview={agentMergePreview.preview} busy={mergeBusy} onCancel={() => setAgentMergePreview(null)} onFixWithAi={() => api.mergeAi(agentMergePreview.agentId, agentMergePreview.branchId)} onMerge={(resolution) => void applyAgentMerge(resolution)} />}
+      {transferTo && detail && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={() => {
+            setTransferTo(null);
+            setTransferConfirm("");
+          }}
+        >
+          <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">Transfer ownership</span>
+                <h2>Make {transferTo.name} the owner</h2>
+                <p>
+                  {transferTo.name} will control the parent agent and this page. You become a member
+                  with a fresh child-agent workspace. Type <strong>{detail.project.name}</strong> to
+                  confirm.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setTransferTo(null);
+                  setTransferConfirm("");
+                }}
+              >
+                ×
+              </button>
+            </div>
+            <label>
+              Project name
+              <input
+                autoFocus
+                value={transferConfirm}
+                onChange={(e) => setTransferConfirm(e.target.value)}
+              />
+            </label>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="button button-ghost"
+                onClick={() => {
+                  setTransferTo(null);
+                  setTransferConfirm("");
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button button-danger"
+                disabled={busy || transferConfirm.trim() !== detail.project.name}
+                onClick={() => void doTransfer()}
+              >
+                {busy ? <Spinner /> : "Transfer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function MemberCard({
   member,
+  isYou = false,
   readOnly = false,
   onSaveRole,
   onRemove,
+  onTransfer,
 }: {
   member: ProjectMemberView;
+  isYou?: boolean;
   readOnly?: boolean;
   onSaveRole: (role: string) => void;
   onRemove: () => void;
+  onTransfer?: () => void;
 }) {
   const [role, setRole] = useState(member.role);
+  const [menuOpen, setMenuOpen] = useState(false);
   const analysis = member.securityAnalysis;
+  const invited = member.status === "invited";
   return (
-    <article className="member-row">
-      <div className="member-avatar">{member.name.slice(0, 1).toUpperCase()}</div>
+    <article className={"member-row" + (invited ? " member-invited" : "")}>
+      <div
+        className="member-avatar"
+        style={{ background: `hsl(${avatarHue(member.name)} 55% 42%)` }}
+      >
+        {initials(member.name)}
+      </div>
       <div className="member-copy">
-        <strong>{member.name}</strong>
-        <div className="member-role-edit">
-          <input
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-            maxLength={60}
-            placeholder="Role"
-            disabled={readOnly}
-          />
-          <button
-            type="button"
-            className="button button-primary"
-            disabled={readOnly || !role.trim() || role.trim() === member.role}
-            onClick={() => onSaveRole(role)}
-          >
-            Save role
-          </button>
-          <button
-            type="button"
-            className="button button-ghost"
-            onClick={onRemove}
-            disabled={readOnly}
-          >
-            Remove
-          </button>
+        <div className="member-name-row">
+          <strong>{member.name}</strong>
+          <span className="role-badge role-member">{member.role}</span>
+          {invited && <span className="member-tag">pending</span>}
+          {isYou && <span className="member-you">you</span>}
         </div>
-        {analysis && (
+
+        {!invited && (
+          <div className="member-role-edit">
+            <input
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              maxLength={60}
+              placeholder="Role"
+              disabled={readOnly}
+            />
+            <button
+              type="button"
+              className="button button-primary"
+              disabled={readOnly || !role.trim() || role.trim() === member.role}
+              onClick={() => onSaveRole(role)}
+            >
+              Save role
+            </button>
+          </div>
+        )}
+
+        <span className="member-sec">
+          {invited
+            ? "Invited by " + member.invitedByName + " · not joined yet"
+            : "Joined " + formatTime(member.createdAt) +
+              " · invited by " + member.invitedByName +
+              (member.pendingCommits > 0
+                ? " · " + member.pendingCommits + " pending request" +
+                  (member.pendingCommits === 1 ? "" : "s")
+                : "")}
+        </span>
+        {analysis && !invited && (
           <span className="member-sec">
             OWASP analysis: {analysis.passed ? "passed" : owaspFailCount(analysis) + " failed"} ·{" "}
             {formatTime(analysis.ranAt)}
           </span>
+        )}
+      </div>
+
+      <div className="member-menu">
+        <button
+          type="button"
+          className="member-menu-btn"
+          onClick={() => setMenuOpen((v) => !v)}
+          aria-label="Member actions"
+        >
+          ⋯
+        </button>
+        {menuOpen && (
+          <div className="member-menu-pop" onMouseLeave={() => setMenuOpen(false)}>
+            {onTransfer && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onTransfer();
+                }}
+              >
+                Transfer ownership
+              </button>
+            )}
+            <button
+              type="button"
+              className="member-menu-danger"
+              disabled={readOnly}
+              onClick={() => {
+                setMenuOpen(false);
+                onRemove();
+              }}
+            >
+              {invited ? "Revoke invite" : "Remove"}
+            </button>
+          </div>
         )}
       </div>
     </article>

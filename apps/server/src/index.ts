@@ -1,5 +1,6 @@
 import path from "node:path";
 import { AgentService } from "./agent-service.js";
+import { arkClassify } from "./ark-client.js";
 import { createApp } from "./app.js";
 import { loadConfig, writeCodexConfig } from "./config.js";
 import { ProjectService } from "./project-service.js";
@@ -17,7 +18,14 @@ const workspaces = new WorkspaceManager(config.workspaceRoot);
 const history = new WorkspaceHistory(path.join(config.dataDirectory, "branchpoint"));
 const runner = createRunner(config);
 const mergeEngine = new MergeEngine(history, createIsolatedMergeAiResolver(runner));
-const projects = new ProjectService(store, workspaces, history, mergeEngine, config.codexHome);
+const projects = new ProjectService(
+  store,
+  workspaces,
+  history,
+  (prompt) => arkClassify(config, prompt),
+  mergeEngine,
+  config.codexHome,
+);
 const service = new AgentService(config, store, workspaces, runner, history, mergeEngine);
 await service.initialize();
 

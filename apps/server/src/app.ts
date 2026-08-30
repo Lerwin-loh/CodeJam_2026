@@ -7,7 +7,7 @@ import type { AgentService } from "./agent-service.js";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import { MergeConflictError } from "./merge-engine.js";
-import { OWASP_ANALYSIS_PROMPT, type ProjectService } from "./project-service.js";
+import type { ProjectService } from "./project-service.js";
 import type { User } from "./types.js";
 
 declare module "fastify" {
@@ -17,6 +17,10 @@ declare module "fastify" {
 }
 
 const agentIdParams = z.object({ id: z.string().uuid() });
+const agentBranchParams = z.object({
+  id: z.string().uuid(),
+  branchId: z.string().uuid(),
+});
 const runIdParams = z.object({ id: z.string().uuid() });
 const checkpointIdParams = z.object({ id: z.string().uuid() });
 const createUserBody = z.object({
@@ -39,6 +43,12 @@ const branchMessageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
   branchId: z.string().uuid().nullable().optional(),
 });
+const mergeBranchesBody = z.object({
+  branchIds: z.array(z.string().uuid()).min(1).max(50),
+});
+const securityFixBody = z.object({
+  pointIds: z.array(z.string().max(20)).max(10).optional(),
+});
 const branchQuery = z.object({ branchId: z.string().uuid().optional() });
 const createCheckpointBody = z.object({
   label: z.string().trim().min(1).max(120),
@@ -50,6 +60,14 @@ const memberParams = z.object({
   memberId: z.string().uuid(),
 });
 const createProjectBody = z.object({ name: z.string().trim().min(1).max(120) });
+const updateProjectBody = z
+  .object({
+    name: z.string().trim().min(1).max(120).optional(),
+    description: z.string().max(500).optional(),
+  })
+  .refine((v) => v.name !== undefined || v.description !== undefined, "Nothing to update");
+const transferProjectBody = z.object({ toUserId: z.string().uuid() });
+const upgradeAgentBody = z.object({ projectName: z.string().trim().min(1).max(120) });
 const addMemberBody = z.object({
   userName: z.string().trim().min(1).max(60),
   role: z.string().trim().min(1).max(60),
@@ -126,6 +144,10 @@ export async function createApp(
     user: { id: request.user.id, name: request.user.name },
   }));
 
+  app.delete("/api/users/me", async (request) =>
+    service.deleteAccount(request.user),
+  );
+
   app.get("/api/audit", async (request) => ({
     entries: service.listAudit(request.user),
   }));
@@ -148,6 +170,14 @@ export async function createApp(
       reason: "Owner created the Agent",
     });
     return reply.code(201).send({ agent });
+  });
+
+  app.post("/api/agents/:id/upgrade-to-project", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "agent.upgrade-to-project");
+    const body = upgradeAgentBody.parse(request.body);
+    const result = await projects.upgradeStandaloneAgent(id, body.projectName, request.user);
+    return reply.code(201).send(result);
   });
 
   // Standalone Agents use the collection routes above. Project parent and child
@@ -275,6 +305,21 @@ export async function createApp(
     await service.assertAgentAccess(id, request.user, "agent.run");
     const body = agentMergeBody.parse(request.body);
     return service.resolveBranchMerge(id, body.branchId);
+  });
+
+  app.delete("/api/agents/:id/branches/:branchId", async (request) => {
+    const { id, branchId } = agentBranchParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "branch.delete");
+    const result = await service.deleteBranch(id, branchId);
+    await service.recordAudit({
+      user: request.user,
+      agentId: id,
+      action: "branch.delete",
+      resource: "branch:" + branchId,
+      decision: "allow",
+      reason: "Owner deleted an idle leaf branch",
+    });
+    return result;
   });
 
   app.post("/api/agents/:id/checkpoints", async (request, reply) => {
@@ -422,11 +467,52 @@ export async function createApp(
 
   app.get("/api/projects", async (request) => ({
     projects: projects.listProjects(request.user.id),
+    invitations: projects.listPendingInvitations(request.user.id),
   }));
 
   app.get("/api/projects/:id", async (request) => {
     const { id } = projectIdParams.parse(request.params);
     return projects.getProject(id, request.user);
+  });
+
+  app.patch("/api/projects/:id", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.update");
+    const body = updateProjectBody.parse(request.body);
+    return { project: await projects.updateProject(id, request.user, body) };
+  });
+
+  app.post("/api/projects/:id/transfer", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.transfer");
+    const { toUserId } = transferProjectBody.parse(request.body);
+    return { project: await projects.transferOwnership(id, request.user, toUserId) };
+  });
+
+  app.post("/api/projects/:id/leave", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.leave");
+    await projects.leaveProject(id, request.user);
+    return { ok: true };
+  });
+
+  app.post("/api/projects/:id/invitation/accept", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "invitation.respond");
+    return { member: await projects.acceptInvitation(id, request.user) };
+  });
+
+  app.post("/api/projects/:id/invitation/decline", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "invitation.respond");
+    await projects.declineInvitation(id, request.user);
+    return { ok: true };
+  });
+
+  app.get("/api/projects/:id/activity", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "activity.read");
+    return { activity: projects.getActivity(id) };
   });
 
   app.delete("/api/projects/:id", async (request) => {
@@ -478,7 +564,7 @@ export async function createApp(
     const { id } = projectIdParams.parse(request.params);
     await projects.assertProjectAccess(id, request.user, "member.manage");
     const body = addMemberBody.parse(request.body);
-    const member = await projects.addMember(id, request.user, body);
+    const member = await projects.inviteMember(id, request.user, body);
     return reply.code(201).send({ member });
   });
 
@@ -486,14 +572,14 @@ export async function createApp(
     const { id, memberId } = memberParams.parse(request.params);
     await projects.assertProjectAccess(id, request.user, "member.manage");
     const body = updateMemberBody.parse(request.body);
-    const member = await projects.updateMember(id, memberId, body);
+    const member = await projects.updateMember(id, memberId, request.user, body);
     return { member };
   });
 
   app.delete("/api/projects/:id/members/:memberId", async (request) => {
     const { id, memberId } = memberParams.parse(request.params);
     await projects.assertProjectAccess(id, request.user, "member.manage");
-    await projects.removeMember(id, memberId);
+    await projects.removeMember(id, memberId, request.user);
     return { ok: true };
   });
 
@@ -537,30 +623,24 @@ export async function createApp(
     };
   });
 
-  // Part 1B: run the member's child agent as an OWASP Top 10 reviewer of their
-  // branch. A passing result (bound to the branch's current state) unlocks commit.
+  // Part 1B: the pre-commit OWASP gate, cheapest-path-first —
+  //  1. only the branch-vs-main diff is in scope (no full-tree scan);
+  //  2. a fast static pass runs with zero tokens; if it finds issues we stop there;
+  //  3. otherwise ONE direct model call over just the changed files (no agent,
+  //     no tools, no conversation history).
   app.post("/api/projects/:id/members/:memberId/security-analysis", async (request) => {
     const { id, memberId } = memberParams.parse(request.params);
-    const { member } = await projects.assertProjectAccess(id, request.user, "security.check", {
-      memberId,
-    });
-    const target =
-      member && member.id === memberId
-        ? member
-        : projects.getMemberById(id, memberId);
-    // The analysis is a full agent run — make sure the child agent is running.
-    const childAgent = service.getAgent(target.childAgentId);
-    if (childAgent.status === "stopped") {
-      await service.startAgent(target.childAgentId);
-    } else if (childAgent.status === "busy") {
-      throw new HttpError(
-        409,
-        "Your agent is currently running. Wait for it to finish, then run the analysis.",
-      );
-    }
-    const run = await service.runToCompletion(target.childAgentId, OWASP_ANALYSIS_PROMPT);
-    const security = await projects.recordSecurityAnalysis(id, memberId, run);
-    return { security };
+    await projects.assertProjectAccess(id, request.user, "security.check", { memberId });
+    return { security: await projects.runSecurityGate(id, memberId) };
+  });
+
+  // Auto-fix flagged OWASP findings — one direct model call per affected file,
+  // no agent run. `pointIds` optional: omit to fix every flagged finding.
+  app.post("/api/projects/:id/members/:memberId/security-fix", async (request) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "security.check", { memberId });
+    const { pointIds } = securityFixBody.parse(request.body ?? {});
+    return { security: await projects.applySecurityFixes(id, memberId, pointIds ?? null) };
   });
 
   app.post("/api/projects/:id/members/:memberId/commit-request", async (request, reply) => {

@@ -313,15 +313,17 @@ describe("Project access enforcement (end to end)", () => {
     await expect.poll(() => accountService.getRun(standaloneRun.run.id).status).toBe("completed");
 
     const aliceProject = await projects.createProject("Alice owned", alice.id);
-    const bobOnAliceProject = await projects.addMember(aliceProject.id, alice, {
+    await projects.inviteMember(aliceProject.id, alice, {
       userName: bob.name,
       role: "Backend",
     });
+    const bobOnAliceProject = await projects.acceptInvitation(aliceProject.id, bob);
     const bobProject = await projects.createProject("Bob owned", bob.id);
-    const aliceOnBobProject = await projects.addMember(bobProject.id, bob, {
+    await projects.inviteMember(bobProject.id, bob, {
       userName: alice.name,
       role: "Frontend",
     });
+    const aliceOnBobProject = await projects.acceptInvitation(bobProject.id, alice);
 
     const before = store.snapshot();
     const deletedAgentIds = new Set([

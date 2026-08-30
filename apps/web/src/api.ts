@@ -92,6 +92,15 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
   me: () => request<{ user: User }>("/api/me"),
+  deleteAccount: () =>
+    request<{
+      deletedUserId: string;
+      deletedProjects: number;
+      deletedMemberships: number;
+      deletedAgents: number;
+      archivedWorkspaces: number;
+      archivedSnapshots: number;
+    }>("/api/users/me", { method: "DELETE" }),
   audit: () => request<{ entries: AuditEntry[] }>("/api/audit"),
   system: () => request<SystemInfo>("/api/system"),
   listAgents: () => request<{ agents: Agent[] }>("/api/agents"),
@@ -105,6 +114,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  upgradeAgentToProject: (id: string, projectName: string) =>
+    request<{ project: Project; parentAgent: Agent; archivedWorkspace: string | null }>(
+      "/api/agents/" + id + "/upgrade-to-project",
+      {
+        method: "POST",
+        body: JSON.stringify({ projectName }),
+      },
+    ),
   updateAgent: (
     id: string,
     body: { name: string; description: string; instructions: string },
@@ -160,17 +177,53 @@ export const api = {
   mergePreview: (agentId: string, branchId: string) => request<MergePreview>("/api/agents/" + agentId + "/merge-preview", { method: "POST", body: JSON.stringify({ branchId }) }),
   merge: (agentId: string, branchId: string, resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[] }>("/api/agents/" + agentId + "/merge", { method: "POST", body: JSON.stringify({ branchId, resolution }) }),
   mergeAi: (agentId: string, branchId: string) => request<{ context: Record<string, "target" | "source">; workspace: Record<string, "target" | "source">; aiDecisions: Record<string, string> }>("/api/agents/" + agentId + "/merge-ai", { method: "POST", body: JSON.stringify({ branchId }) }),
+  deleteBranch: (id: string, branchId: string) =>
+    request<{ branchId: string; archivedWorkspace: string | null }>(
+      "/api/agents/" + id + "/branches/" + branchId,
+      { method: "DELETE" },
+    ),
+  mergeBranches: (id: string, branchIds: string[]) =>
+    request<{ mergedBranchIds: string[]; changedFiles: string[] }>(
+      "/api/agents/" + id + "/branches/merge",
+      { method: "POST", body: JSON.stringify({ branchIds }) },
+    ),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
   runDetails: (id: string) => request<RunDetails>("/api/runs/" + id + "/details"),
 
   projects: {
-    list: () => request<{ projects: Project[] }>("/api/projects"),
+    list: () =>
+      request<{ projects: Project[]; invitations: import("./types").ProjectInvitation[] }>(
+        "/api/projects",
+      ),
     create: (name: string) =>
       request<{ project: Project }>("/api/projects", {
         method: "POST",
         body: JSON.stringify({ name }),
       }),
     get: (id: string) => request<ProjectDetail>("/api/projects/" + id),
+    update: (id: string, body: { name?: string; description?: string }) =>
+      request<{ project: Project }>("/api/projects/" + id, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    transfer: (id: string, toUserId: string) =>
+      request<{ project: Project }>("/api/projects/" + id + "/transfer", {
+        method: "POST",
+        body: JSON.stringify({ toUserId }),
+      }),
+    leave: (id: string) =>
+      request<{ ok: true }>("/api/projects/" + id + "/leave", { method: "POST" }),
+    acceptInvite: (id: string) =>
+      request<{ member: import("./types").ProjectMember }>(
+        "/api/projects/" + id + "/invitation/accept",
+        { method: "POST" },
+      ),
+    declineInvite: (id: string) =>
+      request<{ ok: true }>("/api/projects/" + id + "/invitation/decline", { method: "POST" }),
+    activity: (id: string) =>
+      request<{ activity: import("./types").ActivityEntry[] }>(
+        "/api/projects/" + id + "/activity",
+      ),
     delete: (id: string) =>
       request<{ archivedWorkspace: string | null; archivedSnapshots: number }>(
         "/api/projects/" + id,
@@ -212,6 +265,11 @@ export const api = {
         "/api/projects/" + id + "/members/" + memberId + "/security-analysis",
         { method: "POST" },
       ),
+    securityFix: (id: string, memberId: string, pointIds?: string[]) =>
+      request<{ security: MemberSecurityView }>(
+        "/api/projects/" + id + "/members/" + memberId + "/security-fix",
+        { method: "POST", body: JSON.stringify(pointIds ? { pointIds } : {}) },
+      ),
     submitCommitRequest: (
       id: string,
       memberId: string,
@@ -233,7 +291,12 @@ export const api = {
     mergeAi: (id: string, memberId: string, branchId: string | null) => request<{ context: Record<string, "target" | "source">; workspace: Record<string, "target" | "source">; aiDecisions: Record<string, string> }>("/api/projects/" + id + "/merge-ai", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
   },
   restoreCheckpoint: (id: string) =>
-    request<{ checkpoint: AgentCheckpoint; workspacePath: string; workspaceHash: string }>("/api/checkpoints/" + id + "/restore", {
+    request<{
+      checkpoint: AgentCheckpoint;
+      workspacePath: string;
+      activeWorkspacePath: string;
+      workspaceHash: string;
+    }>("/api/checkpoints/" + id + "/restore", {
       method: "POST",
     }),
   streamRunTrace: async (id: string, onEvent: (event: TraceEvent) => void, signal?: AbortSignal): Promise<void> => {

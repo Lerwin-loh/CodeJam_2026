@@ -730,7 +730,7 @@ describe("Part 1 — agent access across the project", () => {
   });
 
   it("gates a commit request on a passing OWASP verdict, then lets the owner decide", async () => {
-    const { projects, agents } = await makeStack();
+    const { projects, agents, store } = await makeStack();
     const owner = await agents.createUser("Owner");
     const dana = await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);

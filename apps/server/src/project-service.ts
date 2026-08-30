@@ -6,33 +6,48 @@ import { HttpError } from "./errors.js";
 import { MergeConflictError, MergeEngine, conversationCommits, outcomeDetails, outcomeSummary } from "./merge-engine.js";
 import { JsonStore } from "./store.js";
 import type {
-    Agent,
-    AgentRun,
-    AuditDecision,
-    ChangedFiles,
-    CommitRequest,
-    MergeResolution,
-    OwaspStatus,
-    Project,
-    ProjectMember,
-    SecurityAnalysis,
-    SecurityAnalysisPoint,
-    User,
+  Agent,
+  AuditDecision,
+  ChangedFiles,
+  CommitRequest,
+  MergeResolution,
+  OwaspStatus,
+  Project,
+  ProjectMember,
+  ProjectMemberStatus,
+  SecurityAnalysis,
+  SecurityAnalysisPoint,
+  User,
 } from "./types.js";
+
+/** One-shot text completion used for the OWASP classification (see ark-client). */
+export type SecurityClassifier = (prompt: string) => Promise<string>;
 import { WorkspaceHistory } from "./workspace-history.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
+function projectName(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new HttpError(400, "Enter a project name.");
+  if (trimmed.length > 120) throw new HttpError(400, "Project name is too long.");
+  return trimmed;
+}
+
 /** Minimum capability each project action needs. Unlisted -> owner only. */
 const PROJECT_ACTIONS: Record<string, "owner" | "member" | "member-own"> = {
   "project.read": "member",
+  "project.update": "owner",
   "project.delete": "owner",
+  "project.transfer": "owner",
   "project.archive": "owner",
   "project.unarchive": "owner",
+  "project.leave": "member",
   "project.tree.read": "member",
   "file.read": "member",
   "members.read": "member",
+  "activity.read": "member",
+  "invitation.respond": "member",
   "parent.read": "member",
   "parent.query": "owner",
   "child.read": "member-own",
@@ -55,9 +70,12 @@ const ARCHIVED_READ_ACTIONS = new Set([
   "project.tree.read",
   "file.read",
   "members.read",
+  "activity.read",
   "parent.read",
   "child.read",
   "commit.request.read",
+  "project.leave",
+  "invitation.respond",
 ]);
 const PROJECT_LIFECYCLE_ACTIONS = new Set([
   "project.archive",
@@ -81,37 +99,170 @@ const OWASP_TOP_10: ReadonlyArray<{ id: string; name: string }> = [
 const OWASP_IDS = new Set(OWASP_TOP_10.map((entry) => entry.id));
 const OWASP_NAME_BY_ID = new Map(OWASP_TOP_10.map((entry) => [entry.id, entry.name]));
 
-/** Hard-coded prompt pushed to the member's child agent for the pre-commit gate. */
-export const OWASP_ANALYSIS_PROMPT = [
-  "SECURITY ANALYSIS — read-only. Do NOT create, edit, run, or delete anything.",
-  "",
-  "Review the source code in your current workspace (your branch) against the",
-  "OWASP Top 10 (2021). Inspect the actual files. For each of the ten categories",
-  "decide one status:",
-  '  "pass" — you found no issue of this class in the code you can see',
-  '  "fail" — at least one concrete instance of this class exists (name the file)',
-  '  "na"   — this class cannot apply to this codebase',
-  "",
-  OWASP_TOP_10.map((entry) => `  ${entry.id}  ${entry.name}`).join("\n"),
-  "",
-  "For every category you mark \"fail\", also include:",
-  '  "file"        — the file path (relative to your workspace root)',
-  '  "evidence"    — the offending lines, copied verbatim (<= 1500 chars)',
-  '  "remediation" — concrete steps to fix it (<= 600 chars)',
-  'Omit those three keys (or leave them "") for "pass" and "na".',
-  "",
-  "You may explain your reasoning first. Then, as the LAST thing in your reply,",
-  "output EXACTLY ONE fenced code block tagged `json` and nothing after it:",
-  "",
-  "```json",
-  "[",
-  OWASP_TOP_10.map(
-    (entry) =>
-      `  {"id":"${entry.id}","name":"${entry.name}","status":"pass|fail|na","detail":"<=200 chars","file":"","evidence":"","remediation":""}`,
-  ).join(",\n"),
-  "]",
-  "```",
-].join("\n");
+/** Per-file / total caps on the source bytes fed to the classifier. */
+const CLASSIFY_FILE_CAP = 12_000;
+const CLASSIFY_TOTAL_CAP = 48_000;
+
+/**
+ * The single prompt sent to the model for the OWASP gate. The changed files (vs
+ * main) are inlined so the model needs no tools and no file-reading round-trips.
+ */
+export function owaspAnalysisPrompt(files: Array<{ path: string; content: string }>): string {
+  let budget = CLASSIFY_TOTAL_CAP;
+  const blocks: string[] = [];
+  for (const file of files) {
+    if (budget <= 0) {
+      blocks.push(`--- ${file.path} ---\n… (omitted, size budget reached)`);
+      continue;
+    }
+    let body = file.content;
+    if (body.length > CLASSIFY_FILE_CAP) body = body.slice(0, CLASSIFY_FILE_CAP) + "\n… (truncated)";
+    if (body.length > budget) body = body.slice(0, budget) + "\n… (truncated)";
+    budget -= body.length;
+    blocks.push(`--- ${file.path} ---\n${body}`);
+  }
+  return [
+    "You are a security reviewer. Assess ONLY the code below (it is the diff vs the",
+    "project's main branch) against the OWASP Top 10 (2021).",
+    'Per category choose one status: "pass" (no issue in this code), "fail" (a',
+    'concrete instance is present), or "na" (this class cannot apply here).',
+    'On a "fail" also give: file, evidence (offending lines verbatim, <=600 chars),',
+    'remediation (<=250 chars). Leave those keys "" otherwise.',
+    "",
+    "Reply with ONLY a JSON array of these 10 objects, in this order, no prose:",
+    "[",
+    OWASP_TOP_10.map(
+      (entry) =>
+        `  {"id":"${entry.id}","name":"${entry.name}","status":"pass|fail|na","detail":"<=120 chars","file":"","evidence":"","remediation":""}`,
+    ).join(",\n"),
+    "]",
+    "",
+    "=== FILES ===",
+    blocks.join("\n\n"),
+  ].join("\n");
+}
+
+/**
+ * One direct model call that rewrites a single file to fix its flagged issues —
+ * no agent, no tools, no conversation. Returns the whole corrected file.
+ */
+function fileFixPrompt(
+  relPath: string,
+  content: string,
+  issues: SecurityAnalysisPoint[],
+): string {
+  return [
+    "Rewrite the file below to fix these OWASP issues. Change ONLY what is needed;",
+    "keep the rest of the file intact. Output the COMPLETE corrected file and NOTHING",
+    "else — no explanation, no markdown fences.",
+    "",
+    ...issues.map(
+      (issue) =>
+        `- ${issue.id} ${issue.name}: ${issue.detail}` +
+        (issue.remediation ? ` — fix: ${issue.remediation}` : ""),
+    ),
+    "",
+    `=== ${relPath} ===`,
+    content.length > CLASSIFY_FILE_CAP * 2
+      ? content.slice(0, CLASSIFY_FILE_CAP * 2)
+      : content,
+  ].join("\n");
+}
+
+/** Strip an outer ```lang … ``` fence if the model wrapped its answer in one. */
+function stripCodeFence(raw: string): string {
+  const trimmed = raw.trim();
+  const fenced = trimmed.match(/^```[a-zA-Z0-9]*\r?\n([\s\S]*?)\r?\n```$/);
+  if (fenced) return fenced[1] ?? trimmed;
+  return trimmed
+    .replace(/^```[a-zA-Z0-9]*\r?\n?/, "")
+    .replace(/\r?\n?```$/, "");
+}
+
+/**
+ * Zero-token lexical pre-filter. If any of these fire on the changed files the
+ * commit is blocked immediately with no agent run — the child agent is only
+ * invoked when this pass is clean (to catch the subtle, non-lexical issues).
+ */
+const STATIC_RULES: ReadonlyArray<{ rule: string; owasp: string; re: RegExp; fix: string }> = [
+  {
+    rule: "hardcoded-secret",
+    owasp: "A02:2021",
+    re: /(?:api[_-]?key|secret|passwd|password|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*['"][^'"]{6,}['"]/i,
+    fix: "Move the secret to server-side/env config; never ship it in client code.",
+  },
+  {
+    rule: "private-key-block",
+    owasp: "A02:2021",
+    re: /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/,
+    fix: "Remove the key from the repo; load keys from a secret store at runtime.",
+  },
+  {
+    rule: "aws-access-key-id",
+    owasp: "A02:2021",
+    re: /\bAKIA[0-9A-Z]{16}\b/,
+    fix: "Rotate the exposed AWS key now; load credentials from env / IAM role.",
+  },
+  {
+    rule: "weak-hash",
+    owasp: "A02:2021",
+    re: /\b(?:createHash\s*\(\s*['"](?:md5|sha1)['"]|\bMD5\s*\(|\bSHA1\s*\()/i,
+    fix: "Use SHA-256+ for integrity; bcrypt/scrypt/argon2 for passwords.",
+  },
+  {
+    rule: "use-of-eval",
+    owasp: "A03:2021",
+    re: /\beval\s*\(/,
+    fix: "Remove eval(); parse with JSON.parse or dispatch via an allow-list.",
+  },
+  {
+    rule: "document-write",
+    owasp: "A03:2021",
+    re: /\bdocument\s*\.\s*write(?:ln)?\s*\(/,
+    fix: "Replace document.write with safe DOM APIs (textContent / createElement).",
+  },
+  {
+    rule: "innerhtml-assignment",
+    owasp: "A03:2021",
+    re: /\.innerHTML\s*=[^=]/,
+    fix: "Use textContent, or sanitize with DOMPurify before assigning HTML.",
+  },
+  {
+    rule: "dangerously-set-innerhtml",
+    owasp: "A03:2021",
+    re: /dangerouslySetInnerHTML/,
+    fix: "Avoid dangerouslySetInnerHTML; render text or sanitize the HTML first.",
+  },
+  {
+    rule: "shell-injection-risk",
+    owasp: "A03:2021",
+    re: /\b(?:exec|execSync|spawn|spawnSync)\s*\(\s*[`'"][^`'"]*\$\{/,
+    fix: "Pass args as an array to execFile/spawn; never interpolate input into a shell string.",
+  },
+  {
+    rule: "insecure-http-resource",
+    owasp: "A08:2021",
+    re: /(?:src|href)\s*=\s*["']http:\/\//i,
+    fix: "Load third-party resources over HTTPS and add Subresource Integrity.",
+  },
+  {
+    rule: "outdated-jquery",
+    owasp: "A06:2021",
+    re: /jquery[-/](?:1\.\d|2\.\d|3\.[0-4])(?:\.\d+)?(?:\.min)?\.js/i,
+    fix: "Upgrade jQuery to a current 3.x (fixes known XSS / prototype pollution) or drop it.",
+  },
+  {
+    rule: "wildcard-cors",
+    owasp: "A05:2021",
+    re: /access-control-allow-origin[\s"':=,]+\*/i,
+    fix: "Restrict CORS to an explicit origin allow-list instead of \"*\".",
+  },
+];
+
+/** Rough binary check: a UTF-8 decode of a binary file yields U+FFFD replacements. */
+function looksBinary(text: string): boolean {
+  return text.length > 400_000 || text.indexOf("�") !== -1;
+}
 
 interface OwaspVerdict {
   ok: boolean;
@@ -119,12 +270,18 @@ interface OwaspVerdict {
   summary: string;
 }
 
-/** Pull the last ```json fenced block out of the agent reply and validate it. */
+/** Pull the JSON verdict array out of the model reply and validate it. */
 function parseOwaspVerdict(output: string): OwaspVerdict {
   const fences = [...output.matchAll(/```json\s*([\s\S]*?)```/gi)];
-  const raw = fences.length ? fences[fences.length - 1]?.[1]?.trim() : undefined;
+  let raw = fences.length ? fences[fences.length - 1]?.[1]?.trim() : undefined;
   if (!raw) {
-    return { ok: false, points: [], summary: "The agent did not return a JSON verdict block." };
+    // No fence — take the outermost [ … ] span.
+    const open = output.indexOf("[");
+    const close = output.lastIndexOf("]");
+    if (open !== -1 && close > open) raw = output.slice(open, close + 1).trim();
+  }
+  if (!raw) {
+    return { ok: false, points: [], summary: "The model did not return a JSON verdict." };
   }
   let data: unknown;
   try {
@@ -191,16 +348,29 @@ export interface ProjectMemberView {
   id: string;
   userId: string;
   name: string;
+  status: ProjectMemberStatus;
   role: string;
   childAgentId: string;
   securityAnalysis: SecurityAnalysis | null;
+  invitedByName: string;
+  pendingCommits: number;
   createdAt: string;
 }
 
 export interface RosterEntry {
   userId: string;
   name: string;
+  status: ProjectMemberStatus;
   role: string;
+}
+
+export interface ActivityEntry {
+  id: string;
+  userName: string;
+  action: string;
+  decision: AuditDecision;
+  reason: string;
+  timestamp: string;
 }
 
 export interface MemberSecurityView {
@@ -227,6 +397,8 @@ export class ProjectService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly history: WorkspaceHistory,
+    /** One direct model call for the OWASP gate (no agent). Wired in index.ts. */
+    private readonly classify?: SecurityClassifier,
     private readonly mergeEngine = new MergeEngine(history),
     private readonly codexHome = "",
   ) {}
@@ -260,11 +432,16 @@ export class ProjectService {
     const project = database.projects.find((item) => item.id === projectId);
     if (!project) throw new HttpError(404, "Project not found");
     const isOwner = project.ownerId === user.id;
-    const member =
+    const row =
       database.projectMembers.find(
         (item) => item.projectId === projectId && item.userId === user.id,
       ) ?? null;
+    // An "invited" row is not membership yet — it only unlocks the invite response.
+    const member = row && row.status === "active" ? row : null;
     if (!isOwner && !member) {
+      if (row && (action === "invitation.respond" || action === "project.read")) {
+        return { project, role: "member", member: row };
+      }
       await this.recordAudit(user, projectId, null, action, "deny", "Not a member of this project");
       throw new HttpError(403, "You are not on this project");
     }
@@ -330,9 +507,7 @@ export class ProjectService {
   // --------------------------------------------------------------------------
 
   async createProject(name: string, ownerId: string): Promise<Project> {
-    const trimmed = name.trim();
-    if (!trimmed) throw new HttpError(400, "Enter a project name.");
-    if (trimmed.length > 120) throw new HttpError(400, "Project name is too long.");
+    const trimmed = projectName(name);
 
     const projectId = randomUUID();
     const parentAgentId = randomUUID();
@@ -377,6 +552,7 @@ export class ProjectService {
     const project: Project = {
       id: projectId,
       name: trimmed,
+      description: "",
       ownerId,
       mainWorkspacePath: mainPath,
       parentAgentId,
@@ -394,16 +570,172 @@ export class ProjectService {
     return project;
   }
 
+  /**
+   * Promote one standalone Agent into a new project's parent Agent without
+   * changing its identity, Codex threads, execution history, or checkpoints.
+   */
+  async upgradeStandaloneAgent(
+    agentId: string,
+    name: string,
+    actor: User,
+  ): Promise<{ project: Project; parentAgent: Agent; archivedWorkspace: string | null }> {
+    const trimmed = projectName(name);
+    const initial = this.store.snapshot();
+    const sourceAgent = initial.agents.find((item) => item.id === agentId);
+    if (!sourceAgent) throw new HttpError(404, "Agent not found");
+    if (sourceAgent.ownerId !== actor.id) {
+      throw new HttpError(403, "Only the Agent owner can upgrade it to a project");
+    }
+    if (sourceAgent.kind !== "standalone" || sourceAgent.projectId !== null) {
+      throw new HttpError(409, "Only a standalone Agent can be upgraded to a project");
+    }
+    if (sourceAgent.status === "busy") {
+      throw new HttpError(409, "Wait for the Agent run to finish before upgrading it");
+    }
+    const sourceBranches = initial.branches.filter((item) => item.agentId === agentId);
+    if (sourceBranches.some((branch) => branch.status === "busy")) {
+      throw new HttpError(409, "Wait for every branch run to finish before upgrading the Agent");
+    }
+
+    const projectId = randomUUID();
+    const timestamp = now();
+    const sourceManifest = await this.history.manifest(sourceAgent.workspacePath);
+    let mainPath: string;
+    try {
+      mainPath = await this.workspaces.copyStandaloneToProject(sourceAgent.workspacePath, projectId);
+    } catch (error) {
+      throw new HttpError(
+        500,
+        "Could not copy the Agent workspace into the new project: " +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    }
+
+    let headSnapshot: import("./types.js").WorkspaceSnapshot | null = null;
+    try {
+      const copiedManifest = await this.history.manifest(mainPath);
+      if (copiedManifest.workspaceHash !== sourceManifest.workspaceHash) {
+        throw new Error("The copied main workspace did not match the standalone workspace");
+      }
+
+      const parentAgent: Agent = {
+        ...sourceAgent,
+        projectId,
+        kind: "parent",
+        memberId: null,
+        workspacePath: mainPath,
+        updatedAt: timestamp,
+      };
+      await this.workspaces.writeInstructions(parentAgent);
+      const promotedManifest = await this.history.manifest(mainPath);
+      headSnapshot = await this.history.createSnapshot(
+        parentAgent.id,
+        projectId,
+        mainPath,
+        promotedManifest,
+      );
+      const project: Project = {
+        id: projectId,
+        name: trimmed,
+        description: "",
+        ownerId: actor.id,
+        mainWorkspacePath: mainPath,
+        parentAgentId: parentAgent.id,
+        headSnapshotId: headSnapshot.id,
+        archivedAt: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+
+      await this.store.mutate((database) => {
+        const storedAgent = database.agents.find((item) => item.id === agentId);
+        if (!storedAgent || storedAgent.ownerId !== actor.id) {
+          throw new HttpError(404, "Agent not found");
+        }
+        if (storedAgent.kind !== "standalone" || storedAgent.projectId !== null) {
+          throw new HttpError(409, "The Agent was already upgraded");
+        }
+        if (storedAgent.status === "busy") {
+          throw new HttpError(409, "The Agent started a run while the upgrade was being prepared");
+        }
+        const branches = database.branches.filter((item) => item.agentId === agentId);
+        if (branches.some((branch) => branch.status === "busy")) {
+          throw new HttpError(409, "A branch started a run while the upgrade was being prepared");
+        }
+
+        Object.assign(storedAgent, parentAgent);
+        for (const branch of branches) {
+          branch.workspacePath = this.workspaces.branchWorkspacePath(mainPath, branch.id);
+        }
+        database.snapshots.push(headSnapshot!);
+        database.projects.push(project);
+        database.audit.push({
+          id: randomUUID(),
+          userId: actor.id,
+          userName: actor.name,
+          agentId,
+          action: "agent.upgrade-to-project",
+          resource: "project:" + projectId,
+          decision: "allow",
+          reason: "Owner upgraded standalone Agent " + sourceAgent.name + " into project " + trimmed,
+          timestamp,
+        });
+      });
+
+      // The committed project copy is authoritative. Archiving the old path is
+      // recoverable cleanup; a failure here leaves only a harmless duplicate.
+      let archivedWorkspace: string | null = null;
+      try {
+        archivedWorkspace = await this.workspaces.archive(sourceAgent);
+      } catch {
+        archivedWorkspace = null;
+      }
+      return { project, parentAgent, archivedWorkspace };
+    } catch (error) {
+      if (headSnapshot) {
+        await this.history.archiveSnapshots(projectId, [headSnapshot]).catch(() => undefined);
+      }
+      await this.workspaces.discardProjectCopy(projectId).catch(() => undefined);
+      throw error;
+    }
+  }
+
   listProjects(userId: string): Project[] {
     const database = this.store.snapshot();
     const memberProjectIds = new Set(
       database.projectMembers
-        .filter((item) => item.userId === userId)
+        .filter((item) => item.userId === userId && item.status === "active")
         .map((item) => item.projectId),
     );
     return database.projects
       .filter((item) => item.ownerId === userId || memberProjectIds.has(item.id))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  /** Pending invitations addressed to a user, for the projects sidebar. */
+  listPendingInvitations(userId: string): Array<{
+    projectId: string;
+    projectName: string;
+    role: string;
+    invitedByName: string;
+    invitedAt: string;
+  }> {
+    const database = this.store.snapshot();
+    const nameOf = (id: string) =>
+      database.users.find((user) => user.id === id)?.name ?? "Someone";
+    return database.projectMembers
+      .filter((item) => item.userId === userId && item.status === "invited")
+      .map((item) => {
+        const project = database.projects.find((p) => p.id === item.projectId);
+        return {
+          projectId: item.projectId,
+          projectName: project?.name ?? "Unknown project",
+          role: item.role,
+          invitedByName: nameOf(item.invitedBy),
+          invitedAt: item.createdAt,
+        };
+      })
+      .sort((left, right) => right.invitedAt.localeCompare(left.invitedAt));
   }
 
   projectAgentIds(projectId: string): string[] {
@@ -477,6 +809,7 @@ export class ProjectService {
   getProject(projectId: string, user: User): {
     project: Project;
     role: "owner" | "member";
+    owner: { id: string; name: string };
     myMembership: ProjectMember | null;
     members: ProjectMemberView[] | RosterEntry[];
   } {
@@ -486,14 +819,18 @@ export class ProjectService {
     const isOwner = project.ownerId === user.id;
     const myMembership =
       database.projectMembers.find(
-        (item) => item.projectId === projectId && item.userId === user.id,
+        (item) =>
+          item.projectId === projectId && item.userId === user.id && item.status === "active",
       ) ?? null;
     if (!isOwner && !myMembership) {
       throw new HttpError(403, "You are not on this project");
     }
+    const ownerName =
+      database.users.find((item) => item.id === project.ownerId)?.name ?? "Unknown user";
     return {
       project,
       role: isOwner ? "owner" : "member",
+      owner: { id: project.ownerId, name: ownerName },
       myMembership,
       members: this.listMembers(projectId, isOwner),
     };
@@ -535,24 +872,83 @@ export class ProjectService {
     const database = this.store.snapshot();
     const rows = database.projectMembers
       .filter((item) => item.projectId === projectId)
-      .sort((left, right) => left.role.localeCompare(right.role));
+      .sort((left, right) => {
+        if (left.status !== right.status) return left.status === "active" ? -1 : 1;
+        return left.role.localeCompare(right.role);
+      });
     const nameOf = (userId: string) =>
       database.users.find((user) => user.id === userId)?.name ?? "Unknown user";
     if (!forOwner) {
-      return rows.map((item) => ({ userId: item.userId, name: nameOf(item.userId), role: item.role }));
+      return rows
+        .filter((item) => item.status === "active")
+        .map((item) => ({
+          userId: item.userId,
+          name: nameOf(item.userId),
+          status: item.status,
+          role: item.role,
+        }));
     }
     return rows.map((item) => ({
       id: item.id,
       userId: item.userId,
       name: nameOf(item.userId),
+      status: item.status,
       role: item.role,
       childAgentId: item.childAgentId,
       securityAnalysis: item.securityAnalysis,
+      invitedByName: nameOf(item.invitedBy),
+      pendingCommits: database.commitRequests.filter(
+        (cr) => cr.memberId === item.id && cr.status === "pending",
+      ).length,
       createdAt: item.createdAt,
     }));
   }
 
-  async addMember(
+  /** Snapshot main and materialise a fresh child-agent workspace for a member. */
+  private async provisionMemberAgent(
+    project: Project,
+    memberId: string,
+    userId: string,
+    userName: string,
+    role: string,
+  ): Promise<{
+    childAgent: Agent;
+    baseSnapshot: import("./types.js").WorkspaceSnapshot;
+    workspacePath: string;
+  }> {
+    const childAgentId = randomUUID();
+    const workspacePath = this.workspaces.projectMemberPath(project.id, memberId);
+    const timestamp = now();
+    const mainManifest = await this.history.manifest(project.mainWorkspacePath);
+    const baseSnapshot = await this.history.createSnapshot(
+      childAgentId,
+      project.id,
+      project.mainWorkspacePath,
+      mainManifest,
+    );
+    await this.history.restoreSnapshot(baseSnapshot, workspacePath);
+    const childAgent: Agent = {
+      id: childAgentId,
+      name: project.name + " - " + role + " (" + userName + ")",
+      description: role + " workspace for " + userName + ".",
+      instructions: childInstructions(project.name, role),
+      ownerId: userId,
+      projectId: project.id,
+      kind: "child",
+      memberId,
+      status: "ready",
+      workspacePath,
+      codexThreadId: null,
+      lastError: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    await this.workspaces.writeInstructions(childAgent);
+    return { childAgent, baseSnapshot, workspacePath };
+  }
+
+  /** Owner invites a signed-in user. The child agent is created only on accept. */
+  async inviteMember(
     projectId: string,
     actor: User,
     input: { userName: string; role: string },
@@ -572,94 +968,129 @@ export class ProjectService {
     if (!target) {
       throw new HttpError(
         404,
-        "No user named \"" + name + "\" has signed in yet. They must sign in once before you can add them.",
+        'No user named "' + name + '" has signed in yet. They must sign in once first.',
       );
     }
     if (target.id === project.ownerId) {
-      throw new HttpError(409, "The owner is already on this project.");
+      throw new HttpError(409, "That user already owns this project.");
     }
     if (
       database.projectMembers.some(
         (item) => item.projectId === projectId && item.userId === target.id,
       )
     ) {
-      throw new HttpError(409, target.name + " is already a member.");
+      throw new HttpError(409, target.name + " is already invited or a member.");
     }
 
-    const memberId = randomUUID();
-    const childAgentId = randomUUID();
-    const workspacePath = this.workspaces.projectMemberPath(projectId, memberId);
     const timestamp = now();
-
-    // Snapshot main as it stands now and materialise the member's own copy.
-    const mainManifest = await this.history.manifest(project.mainWorkspacePath);
-    const baseSnapshot = await this.history.createSnapshot(
-      childAgentId,
-      projectId,
-      project.mainWorkspacePath,
-      mainManifest,
-    );
-    await this.history.restoreSnapshot(baseSnapshot, workspacePath);
-
-    const childAgent: Agent = {
-      id: childAgentId,
-      name: project.name + " - " + role + " (" + target.name + ")",
-      description: role + " workspace for " + target.name + ".",
-      instructions: childInstructions(project.name, role),
-      ownerId: target.id,
-      projectId,
-      kind: "child",
-      memberId,
-      status: "ready",
-      workspacePath,
-      codexThreadId: null,
-      lastError: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    await this.workspaces.writeInstructions(childAgent);
-
     const member: ProjectMember = {
-      id: memberId,
+      id: randomUUID(),
       projectId,
       userId: target.id,
+      status: "invited",
       role,
-      childAgentId,
-      workspacePath,
+      childAgentId: "",
+      workspacePath: "",
       securityAnalysis: null,
       invitedBy: actor.id,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
-
     await this.store.mutate((next) => {
       if (
         next.projectMembers.some(
           (item) => item.projectId === projectId && item.userId === target.id,
         )
       ) {
-        throw new HttpError(409, target.name + " is already a member.");
+        throw new HttpError(409, target.name + " is already invited or a member.");
       }
-      next.snapshots.push(baseSnapshot);
-      next.agents.push(childAgent);
       next.projectMembers.push(member);
     });
     await this.recordAudit(
       actor,
       projectId,
-      childAgentId,
-      "project.member.add",
+      null,
+      "project.member.invite",
       "allow",
-      "Added " + target.name + " as " + role,
+      "Invited " + target.name + " as " + role,
     );
     return member;
+  }
+
+  /** Invitee accepts — provisions their child agent + forked workspace. */
+  async acceptInvitation(projectId: string, user: User): Promise<ProjectMember> {
+    const database = this.store.snapshot();
+    const project = database.projects.find((item) => item.id === projectId);
+    if (!project) throw new HttpError(404, "Project not found");
+    const invite = database.projectMembers.find(
+      (item) =>
+        item.projectId === projectId &&
+        item.userId === user.id &&
+        item.status === "invited",
+    );
+    if (!invite) throw new HttpError(404, "No pending invitation for you on this project.");
+
+    const provisioned = await this.provisionMemberAgent(
+      project,
+      invite.id,
+      user.id,
+      user.name,
+      invite.role,
+    );
+    const updated = await this.store.mutate((next) => {
+      const row = next.projectMembers.find((item) => item.id === invite.id);
+      if (!row) throw new HttpError(404, "Invitation not found");
+      if (row.status === "active") return structuredClone(row);
+      row.status = "active";
+      row.childAgentId = provisioned.childAgent.id;
+      row.workspacePath = provisioned.workspacePath;
+      row.updatedAt = now();
+      next.snapshots.push(provisioned.baseSnapshot);
+      next.agents.push(provisioned.childAgent);
+      return structuredClone(row);
+    });
+    await this.recordAudit(
+      user,
+      projectId,
+      provisioned.childAgent.id,
+      "project.invitation.accept",
+      "allow",
+      user.name + " joined as " + invite.role,
+    );
+    return updated;
+  }
+
+  async declineInvitation(projectId: string, user: User): Promise<void> {
+    const database = this.store.snapshot();
+    const invite = database.projectMembers.find(
+      (item) =>
+        item.projectId === projectId &&
+        item.userId === user.id &&
+        item.status === "invited",
+    );
+    if (!invite) throw new HttpError(404, "No pending invitation for you on this project.");
+    await this.store.mutate((next) => {
+      next.projectMembers = next.projectMembers.filter((item) => item.id !== invite.id);
+    });
+    await this.recordAudit(
+      user,
+      projectId,
+      null,
+      "project.invitation.decline",
+      "allow",
+      user.name + " declined the invitation",
+    );
   }
 
   async updateMember(
     projectId: string,
     memberId: string,
+    actor: User,
     input: { role: string },
   ): Promise<ProjectMember> {
+    const role = input.role.trim();
+    if (!role) throw new HttpError(400, "Give the member a role label.");
+    if (role.length > 60) throw new HttpError(400, "Role label is too long.");
     const updated = await this.store.mutate((database) => {
       const project = database.projects.find((item) => item.id === projectId);
       if (!project) throw new HttpError(404, "Project not found");
@@ -667,8 +1098,6 @@ export class ProjectService {
         (item) => item.id === memberId && item.projectId === projectId,
       );
       if (!member) throw new HttpError(404, "Member not found");
-      const role = input.role.trim();
-      if (!role) throw new HttpError(400, "Give the member a role label.");
       member.role = role;
       member.updatedAt = now();
       const agent = database.agents.find((item) => item.id === member.childAgentId);
@@ -678,24 +1107,229 @@ export class ProjectService {
       }
       return structuredClone(member);
     });
+    await this.recordAudit(
+      actor,
+      projectId,
+      updated.childAgentId || null,
+      "project.member.role",
+      "allow",
+      "Set role to " + role,
+    );
     return updated;
   }
 
-  async removeMember(projectId: string, memberId: string): Promise<void> {
+  async removeMember(projectId: string, memberId: string, actor: User): Promise<void> {
+    await this.dropMember(projectId, memberId, actor, "project.member.remove");
+  }
+
+  /** A member removes themselves; an invitee this way declines. Owner cannot. */
+  async leaveProject(projectId: string, user: User): Promise<void> {
+    const database = this.store.snapshot();
+    const project = database.projects.find((item) => item.id === projectId);
+    if (!project) throw new HttpError(404, "Project not found");
+    if (project.ownerId === user.id) {
+      throw new HttpError(
+        409,
+        "The owner can't leave — transfer ownership or delete the project first.",
+      );
+    }
+    const member = database.projectMembers.find(
+      (item) => item.projectId === projectId && item.userId === user.id,
+    );
+    if (!member) throw new HttpError(404, "You are not on this project.");
+    await this.dropMember(projectId, member.id, user, "project.member.leave");
+  }
+
+  private async dropMember(
+    projectId: string,
+    memberId: string,
+    actor: User,
+    action: string,
+  ): Promise<void> {
     const database = this.store.snapshot();
     const member = database.projectMembers.find(
       (item) => item.id === memberId && item.projectId === projectId,
     );
     if (!member) throw new HttpError(404, "Member not found");
-    const agent = database.agents.find((item) => item.id === member.childAgentId);
-    if (agent) {
-      await this.workspaces.archive(agent);
-    }
+    const memberName =
+      database.users.find((user) => user.id === member.userId)?.name ?? "Member";
+    const agent = member.childAgentId
+      ? database.agents.find((item) => item.id === member.childAgentId)
+      : undefined;
+    if (agent) await this.workspaces.archive(agent);
+    const agentIds = agent
+      ? new Set(
+          database.branches
+            .filter((b) => b.agentId === agent.id)
+            .map((b) => b.id)
+            .concat(agent.id),
+        )
+      : new Set<string>();
     await this.store.mutate((next) => {
       next.projectMembers = next.projectMembers.filter((item) => item.id !== memberId);
-      next.agents = next.agents.filter((item) => item.id !== member.childAgentId);
       next.commitRequests = next.commitRequests.filter((item) => item.memberId !== memberId);
+      if (member.childAgentId) {
+        next.agents = next.agents.filter((item) => item.id !== member.childAgentId);
+        next.branches = next.branches.filter((item) => item.agentId !== member.childAgentId);
+        next.messages = next.messages.filter((item) => !agentIds.has(item.agentId));
+        next.runs = next.runs.filter((item) => !agentIds.has(item.agentId));
+        next.traces = next.traces.filter((item) => !agentIds.has(item.agentId));
+        next.checkpoints = next.checkpoints.filter((item) => !agentIds.has(item.agentId));
+        next.snapshots = next.snapshots.filter((item) => item.agentId !== member.childAgentId);
+        next.contexts = next.contexts.filter((item) => item.agentId !== member.childAgentId);
+      }
     });
+    await this.recordAudit(
+      actor,
+      projectId,
+      null,
+      action,
+      "allow",
+      action === "project.member.leave"
+        ? memberName + " left the project"
+        : "Removed " + memberName,
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // project settings: rename, transfer, activity
+  // --------------------------------------------------------------------------
+
+  async updateProject(
+    projectId: string,
+    actor: User,
+    input: { name?: string | undefined; description?: string | undefined },
+  ): Promise<Project> {
+    const nextName = input.name === undefined ? undefined : projectName(input.name);
+    const nextDescription =
+      input.description === undefined ? undefined : input.description.trim().slice(0, 500);
+    return this.store.mutate((database) => {
+      const project = database.projects.find((item) => item.id === projectId);
+      if (!project) throw new HttpError(404, "Project not found");
+      if (nextName !== undefined) project.name = nextName;
+      if (nextDescription !== undefined) project.description = nextDescription;
+      project.updatedAt = now();
+      database.audit.push({
+        id: randomUUID(),
+        userId: actor.id,
+        userName: actor.name,
+        agentId: null,
+        action: "project.update",
+        resource: "project:" + projectId,
+        decision: "allow",
+        reason: "Updated project settings",
+        timestamp: now(),
+      });
+      return structuredClone(project);
+    });
+  }
+
+  /**
+   * Hand the project to an existing active member. The new owner's member row +
+   * child agent are removed (they run the parent agent now); the previous owner
+   * becomes an active member with a fresh child-agent workspace.
+   */
+  async transferOwnership(
+    projectId: string,
+    actor: User,
+    toUserId: string,
+  ): Promise<Project> {
+    const database = this.store.snapshot();
+    const project = database.projects.find((item) => item.id === projectId);
+    if (!project) throw new HttpError(404, "Project not found");
+    if (project.ownerId !== actor.id) {
+      throw new HttpError(403, "Only the project owner can transfer ownership.");
+    }
+    if (toUserId === actor.id) throw new HttpError(409, "You already own this project.");
+    const target = database.users.find((user) => user.id === toUserId);
+    if (!target) throw new HttpError(404, "User not found.");
+    const targetMember = database.projectMembers.find(
+      (item) =>
+        item.projectId === projectId &&
+        item.userId === toUserId &&
+        item.status === "active",
+    );
+    if (!targetMember) {
+      throw new HttpError(409, "You can only transfer ownership to an active member.");
+    }
+
+    // Drop the incoming owner's member record + child agent.
+    await this.dropMember(projectId, targetMember.id, actor, "project.member.remove");
+
+    // The outgoing owner joins as a member with a fresh workspace.
+    const memberId = randomUUID();
+    const provisioned = await this.provisionMemberAgent(
+      project,
+      memberId,
+      actor.id,
+      actor.name,
+      "Maintainer",
+    );
+    const timestamp = now();
+    const exOwnerMember: ProjectMember = {
+      id: memberId,
+      projectId,
+      userId: actor.id,
+      status: "active",
+      role: "Maintainer",
+      childAgentId: provisioned.childAgent.id,
+      workspacePath: provisioned.workspacePath,
+      securityAnalysis: null,
+      invitedBy: toUserId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+
+    return this.store.mutate((next) => {
+      const row = next.projects.find((item) => item.id === projectId);
+      if (!row) throw new HttpError(404, "Project not found");
+      row.ownerId = toUserId;
+      row.updatedAt = timestamp;
+      const parentAgent = next.agents.find((item) => item.id === row.parentAgentId);
+      if (parentAgent) {
+        parentAgent.ownerId = toUserId;
+        parentAgent.updatedAt = timestamp;
+      }
+      next.snapshots.push(provisioned.baseSnapshot);
+      next.agents.push(provisioned.childAgent);
+      next.projectMembers.push(exOwnerMember);
+      next.audit.push({
+        id: randomUUID(),
+        userId: actor.id,
+        userName: actor.name,
+        agentId: null,
+        action: "project.transfer",
+        resource: "project:" + projectId,
+        decision: "allow",
+        reason: actor.name + " transferred ownership to " + target.name,
+        timestamp,
+      });
+      return structuredClone(row);
+    });
+  }
+
+  /** Project-scoped slice of the audit log for the Activity view. */
+  getActivity(projectId: string): ActivityEntry[] {
+    const database = this.store.snapshot();
+    const projectAgentIds = new Set(
+      database.agents.filter((a) => a.projectId === projectId).map((a) => a.id),
+    );
+    return database.audit
+      .filter(
+        (entry) =>
+          entry.resource === "project:" + projectId ||
+          (entry.agentId !== null && projectAgentIds.has(entry.agentId)),
+      )
+      .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
+      .slice(0, 200)
+      .map((entry) => ({
+        id: entry.id,
+        userName: entry.userName,
+        action: entry.action,
+        decision: entry.decision,
+        reason: entry.reason,
+        timestamp: entry.timestamp,
+      }));
   }
 
   // --------------------------------------------------------------------------
@@ -703,14 +1337,213 @@ export class ProjectService {
   // --------------------------------------------------------------------------
 
   /**
-   * Store the verdict from a completed child-agent OWASP analysis run and return
-   * the resulting commit-gate state. `run` is the terminal run produced by
-   * `AgentService.runToCompletion(childAgentId, OWASP_ANALYSIS_PROMPT)`.
+   * Run the pre-commit OWASP gate, cheapest path first, and store the verdict:
+   *  1. no changes vs main    -> passing, no work
+   *  2. static pre-filter hit -> failing, zero tokens
+   *  3. static pass clean     -> one direct model call over just the changed
+   *     files (no agent, no tools, no conversation history)
    */
-  async recordSecurityAnalysis(
+  async runSecurityGate(projectId: string, memberId: string): Promise<MemberSecurityView> {
+    const gate = await this.buildSecurityGate(projectId, memberId);
+    if (gate.kind === "ready") {
+      return this.storeSecurityAnalysis(projectId, memberId, gate.analysis);
+    }
+
+    if (!this.classify) {
+      throw new HttpError(503, "The security model is not configured.");
+    }
+    let verdict: OwaspVerdict;
+    try {
+      verdict = parseOwaspVerdict(await this.classify(gate.prompt));
+    } catch (error) {
+      // Fail-closed: block the commit with the reason shown to the member.
+      return this.storeSecurityAnalysis(projectId, memberId, {
+        ranAt: now(),
+        runId: "",
+        workspaceHash: gate.workspaceHash,
+        passed: false,
+        modifiedWorkspace: false,
+        points: [],
+        summary:
+          (error instanceof HttpError ? error.message : "The security check could not run") +
+          " — try again.",
+      });
+    }
+    const passed = verdict.ok && verdict.points.every((point) => point.status !== "fail");
+    return this.storeSecurityAnalysis(projectId, memberId, {
+      ranAt: now(),
+      runId: "",
+      workspaceHash: gate.workspaceHash,
+      passed,
+      modifiedWorkspace: false,
+      points: verdict.points,
+      summary: verdict.summary,
+    });
+  }
+
+  /**
+   * Decide the cheapest way to run the pre-commit gate for a member:
+   *  - no changes vs main       -> trivially "ready" (passing, nothing to scan)
+   *  - static pre-filter hits   -> "ready" with those findings, no model call
+   *  - static pass is clean     -> "needs-llm" with a prompt that inlines the
+   *    changed files so the model needs no tools
+   */
+  async buildSecurityGate(
     projectId: string,
     memberId: string,
-    run: AgentRun,
+  ): Promise<
+    | { kind: "ready"; analysis: SecurityAnalysis }
+    | { kind: "needs-llm"; prompt: string; workspaceHash: string }
+  > {
+    const database = this.store.snapshot();
+    const project = database.projects.find((item) => item.id === projectId);
+    const member = database.projectMembers.find(
+      (item) => item.id === memberId && item.projectId === projectId,
+    );
+    if (!project || !member) throw new HttpError(404, "Member not found");
+
+    const changed = await this.diffMemberAgainstMain(project, member);
+    const workspaceHash = (await this.history.manifest(member.workspacePath)).workspaceHash;
+    const filesToReview = [...changed.created, ...changed.modified];
+
+    if (filesToReview.length === 0) {
+      return {
+        kind: "ready",
+        analysis: {
+          ranAt: now(),
+          runId: "",
+          workspaceHash,
+          passed: true,
+          modifiedWorkspace: false,
+          points: OWASP_TOP_10.map((entry) => ({
+            id: entry.id,
+            name: entry.name,
+            status: "na" as OwaspStatus,
+            detail: "No changes vs main.",
+          })),
+          summary: "No changes vs main to review.",
+        },
+      };
+    }
+
+    const findings = await this.staticScan(member.workspacePath, filesToReview);
+    if (findings.length > 0) {
+      return { kind: "ready", analysis: this.buildStaticAnalysis(findings, workspaceHash) };
+    }
+
+    const inlined: Array<{ path: string; content: string }> = [];
+    for (const rel of filesToReview) {
+      if (rel === "AGENTS.md") continue;
+      try {
+        const content = await readFile(path.join(member.workspacePath, rel), "utf8");
+        if (!looksBinary(content)) inlined.push({ path: rel, content });
+      } catch {
+        /* unreadable — skip */
+      }
+    }
+    return { kind: "needs-llm", prompt: owaspAnalysisPrompt(inlined), workspaceHash };
+  }
+
+  /** Lexical scan of the given files; returns raw hits mapped to OWASP ids. */
+  private async staticScan(
+    rootDir: string,
+    files: string[],
+  ): Promise<Array<{ file: string; line: number; rule: string; owasp: string; excerpt: string; fix: string }>> {
+    const findings: Array<{
+      file: string;
+      line: number;
+      rule: string;
+      owasp: string;
+      excerpt: string;
+      fix: string;
+    }> = [];
+    for (const rel of files) {
+      if (rel === "AGENTS.md") continue;
+      let text: string;
+      try {
+        text = await readFile(path.join(rootDir, rel), "utf8");
+      } catch {
+        continue;
+      }
+      if (looksBinary(text)) continue; // skip huge / binary files
+      const lines = text.split("\n");
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index] ?? "";
+        for (const spec of STATIC_RULES) {
+          if (spec.re.test(line)) {
+            findings.push({
+              file: rel,
+              line: index + 1,
+              rule: spec.rule,
+              owasp: spec.owasp,
+              excerpt: line.trim().slice(0, 240),
+              fix: spec.fix,
+            });
+          }
+        }
+      }
+    }
+    return findings;
+  }
+
+  private buildStaticAnalysis(
+    findings: Array<{ file: string; line: number; rule: string; owasp: string; excerpt: string; fix: string }>,
+    workspaceHash: string,
+  ): SecurityAnalysis {
+    const byOwasp = new Map<string, typeof findings>();
+    for (const finding of findings) {
+      const list = byOwasp.get(finding.owasp) ?? [];
+      list.push(finding);
+      byOwasp.set(finding.owasp, list);
+    }
+    const points: SecurityAnalysisPoint[] = OWASP_TOP_10.map((entry) => {
+      const hits = byOwasp.get(entry.id);
+      if (!hits || hits.length === 0) {
+        return {
+          id: entry.id,
+          name: entry.name,
+          status: "na" as OwaspStatus,
+          detail: "Not assessed by the fast static check.",
+        };
+      }
+      const rules = [...new Set(hits.map((hit) => hit.rule))];
+      return {
+        id: entry.id,
+        name: entry.name,
+        status: "fail" as OwaspStatus,
+        detail:
+          hits.length + " match" + (hits.length === 1 ? "" : "es") + " — " + rules.join(", "),
+        file: hits[0]!.file,
+        evidence: hits
+          .slice(0, 6)
+          .map((hit) => hit.file + ":" + hit.line + "  " + hit.excerpt)
+          .join("\n")
+          .slice(0, 2000),
+        remediation: [...new Set(hits.map((hit) => hit.fix))].join(" "),
+      };
+    });
+    const failedIds = points.filter((point) => point.status === "fail").map((point) => point.id);
+    return {
+      ranAt: now(),
+      runId: "",
+      workspaceHash,
+      passed: false,
+      modifiedWorkspace: false,
+      points,
+      summary:
+        failedIds.length +
+        " OWASP categor" +
+        (failedIds.length === 1 ? "y" : "ies") +
+        " flagged by the fast static check (no agent run): " +
+        failedIds.join(", "),
+    };
+  }
+
+  /** Persist a security verdict on the member, audit it, and return the gate state. */
+  private async storeSecurityAnalysis(
+    projectId: string,
+    memberId: string,
+    analysis: SecurityAnalysis,
   ): Promise<MemberSecurityView> {
     const database = this.store.snapshot();
     const member = database.projectMembers.find(
@@ -718,45 +1551,12 @@ export class ProjectService {
     );
     if (!member) throw new HttpError(404, "Member not found");
 
-    const before = run.beforeWorkspaceHash;
-    const after = run.afterWorkspaceHash ?? before;
-    const workspaceHash =
-      after ?? (await this.history.manifest(member.workspacePath)).workspaceHash;
-
-    const verdict: OwaspVerdict =
-      run.status === "completed"
-        ? parseOwaspVerdict(run.output ?? "")
-        : {
-            ok: false,
-            points: [],
-            summary:
-              "The analysis run " +
-              run.status +
-              (run.error ? ": " + run.error : "") +
-              " — try again.",
-          };
-    const passed = verdict.ok && verdict.points.every((point) => point.status !== "fail");
-
-    const analysis: SecurityAnalysis = {
-      ranAt: now(),
-      runId: run.id,
-      workspaceHash,
-      passed,
-      points: verdict.points,
-      summary: verdict.summary,
-      modifiedWorkspace: before != null && after != null && before !== after,
-    };
-
     await this.store.mutate((db) => {
       const row = db.projectMembers.find((item) => item.id === memberId);
       if (row) {
         row.securityAnalysis = analysis;
         row.updatedAt = now();
       }
-      // The analysis is a system-issued prompt, not the member's conversation.
-      // Keep its turn out of the child agent's chat transcript — the verdict is
-      // shown in the security panel. The run + trace stay for provenance.
-      db.messages = db.messages.filter((message) => message.runId !== run.id);
     });
 
     const memberName =
@@ -766,9 +1566,127 @@ export class ProjectService {
       projectId,
       member.childAgentId,
       "security.check",
-      passed ? "allow" : "deny",
-      passed ? "OWASP analysis passed — commit unlocked" : "OWASP analysis: " + verdict.summary,
+      analysis.passed ? "allow" : "deny",
+      analysis.passed ? "Security gate passed — commit unlocked" : "Security gate: " + analysis.summary,
     );
+
+    return this.getMemberSecurity(projectId, memberId);
+  }
+
+  /**
+   * Auto-fix the flagged OWASP findings with one direct model call per affected
+   * file (no agent run). Writes the rewritten files into the member's branch and
+   * records the fix as a turn in the child agent's transcript. `pointIds` limits
+   * it to specific findings; null = every fail with a known file.
+   */
+  async applySecurityFixes(
+    projectId: string,
+    memberId: string,
+    pointIds: string[] | null,
+  ): Promise<MemberSecurityView> {
+    if (!this.classify) throw new HttpError(503, "The security model is not configured.");
+    const database = this.store.snapshot();
+    const member = database.projectMembers.find(
+      (item) => item.id === memberId && item.projectId === projectId,
+    );
+    if (!member) throw new HttpError(404, "Member not found");
+    const analysis = member.securityAnalysis;
+    if (!analysis) throw new HttpError(409, "Run the security analysis first.");
+
+    const wanted = pointIds && pointIds.length ? new Set(pointIds) : null;
+    const fails = analysis.points.filter(
+      (point) =>
+        point.status === "fail" && point.file && (!wanted || wanted.has(point.id)),
+    );
+    if (fails.length === 0) throw new HttpError(409, "Nothing to fix.");
+
+    const byFile = new Map<string, SecurityAnalysisPoint[]>();
+    for (const point of fails) {
+      const list = byFile.get(point.file!) ?? [];
+      list.push(point);
+      byFile.set(point.file!, list);
+    }
+
+    const fixed: string[] = [];
+    const skipped: string[] = [];
+    for (const [rel, issues] of byFile) {
+      const absolute = path.join(member.workspacePath, rel);
+      let original: string;
+      try {
+        original = await readFile(absolute, "utf8");
+      } catch {
+        skipped.push(rel);
+        continue;
+      }
+      let rewritten: string;
+      try {
+        rewritten = stripCodeFence(await this.classify(fileFixPrompt(rel, original, issues)));
+      } catch {
+        skipped.push(rel);
+        continue;
+      }
+      // Guard against refusals / truncation / snippets.
+      if (
+        !rewritten.trim() ||
+        rewritten.length < Math.max(20, original.length * 0.25) ||
+        rewritten.length > original.length * 6
+      ) {
+        skipped.push(rel);
+        continue;
+      }
+      await writeFile(absolute, rewritten.endsWith("\n") ? rewritten : rewritten + "\n", "utf8");
+      fixed.push(rel);
+    }
+
+    if (fixed.length === 0) {
+      throw new HttpError(
+        422,
+        "The auto-fix could not be applied to " + [...byFile.keys()].join(", ") + " — fix by hand.",
+      );
+    }
+
+    const ids = [...new Set(fails.filter((p) => fixed.includes(p.file!)).map((p) => p.id))];
+    const summary =
+      "Rewrote " + fixed.join(", ") + " to address " + ids.join(", ") + "." +
+      (skipped.length ? " Could not auto-fix: " + skipped.join(", ") + "." : "");
+    const runId = randomUUID();
+    const timestamp = now();
+    await this.store.mutate((db) => {
+      db.runs.push({
+        id: runId,
+        agentId: member.childAgentId,
+        branchId: null,
+        status: "completed",
+        prompt: "Auto-fix OWASP " + ids.join(", ") + " in " + fixed.join(", "),
+        output: summary,
+        error: null,
+        usage: null,
+        startedAt: timestamp,
+        completedAt: timestamp,
+        createdAt: timestamp,
+        beforeWorkspaceHash: null,
+        afterWorkspaceHash: null,
+        checkpointId: null,
+      });
+      db.messages.push({
+        id: randomUUID(),
+        agentId: member.childAgentId,
+        runId,
+        branchId: null,
+        role: "user",
+        content: "Auto-fix the flagged OWASP issues (" + ids.join(", ") + ") in " + fixed.join(", ") + ".",
+        createdAt: timestamp,
+      });
+      db.messages.push({
+        id: randomUUID(),
+        agentId: member.childAgentId,
+        runId,
+        branchId: null,
+        role: "assistant",
+        content: summary + " Re-run the security analysis to verify.",
+        createdAt: timestamp,
+      });
+    });
 
     return this.getMemberSecurity(projectId, memberId);
   }
