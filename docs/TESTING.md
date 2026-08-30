@@ -30,7 +30,7 @@ npm test -- --run src/app.test.ts
 ```
 
 Vitest automatically discovers every `*.test.ts` file under
-`apps/server/src`. The current suite contains **55 tests in 8 files**.
+`apps/server/src`. The current suite contains **58 tests in 8 files**.
 
 ## Classification
 
@@ -68,50 +68,51 @@ tests exercise the same domain services without rendering the React UI.
     `409` failure path.
 11. **Exposes checkpoint details and a parent comparison** — verifies context,
     traces, and changed-file evidence.
-12. **Restores a checkpoint into an independent workspace** — proves the saved
-    state is recovered without overwriting the active workspace.
+12. **Keeps a recovery copy and restores a checkpoint into active main** —
+    proves newer files are reverted while platform-owned branch data survives.
 13. **Creates an independent branch workspace and records branch provenance** —
-    proves branch changes do not mutate the source workspace.
-14. **Atomically accepts only one concurrent Run per Agent** — verifies one
+    proves branch changes and branch restores do not mutate main.
+14. **Rejects an active-workspace restore while the Agent is running.**
+15. **Atomically accepts only one concurrent Run per Agent** — verifies one
     request succeeds and the competing request receives `409`.
-15. **Does not let start reset a busy Agent and admit a second Run** — protects
+16. **Does not let start reset a busy Agent and admit a second Run** — protects
     the lifecycle/concurrency invariant.
-16. **Finds or creates a user by name and resolves it by token** — verifies the
+17. **Finds or creates a user by name and resolves it by token** — verifies the
     current demo-user persistence model.
-17. **Scopes Agents to their owner and denies cross-user access** — verifies
+18. **Scopes Agents to their owner and denies cross-user access** — verifies
     ownership checks and denied-attempt audit visibility.
 
 #### Collaboration projects — `project-service.test.ts`
 
-18. **Creates a project with a parent Agent and a head snapshot.**
-19. **Upgrades a standalone Agent into a project without losing its workspace,
+19. **Creates a project with a parent Agent and a head snapshot.**
+20. **Upgrades a standalone Agent into a project without losing its workspace,
     Agent identity, messages, Runs, checkpoints, branches, or Codex threads.**
-20. **Rejects unauthorized, busy, and repeated standalone-Agent upgrades.**
-21. **Adds a member with their own full-copy workspace and child Agent.**
-22. **Stores parent and member branches inside their respective project
+21. **Rejects unauthorized, busy, and repeated standalone-Agent upgrades.**
+22. **Adds a member with their own full-copy workspace and child Agent.**
+23. **Stores parent and member branches inside their respective project
     workspaces.**
-23. **Rejects adding an unknown user, the owner, or a duplicate member.**
-24. **Updates a member's role and keeps child-Agent instructions in sync.**
-25. **Removes a member and their child Agent.**
-26. **Deletes a project, archives its workspaces, and removes linked metadata.**
-27. **Deletes an orphaned project whose workspace directory is already
+24. **Rejects adding an unknown user, the owner, or a duplicate member.**
+25. **Updates a member's role and keeps child-Agent instructions in sync.**
+26. **Removes a member and their child Agent.**
+27. **Deletes a project, archives its workspaces, and removes linked metadata.**
+28. **Deletes an orphaned project whose workspace directory is already
     missing.**
-28. **Enforces the owner/member/member-own authorization floor.**
-29. **Shows the owner the full roster and members only names and roles.**
-30. **Lists and reads main files while blocking path traversal.**
-31. **Lets members reach their own child Agent, lets the owner reach every child,
+29. **Enforces the owner/member/member-own authorization floor.**
+30. **Shows the owner the full roster and members only names and roles.**
+31. **Lists and reads main files while blocking path traversal.**
+32. **Lets members reach their own child Agent, lets the owner reach every child,
     and denies access to another member's child.**
-32. **Scans a member workspace, files a commit request, and lets the owner
+33. **Scans a member workspace, files a commit request, and lets the owner
     decide it.**
-33. **Keeps the commit gate closed when an OWASP category fails.**
-34. **Invalidates a passing security result after the member workspace changes.**
-35. **Rejects a commit request when the member workspace matches main.**
-36. **Freezes writes while a project is archived and restores them after
+34. **Keeps the commit gate closed when an OWASP category fails.**
+35. **Invalidates a passing security result after the member workspace changes.**
+36. **Rejects a commit request when the member workspace matches main.**
+37. **Freezes writes while a project is archived and restores them after
     unarchive.**
-37. **Runs a member's child Agent in that member's workspace.**
-38. **Merges selected sub-branches into their trunk workspace and removes the
+38. **Runs a member's child Agent in that member's workspace.**
+39. **Merges selected sub-branches into their trunk workspace and removes the
     merged branch records and folders.**
-39. **Completes a branch merge when an old branch folder is already missing.**
+40. **Completes a branch merge when an old branch folder is already missing.**
 
 ### System tests
 
@@ -122,49 +123,52 @@ Docker, or network access.
 
 #### Agent execution internals — `agent-service.test.ts`
 
-40. **Streams Runtime events to live trace subscribers** — verifies the
+41. **Streams Runtime events to live trace subscribers** — verifies the
     in-process trace subscription boundary.
-41. **Migrates owner-less Agents to a demo user during initialization** —
+42. **Migrates owner-less Agents to a demo user during initialization** —
     verifies backward-compatible persisted-data startup behavior.
-42. **Keeps a standalone Agent usable when upgrade persistence fails** — injects
+43. **Keeps a standalone Agent usable when upgrade persistence fails** — injects
     a database-write failure after workspace staging and verifies that project
     metadata is not published and the original files remain available.
+44. **Leaves the active workspace unchanged when checkpoint materialization
+    fails** — verifies restore locking is released and newer files survive.
 
 #### Workspace history — `workspace-history.test.ts`
 
-43. **Hashes files, classifies changes, and materializes an immutable snapshot.**
-44. **Ignores generated dependency and output directories.**
-45. **Restores a snapshot into a workspace.**
+45. **Hashes files, classifies changes, and materializes an immutable snapshot.**
+46. **Ignores generated dependency and output directories.**
+47. **Restores a snapshot into a workspace.**
+48. **Rolls back the original workspace when active-restore verification fails.**
 
 #### JSON persistence — `store.test.ts`
 
-46. **Does not publish a mutation in memory when persistence fails** — verifies
+49. **Does not publish a mutation in memory when persistence fails** — verifies
     failed disk writes do not become committed application state and the write
     queue remains usable.
-47. **Falls back when atomic database replacement is blocked** — injects a
+50. **Falls back when atomic database replacement is blocked** — injects a
     deterministic `EPERM` rename failure, then verifies real copy/unlink fallback
     persistence and temporary-file cleanup.
 
 #### Codex process adapter — `codex-runner.test.ts`
 
-48. **Builds a new-session Codex invocation.**
-49. **Builds an invocation that resumes a stored Codex thread.**
-50. **Extracts the session ID, final message, and token usage.**
-51. **Captures bounded observable activity and error details without exposing
+51. **Builds a new-session Codex invocation.**
+52. **Builds an invocation that resumes a stored Codex thread.**
+53. **Extracts the session ID, final message, and token usage.**
+54. **Captures bounded observable activity and error details without exposing
     unbounded output or private reasoning.**
 #### Native Codex session forking — `codex-session-fork.test.ts`
 
-52. **Captures a thread's current rollout offset and forks a truncated copy** —
+55. **Captures a thread's current rollout offset and forks a truncated copy** —
     uses a real temporary SQLite index and JSONL rollout to prove later parent turns do not leak into a branch.
-53. **Returns no fork source when a thread has no recorded session** — verifies
+56. **Returns no fork source when a thread has no recorded session** — verifies
     the controlled fresh-thread fallback.
 
 #### Container Runtime adapter — `container-codex-runner.test.ts`
 
-54. **Builds an isolated Docker/Podman-compatible invocation** — checks the
+57. **Builds an isolated Docker/Podman-compatible invocation** — checks the
     workspace mount, Codex-home mount, dropped capabilities, resource limits,
     user, network, and Runtime labels.
-55. **Resumes a thread inside the mounted Runtime workspace.**
+58. **Resumes a thread inside the mounted Runtime workspace.**
 
 ## How this meets automated-verification requirements
 

@@ -74,6 +74,7 @@ const ARCHIVE_FROZEN_AGENT_ACTIONS = new Set([
   "branch.create",
   "branch.merge",
   "checkpoint.create",
+  "checkpoint.restore",
 ]);
 
 export class AgentService {
@@ -989,23 +990,102 @@ export class AgentService {
     };
   }
 
-  async restoreCheckpoint(checkpointId: string): Promise<{ checkpoint: AgentCheckpoint; workspacePath: string; workspaceHash: string }> {
+  async restoreCheckpoint(checkpointId: string): Promise<{
+    checkpoint: AgentCheckpoint;
+    workspacePath: string;
+    activeWorkspacePath: string;
+    workspaceHash: string;
+  }> {
     const checkpoint = this.getCheckpoint(checkpointId);
-    const snapshot = this.store
-      .snapshot()
-      .snapshots.find((item) => item.id === checkpoint.snapshotId);
+    const database = this.store.snapshot();
+    const snapshot = database.snapshots.find((item) => item.id === checkpoint.snapshotId);
     if (!snapshot) {
       throw new HttpError(500, "Checkpoint snapshot is missing");
     }
+    const agent = database.agents.find((item) => item.id === checkpoint.agentId);
+    if (!agent) throw new HttpError(404, "Agent not found");
+    if (agent.projectId) {
+      const project = database.projects.find((item) => item.id === agent.projectId);
+      if (project?.archivedAt) {
+        throw new HttpError(409, "This project is archived. Unarchive it to restore a checkpoint.");
+      }
+    }
+    const sourceBranch = checkpoint.branchId
+      ? database.branches.find(
+          (item) => item.id === checkpoint.branchId && item.agentId === checkpoint.agentId,
+        )
+      : null;
+    if (checkpoint.branchId && !sourceBranch) {
+      throw new HttpError(404, "Checkpoint branch not found");
+    }
+    const activeWorkspacePath = sourceBranch?.workspacePath ?? agent.workspacePath;
+
+    let previousStatus: Agent["status"] | null = null;
+    await this.store.mutate((next) => {
+      const storedAgent = next.agents.find((item) => item.id === checkpoint.agentId);
+      if (!storedAgent) throw new HttpError(404, "Agent not found");
+      if (checkpoint.branchId) {
+        const storedBranch = next.branches.find(
+          (item) => item.id === checkpoint.branchId && item.agentId === checkpoint.agentId,
+        );
+        if (!storedBranch) throw new HttpError(404, "Checkpoint branch not found");
+        if (storedBranch.status === "busy") {
+          throw new HttpError(409, "Wait for the branch run to finish before restoring it");
+        }
+        previousStatus = storedBranch.status;
+        storedBranch.status = "busy";
+        storedBranch.updatedAt = now();
+        return;
+      }
+      if (storedAgent.status === "busy") {
+        throw new HttpError(409, "Wait for the Agent run to finish before restoring it");
+      }
+      const runningBranch = next.branches.find(
+        (item) => item.agentId === checkpoint.agentId && item.status === "busy",
+      );
+      if (runningBranch) {
+        throw new HttpError(409, "Wait for every branch run to finish before restoring main");
+      }
+      previousStatus = storedAgent.status;
+      storedAgent.status = "busy";
+      storedAgent.updatedAt = now();
+    });
+
     const restoreRoot = path.join(this.config.dataDirectory, "branchpoint", "restores");
-    await mkdir(restoreRoot, { recursive: true });
     const workspacePath = path.join(restoreRoot, checkpoint.id + "-" + Date.now());
-    await this.history.restoreSnapshot(snapshot, workspacePath);
-    return {
-      checkpoint,
-      workspacePath,
-      workspaceHash: snapshot.manifest.workspaceHash,
-    };
+    try {
+      await mkdir(restoreRoot, { recursive: true });
+      await this.history.restoreSnapshot(snapshot, workspacePath);
+      const recoveryManifest = await this.history.manifest(workspacePath);
+      if (recoveryManifest.workspaceHash !== snapshot.manifest.workspaceHash) {
+        throw new Error("The recovery workspace does not match the checkpoint snapshot");
+      }
+      await this.history.restoreSnapshotInPlace(snapshot, activeWorkspacePath);
+      return {
+        checkpoint,
+        workspacePath,
+        activeWorkspacePath,
+        workspaceHash: snapshot.manifest.workspaceHash,
+      };
+    } finally {
+      await this.store.mutate((next) => {
+        if (checkpoint.branchId) {
+          const storedBranch = next.branches.find(
+            (item) => item.id === checkpoint.branchId && item.agentId === checkpoint.agentId,
+          );
+          if (storedBranch && storedBranch.status === "busy" && previousStatus) {
+            storedBranch.status = previousStatus;
+            storedBranch.updatedAt = now();
+          }
+          return;
+        }
+        const storedAgent = next.agents.find((item) => item.id === checkpoint.agentId);
+        if (storedAgent && storedAgent.status === "busy" && previousStatus) {
+          storedAgent.status = previousStatus;
+          storedAgent.updatedAt = now();
+        }
+      });
+    }
   }
 
   getTrace(agentId: string, branchId: string | null = null): TraceEvent[] {

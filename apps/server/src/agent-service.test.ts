@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -216,7 +216,7 @@ describe("Agent lifecycle", () => {
     expect((await service.getCheckpointDiff(checkpoint.id)).changedFiles.created).toContain("details.txt");
   });
 
-  it("restores a checkpoint into an independent workspace", async () => {
+  it("keeps a recovery copy and restores a checkpoint into the active main workspace", async () => {
     const service = await makeService({
       run: async (request) => {
         await writeFile(path.join(request.workspacePath, "restore-me.txt"), "checkpoint state\n");
@@ -233,10 +233,25 @@ describe("Agent lifecycle", () => {
     if (!checkpoint) return;
 
     await writeFile(path.join(agent.workspacePath, "restore-me.txt"), "later state\n");
+    await writeFile(path.join(agent.workspacePath, "newer-only.txt"), "remove on restore\n");
+    await mkdir(path.join(agent.workspacePath, "branches", "preserved"), { recursive: true });
+    await writeFile(
+      path.join(agent.workspacePath, "branches", "preserved", "branch.txt"),
+      "keep branch\n",
+    );
     const restored = await service.restoreCheckpoint(checkpoint.id);
     expect(await readFile(path.join(restored.workspacePath, "restore-me.txt"), "utf8")).toBe("checkpoint state\n");
+    expect(restored.activeWorkspacePath).toBe(agent.workspacePath);
     expect(restored.workspaceHash).toBe(checkpoint.workspaceHash);
-    expect(await readFile(path.join(agent.workspacePath, "restore-me.txt"), "utf8")).toBe("later state\n");
+    expect(await readFile(path.join(agent.workspacePath, "restore-me.txt"), "utf8")).toBe("checkpoint state\n");
+    await expect(readFile(path.join(agent.workspacePath, "newer-only.txt"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    expect(
+      await readFile(
+        path.join(agent.workspacePath, "branches", "preserved", "branch.txt"),
+        "utf8",
+      ),
+    ).toBe("keep branch\n");
   });
 
   it("creates an independent branch workspace and records branch provenance", async () => {
@@ -271,6 +286,78 @@ describe("Agent lifecycle", () => {
     expect(await readFile(path.join(branch.workspacePath, "main.txt"), "utf8")).toBe("main\n");
     expect(await readFile(path.join(branch.workspacePath, "branch.txt"), "utf8")).toBe("branch\n");
     await expect(readFile(path.join(agent.workspacePath, "branch.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    const branchCheckpoint = service
+      .getCheckpoints(agent.id, branch.id)
+      .find((item) => item.branchId === branch.id);
+    expect(branchCheckpoint).toBeDefined();
+    if (!branchCheckpoint) return;
+    await writeFile(path.join(branch.workspacePath, "branch.txt"), "newer branch state\n");
+    const restoredBranch = await service.restoreCheckpoint(branchCheckpoint.id);
+    expect(restoredBranch.activeWorkspacePath).toBe(branch.workspacePath);
+    expect(await readFile(path.join(branch.workspacePath, "branch.txt"), "utf8")).toBe("branch\n");
+    await expect(readFile(path.join(agent.workspacePath, "branch.txt"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects an active-workspace restore while the Agent is running", async () => {
+    let finish!: (result: RunnerResult) => void;
+    const pending = new Promise<RunnerResult>((resolve) => {
+      finish = resolve;
+    });
+    const service = await makeService({
+      run: async (request) => {
+        if (request.prompt === "checkpoint state") {
+          await writeFile(path.join(request.workspacePath, "state.txt"), "checkpoint\n");
+          return { output: "saved", threadId: "restore-lock-thread", usage: null };
+        }
+        return pending;
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Restore lock" });
+    const initial = await service.sendMessage(agent.id, "checkpoint state");
+    await expect.poll(() => service.getRun(initial.run.id).status).toBe("completed");
+    const checkpoint = service.getCheckpoints(agent.id)[0];
+    expect(checkpoint).toBeDefined();
+    if (!checkpoint) return;
+
+    const active = await service.sendMessage(agent.id, "keep running");
+    await expect(service.restoreCheckpoint(checkpoint.id)).rejects.toMatchObject({
+      statusCode: 409,
+    });
+
+    finish({ output: "done", threadId: "restore-lock-thread", usage: null });
+    await expect.poll(() => service.getRun(active.run.id).status).toBe("completed");
+  });
+
+  it("leaves the active workspace unchanged when checkpoint materialization fails", async () => {
+    const service = await makeService({
+      run: async (request) => {
+        await writeFile(path.join(request.workspacePath, "state.txt"), "checkpoint\n");
+        return { output: "saved", threadId: "restore-failure-thread", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Recoverable restore" });
+    const initial = await service.sendMessage(agent.id, "checkpoint state");
+    await expect.poll(() => service.getRun(initial.run.id).status).toBe("completed");
+    const checkpoint = service.getCheckpoints(agent.id)[0];
+    expect(checkpoint).toBeDefined();
+    if (!checkpoint) return;
+
+    await writeFile(path.join(agent.workspacePath, "state.txt"), "newer state\n");
+    const details = service.getCheckpointDetails(checkpoint.id);
+    await unlink(path.join(details.snapshot.directory, "files", "state.txt"));
+
+    await expect(service.restoreCheckpoint(checkpoint.id)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await readFile(path.join(agent.workspacePath, "state.txt"), "utf8"))
+      .toBe("newer state\n");
+    expect(service.getAgent(agent.id).status).toBe("ready");
   });
 
   it("atomically accepts only one concurrent run per Agent", async () => {

@@ -87,6 +87,9 @@ workspace mutations, bounded output metadata, and user/assistant messages. It
 does not store private hidden chain-of-thought. Creating a branch restores the
 selected snapshot into an independent workspace and, when the recorded Codex
 rollout is available, forks the session transcript at the checkpoint offset.
+Restoring a checkpoint keeps a timestamped recovery copy and also replaces its
+main or branch workspace through a staged, hash-verified filesystem swap that
+preserves platform-owned directories and rolls back on publication failure.
 
 ### JsonStore
 

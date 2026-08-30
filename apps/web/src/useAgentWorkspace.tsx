@@ -85,7 +85,11 @@ export function useAgentWorkspace(
   } | null>(null);
   const [showCodeChanges, setShowCodeChanges] = useState(false);
   const [runOverlay, setRunOverlay] = useState<RunDetails | null>(null);
-  const [restoreResult, setRestoreResult] = useState<{ path: string; hash: string } | null>(null);
+  const [restoreResult, setRestoreResult] = useState<{
+    recoveryPath: string;
+    activePath: string;
+    hash: string;
+  } | null>(null);
   const [checkpointLabel, setCheckpointLabel] = useState("");
   const [savingCheckpoint, setSavingCheckpoint] = useState(false);
 
@@ -378,7 +382,11 @@ export function useAgentWorkspace(
       setError(null);
       try {
         const result = await api.restoreCheckpoint(checkpoint.id);
-        setRestoreResult({ path: result.workspacePath, hash: result.workspaceHash });
+        setRestoreResult({
+          recoveryPath: result.workspacePath,
+          activePath: result.activeWorkspacePath,
+          hash: result.workspaceHash,
+        });
         setCheckpointOverlay(null);
         setSelectedCheckpointId(null);
         await Promise.all([
@@ -1482,7 +1490,11 @@ export function WorkspaceOverlays({ ws }: { ws: WorkspaceApi }) {
             <p className="inspection-message">The workspace now matches the saved snapshot.</p>
             <label>
               Restored workspace
-              <input readOnly value={ws.restoreResult.path} />
+              <input readOnly value={ws.restoreResult.activePath} />
+            </label>
+            <label>
+              Recovery copy
+              <input readOnly value={ws.restoreResult.recoveryPath} />
             </label>
             <p className="inspection-muted">Workspace hash: {ws.restoreResult.hash}</p>
           </section>

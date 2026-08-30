@@ -237,7 +237,12 @@ export const api = {
       }),
   },
   restoreCheckpoint: (id: string) =>
-    request<{ checkpoint: AgentCheckpoint; workspacePath: string; workspaceHash: string }>("/api/checkpoints/" + id + "/restore", {
+    request<{
+      checkpoint: AgentCheckpoint;
+      workspacePath: string;
+      activeWorkspacePath: string;
+      workspaceHash: string;
+    }>("/api/checkpoints/" + id + "/restore", {
       method: "POST",
     }),
   streamRunTrace: async (id: string, onEvent: (event: TraceEvent) => void, signal?: AbortSignal): Promise<void> => {

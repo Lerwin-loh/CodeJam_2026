@@ -90,7 +90,11 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
   } | null>(null);
   const [showCodeChanges, setShowCodeChanges] = useState(false);
   const [runOverlay, setRunOverlay] = useState<import("./types").RunDetails | null>(null);
-  const [restoreResult, setRestoreResult] = useState<{ path: string; hash: string } | null>(null);
+  const [restoreResult, setRestoreResult] = useState<{
+    recoveryPath: string;
+    activePath: string;
+    hash: string;
+  } | null>(null);
   const [checkpointLabel, setCheckpointLabel] = useState("");
   const [savingCheckpoint, setSavingCheckpoint] = useState(false);
   const messageEnd = useRef<HTMLDivElement>(null);
@@ -438,7 +442,11 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
     setError(null);
     try {
       const result = await api.restoreCheckpoint(checkpoint.id);
-      setRestoreResult({ path: result.workspacePath, hash: result.workspaceHash });
+      setRestoreResult({
+        recoveryPath: result.workspacePath,
+        activePath: result.activeWorkspacePath,
+        hash: result.workspaceHash,
+      });
       setCheckpointOverlay(null);
       setSelectedCheckpointId(null);
       setError("Workspace restored to checkpoint " + checkpoint.id.slice(0, 8));
@@ -1210,9 +1218,10 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
       {restoreResult && (
         <div className="modal-backdrop" onMouseDown={() => setRestoreResult(null)}>
           <section className="modal" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-heading"><div><span className="eyebrow">Checkpoint restored</span><h2>New workspace created</h2></div><button type="button" onClick={() => setRestoreResult(null)} aria-label="Close restore result">×</button></div>
-            <p className="inspection-message">The original workspace was not changed.</p>
-            <label>Restored workspace<input readOnly value={restoreResult.path} /></label>
+            <div className="modal-heading"><div><span className="eyebrow">Checkpoint restored</span><h2>Workspace updated</h2></div><button type="button" onClick={() => setRestoreResult(null)} aria-label="Close restore result">×</button></div>
+            <p className="inspection-message">The active workspace now matches the saved snapshot.</p>
+            <label>Active workspace<input readOnly value={restoreResult.activePath} /></label>
+            <label>Recovery copy<input readOnly value={restoreResult.recoveryPath} /></label>
             <p className="inspection-muted">Workspace hash: {restoreResult.hash}</p>
           </section>
         </div>

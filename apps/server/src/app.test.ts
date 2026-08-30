@@ -394,6 +394,9 @@ describe("BranchPoint API authorization (end to end)", () => {
     const ownerRestore = await app.inject({ method: "POST", url: "/api/checkpoints/" + checkpoint.id + "/restore", headers: alice });
     expect(ownerRestore.statusCode).toBe(200);
     expect(ownerRestore.json().workspaceHash).toBe(checkpoint.workspaceHash);
+    expect(ownerRestore.json().activeWorkspacePath).toBe(
+      branchService.getAgent(agentId).workspacePath,
+    );
 
     await app.close();
   });

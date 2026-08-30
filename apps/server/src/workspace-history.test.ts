@@ -80,4 +80,57 @@ describe("WorkspaceHistory", () => {
     await expect((await import("node:fs/promises")).access(path.join(workspace, "drift.txt"))).rejects.toThrow();
     expect((await history.manifest(workspace)).workspaceHash).toBe(after.workspaceHash);
   });
+
+  it("rolls back the original workspace when in-place restore verification fails", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-history-rollback-test-"));
+    temporaryDirectories.push(root);
+    const workspace = path.join(root, "workspace");
+    class FailingVerificationHistory extends WorkspaceHistory {
+      failVerificationFor: string | null = null;
+
+      override async manifest(workspacePath: string) {
+        const manifest = await super.manifest(workspacePath);
+        if (
+          this.failVerificationFor &&
+          path.resolve(workspacePath) === path.resolve(this.failVerificationFor)
+        ) {
+          throw new Error("injected active restore verification failure");
+        }
+        return manifest;
+      }
+    }
+    const history = new FailingVerificationHistory(path.join(root, "branchpoint"));
+    await history.initialize();
+    await (await import("node:fs/promises")).mkdir(workspace, { recursive: true });
+    await writeFile(path.join(workspace, "state.txt"), "checkpoint\n");
+    const checkpointManifest = await history.manifest(workspace);
+    const snapshot = await history.createSnapshot(
+      "agent-1",
+      "run-1",
+      workspace,
+      checkpointManifest,
+    );
+
+    await writeFile(path.join(workspace, "state.txt"), "newer\n");
+    await (await import("node:fs/promises")).mkdir(
+      path.join(workspace, "branches", "preserved"),
+      { recursive: true },
+    );
+    await writeFile(
+      path.join(workspace, "branches", "preserved", "branch.txt"),
+      "branch\n",
+    );
+    history.failVerificationFor = workspace;
+
+    await expect(history.restoreSnapshotInPlace(snapshot, workspace))
+      .rejects.toThrow("injected active restore verification failure");
+    history.failVerificationFor = null;
+    expect(await readFile(path.join(workspace, "state.txt"), "utf8")).toBe("newer\n");
+    expect(
+      await readFile(
+        path.join(workspace, "branches", "preserved", "branch.txt"),
+        "utf8",
+      ),
+    ).toBe("branch\n");
+  });
 });
