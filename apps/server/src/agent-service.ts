@@ -73,8 +73,10 @@ const ARCHIVE_FROZEN_AGENT_ACTIONS = new Set([
   "agent.stop",
   "agent.run",
   "branch.create",
+  "branch.delete",
   "branch.merge",
   "checkpoint.create",
+  "checkpoint.restore",
 ]);
 
 export class AgentService {
@@ -199,6 +201,102 @@ export class AgentService {
       database.users.push(user);
       return structuredClone(user);
     });
+  }
+
+  /**
+   * Delete one user and every resource whose lifetime depends on that account.
+   * Owned projects are removed in full; memberships in projects owned by other
+   * users remove only this user's member workspace and child Agent.
+   */
+  async deleteAccount(user: User): Promise<{
+    deletedUserId: string;
+    deletedProjects: number;
+    deletedMemberships: number;
+    deletedAgents: number;
+    archivedWorkspaces: number;
+    archivedSnapshots: number;
+  }> {
+    const database = this.store.snapshot();
+    if (!database.users.some((item) => item.id === user.id)) {
+      throw new HttpError(404, "User not found");
+    }
+
+    const ownedProjectIds = new Set(
+      database.projects
+        .filter((project) => project.ownerId === user.id)
+        .map((project) => project.id),
+    );
+    const removedMemberships = database.projectMembers.filter(
+      (member) => member.userId === user.id || ownedProjectIds.has(member.projectId),
+    );
+    const removedMembershipIds = new Set(removedMemberships.map((member) => member.id));
+    const affectedAgents = database.agents.filter(
+      (agent) => agent.ownerId === user.id ||
+        (agent.projectId !== null && ownedProjectIds.has(agent.projectId)),
+    );
+    const affectedAgentIds = new Set(affectedAgents.map((agent) => agent.id));
+
+    // No workspace is moved while an Agent could still be writing to it.
+    for (const agent of affectedAgents) {
+      await this.cancelExecution(agent.id);
+    }
+
+    let archivedWorkspaces = 0;
+    for (const projectId of ownedProjectIds) {
+      if (await this.workspaces.archiveProject(projectId)) archivedWorkspaces += 1;
+    }
+    for (const agent of affectedAgents) {
+      if (agent.projectId !== null && ownedProjectIds.has(agent.projectId)) continue;
+      try {
+        await this.workspaces.archive(agent);
+        archivedWorkspaces += 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+
+    const affectedSnapshots = database.snapshots.filter((snapshot) =>
+      affectedAgentIds.has(snapshot.agentId),
+    );
+    const archivedSnapshots = await this.history.archiveSnapshots(
+      "account-" + user.id,
+      affectedSnapshots,
+    );
+
+    await this.store.mutate((next) => {
+      next.users = next.users.filter((item) => item.id !== user.id);
+      next.projects = next.projects.filter((item) => !ownedProjectIds.has(item.id));
+      next.projectMembers = next.projectMembers.filter(
+        (item) => !removedMembershipIds.has(item.id),
+      );
+      next.commitRequests = next.commitRequests.filter(
+        (item) => !ownedProjectIds.has(item.projectId) &&
+          !removedMembershipIds.has(item.memberId) &&
+          !affectedAgentIds.has(item.childAgentId),
+      );
+      next.agents = next.agents.filter((item) => !affectedAgentIds.has(item.id));
+      next.branches = next.branches.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.messages = next.messages.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.runs = next.runs.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.traces = next.traces.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.snapshots = next.snapshots.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.contexts = next.contexts.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.checkpoints = next.checkpoints.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.audit = next.audit.filter(
+        (item) => item.userId !== user.id &&
+          (item.agentId === null || !affectedAgentIds.has(item.agentId)) &&
+          !ownedProjectIds.has(item.resource.replace(/^project:/, "")),
+      );
+    });
+
+    return {
+      deletedUserId: user.id,
+      deletedProjects: ownedProjectIds.size,
+      deletedMemberships: removedMemberships.length,
+      deletedAgents: affectedAgents.length,
+      archivedWorkspaces,
+      archivedSnapshots,
+    };
   }
 
   async recordAudit(entry: {
@@ -449,7 +547,7 @@ export class AgentService {
         type,
         timestamp: now(),
         metadata: {
-          explanation: this.traceExplanation(type),
+          explanation: this.traceExplanation(type, metadata),
           ...metadata,
         },
       };
@@ -459,21 +557,83 @@ export class AgentService {
     for (const listener of this.traceListeners.get(run.id) ?? []) listener(event);
   }
 
-  private traceExplanation(type: TraceEventType): string {
+  private traceExplanation(type: TraceEventType, metadata: Record<string, unknown>): string {
     switch (type) {
       case "run.started":
         return "The Agent began processing the user instruction.";
       case "codex.event":
-        return "Codex reported an observable tool or model activity.";
+        return this.codexEventExplanation(metadata);
       case "workspace.changed":
-        return "The Agent changed files in its workspace.";
+        return this.workspaceChangeExplanation(metadata);
       case "checkpoint.created":
-        return "A recoverable snapshot was created from the workspace mutation.";
+        return metadata.status === "partial"
+          ? "A partial recoverable checkpoint was created after the workspace change."
+          : "A complete recoverable checkpoint was created after the workspace change.";
       case "run.completed":
-        return "The Agent finished successfully.";
+        return metadata.workspaceChanged === true
+          ? "The Agent finished successfully and saved its workspace changes."
+          : "The Agent finished successfully without workspace changes.";
       case "run.error":
-        return "The Run ended with an error or cancellation.";
+        return typeof metadata.error === "string" && metadata.error.trim()
+          ? `The Run ended with an error or cancellation: ${metadata.error.trim().slice(0, 500)}`
+          : "The Run ended with an error or cancellation.";
     }
+  }
+
+  private codexEventExplanation(metadata: Record<string, unknown>): string {
+    const eventType = typeof metadata.eventType === "string" ? metadata.eventType : "activity";
+    const codexType = typeof metadata.codexType === "string" ? metadata.codexType : "";
+    const command = typeof metadata.command === "string" ? metadata.command.trim().slice(0, 240) : "";
+    const message = typeof metadata.message === "string" ? metadata.message.trim().slice(0, 500) : "";
+    const output = typeof metadata.output === "string" ? metadata.output.trim().slice(0, 500) : "";
+    const completed = codexType === "item.completed";
+
+    switch (eventType) {
+      case "command_execution": {
+        if (!completed || metadata.status === "in_progress") {
+          return command ? `Codex started running: ${command}` : "Codex started running a command.";
+        }
+        const exitCode = metadata.exit_code;
+        if (typeof exitCode === "number") {
+          return command
+            ? `Command finished with exit code ${exitCode}: ${command}`
+            : `A command finished with exit code ${exitCode}.`;
+        }
+        return command ? `Codex finished running: ${command}` : "Codex finished running a command.";
+      }
+      case "reasoning":
+        return completed
+          ? "Codex completed a reasoning step; private reasoning content is not included in the trace."
+          : "Codex started a reasoning step; private reasoning content is not included in the trace.";
+      case "agent_message":
+        return "Codex prepared an Agent response.";
+      case "file_change":
+        return completed ? "Codex completed a workspace file change." : "Codex started a workspace file change.";
+      case "error":
+        return message || output
+          ? `Codex reported an activity-level issue: ${message || output}`
+          : "Codex reported an activity-level issue. The Run is marked failed separately if it cannot recover.";
+      default: {
+        const readable = eventType.replace(/[._-]+/g, " ");
+        return `Codex reported observable ${readable} activity.`;
+      }
+    }
+  }
+
+  private workspaceChangeExplanation(metadata: Record<string, unknown>): string {
+    const count = (key: "created" | "modified" | "deleted") =>
+      Array.isArray(metadata[key]) ? metadata[key].length : 0;
+    const created = count("created");
+    const modified = count("modified");
+    const deleted = count("deleted");
+    const changes = [
+      created ? `${created} created` : "",
+      modified ? `${modified} modified` : "",
+      deleted ? `${deleted} deleted` : "",
+    ].filter(Boolean);
+    return changes.length
+      ? `The Agent changed workspace files: ${changes.join(", ")}.`
+      : "The Agent changed files in its workspace.";
   }
 
   async updateAgent(id: string, input: UpdateAgentInput): Promise<Agent> {
@@ -733,6 +893,71 @@ export class AgentService {
     await this.history.restoreSnapshot(snapshot, branch.workspacePath);
     await this.store.mutate((next) => next.branches.push(branch));
     return branch;
+  }
+
+  /**
+   * Recoverably delete one idle leaf branch and all metadata created on it.
+   * Parent branches must be deleted from the leaves upward so lineage is never
+   * left pointing at a branch that no longer exists.
+   */
+  async deleteBranch(
+    agentId: string,
+    branchId: string,
+  ): Promise<{ branchId: string; archivedWorkspace: string | null }> {
+    const agent = this.getAgent(agentId);
+    const database = this.store.snapshot();
+    const branch = database.branches.find(
+      (item) => item.id === branchId && item.agentId === agentId,
+    );
+    if (!branch) throw new HttpError(404, "Branch not found");
+    if (agent.status === "busy" || branch.status === "busy") {
+      throw new HttpError(409, "Stop the active run before deleting this branch");
+    }
+    if (database.branches.some((item) => item.parentBranchId === branchId)) {
+      throw new HttpError(409, "Delete this branch's child branches first");
+    }
+
+    const archivedWorkspace = await this.workspaces.archiveBranch(
+      branch.id,
+      branch.workspacePath,
+    );
+    try {
+      await this.store.mutate((next) => {
+        const storedBranch = next.branches.find(
+          (item) => item.id === branchId && item.agentId === agentId,
+        );
+        if (!storedBranch) throw new HttpError(404, "Branch not found");
+        if (storedBranch.status === "busy") {
+          throw new HttpError(409, "Stop the active run before deleting this branch");
+        }
+        if (next.branches.some((item) => item.parentBranchId === branchId)) {
+          throw new HttpError(409, "Delete this branch's child branches first");
+        }
+        next.branches = next.branches.filter((item) => item.id !== branchId);
+        next.checkpoints = next.checkpoints.filter((item) => item.branchId !== branchId);
+        next.runs = next.runs.filter((item) => item.branchId !== branchId);
+        next.messages = next.messages.filter((item) => item.branchId !== branchId);
+        next.traces = next.traces.filter((item) => item.branchId !== branchId);
+        const storedAgent = next.agents.find((item) => item.id === agentId);
+        if (storedAgent) storedAgent.updatedAt = now();
+      });
+    } catch (error) {
+      if (archivedWorkspace) {
+        try {
+          await this.workspaces.restoreArchivedBranch(
+            archivedWorkspace,
+            branch.workspacePath,
+          );
+        } catch {
+          throw new HttpError(
+            500,
+            "Branch deletion failed and its workspace could not be restored",
+          );
+        }
+      }
+      throw error;
+    }
+    return { branchId, archivedWorkspace };
   }
 
   /**
@@ -1020,23 +1245,102 @@ export class AgentService {
     };
   }
 
-  async restoreCheckpoint(checkpointId: string): Promise<{ checkpoint: AgentCheckpoint; workspacePath: string; workspaceHash: string }> {
+  async restoreCheckpoint(checkpointId: string): Promise<{
+    checkpoint: AgentCheckpoint;
+    workspacePath: string;
+    activeWorkspacePath: string;
+    workspaceHash: string;
+  }> {
     const checkpoint = this.getCheckpoint(checkpointId);
-    const snapshot = this.store
-      .snapshot()
-      .snapshots.find((item) => item.id === checkpoint.snapshotId);
+    const database = this.store.snapshot();
+    const snapshot = database.snapshots.find((item) => item.id === checkpoint.snapshotId);
     if (!snapshot) {
       throw new HttpError(500, "Checkpoint snapshot is missing");
     }
+    const agent = database.agents.find((item) => item.id === checkpoint.agentId);
+    if (!agent) throw new HttpError(404, "Agent not found");
+    if (agent.projectId) {
+      const project = database.projects.find((item) => item.id === agent.projectId);
+      if (project?.archivedAt) {
+        throw new HttpError(409, "This project is archived. Unarchive it to restore a checkpoint.");
+      }
+    }
+    const sourceBranch = checkpoint.branchId
+      ? database.branches.find(
+          (item) => item.id === checkpoint.branchId && item.agentId === checkpoint.agentId,
+        )
+      : null;
+    if (checkpoint.branchId && !sourceBranch) {
+      throw new HttpError(404, "Checkpoint branch not found");
+    }
+    const activeWorkspacePath = sourceBranch?.workspacePath ?? agent.workspacePath;
+
+    let previousStatus: Agent["status"] | null = null;
+    await this.store.mutate((next) => {
+      const storedAgent = next.agents.find((item) => item.id === checkpoint.agentId);
+      if (!storedAgent) throw new HttpError(404, "Agent not found");
+      if (checkpoint.branchId) {
+        const storedBranch = next.branches.find(
+          (item) => item.id === checkpoint.branchId && item.agentId === checkpoint.agentId,
+        );
+        if (!storedBranch) throw new HttpError(404, "Checkpoint branch not found");
+        if (storedBranch.status === "busy") {
+          throw new HttpError(409, "Wait for the branch run to finish before restoring it");
+        }
+        previousStatus = storedBranch.status;
+        storedBranch.status = "busy";
+        storedBranch.updatedAt = now();
+        return;
+      }
+      if (storedAgent.status === "busy") {
+        throw new HttpError(409, "Wait for the Agent run to finish before restoring it");
+      }
+      const runningBranch = next.branches.find(
+        (item) => item.agentId === checkpoint.agentId && item.status === "busy",
+      );
+      if (runningBranch) {
+        throw new HttpError(409, "Wait for every branch run to finish before restoring main");
+      }
+      previousStatus = storedAgent.status;
+      storedAgent.status = "busy";
+      storedAgent.updatedAt = now();
+    });
+
     const restoreRoot = path.join(this.config.dataDirectory, "branchpoint", "restores");
-    await mkdir(restoreRoot, { recursive: true });
     const workspacePath = path.join(restoreRoot, checkpoint.id + "-" + Date.now());
-    await this.history.restoreSnapshot(snapshot, workspacePath);
-    return {
-      checkpoint,
-      workspacePath,
-      workspaceHash: snapshot.manifest.workspaceHash,
-    };
+    try {
+      await mkdir(restoreRoot, { recursive: true });
+      await this.history.restoreSnapshot(snapshot, workspacePath);
+      const recoveryManifest = await this.history.manifest(workspacePath);
+      if (recoveryManifest.workspaceHash !== snapshot.manifest.workspaceHash) {
+        throw new Error("The recovery workspace does not match the checkpoint snapshot");
+      }
+      await this.history.restoreSnapshotInPlace(snapshot, activeWorkspacePath);
+      return {
+        checkpoint,
+        workspacePath,
+        activeWorkspacePath,
+        workspaceHash: snapshot.manifest.workspaceHash,
+      };
+    } finally {
+      await this.store.mutate((next) => {
+        if (checkpoint.branchId) {
+          const storedBranch = next.branches.find(
+            (item) => item.id === checkpoint.branchId && item.agentId === checkpoint.agentId,
+          );
+          if (storedBranch && storedBranch.status === "busy" && previousStatus) {
+            storedBranch.status = previousStatus;
+            storedBranch.updatedAt = now();
+          }
+          return;
+        }
+        const storedAgent = next.agents.find((item) => item.id === checkpoint.agentId);
+        if (storedAgent && storedAgent.status === "busy" && previousStatus) {
+          storedAgent.status = previousStatus;
+          storedAgent.updatedAt = now();
+        }
+      });
+    }
   }
 
   getTrace(agentId: string, branchId: string | null = null): TraceEvent[] {
@@ -1151,20 +1455,6 @@ export class AgentService {
       })
       .catch(() => undefined);
     return { run, message };
-  }
-
-  /**
-   * Send a prompt and wait for the run to reach a terminal state. Used for
-   * server-orchestrated runs (e.g. the pre-commit security analysis) where the
-   * caller needs the final output, not a queued handle.
-   */
-  async runToCompletion(agentId: string, prompt: string): Promise<AgentRun> {
-    const { run } = await this.sendMessage(agentId, prompt);
-    const execution = this.activeExecutions.get(agentId);
-    if (execution) {
-      await execution.catch(() => undefined);
-    }
-    return this.getRun(run.id);
   }
 
   async systemInfo(): Promise<Record<string, unknown>> {

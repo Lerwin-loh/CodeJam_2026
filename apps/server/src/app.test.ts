@@ -27,6 +27,7 @@ const service = {
 
 const projectsStub = {
   listProjects: () => [],
+  listPendingInvitations: () => [],
 } as unknown as ProjectService;
 
 describe("HTTP boundary", () => {
@@ -200,6 +201,7 @@ describe("Project access enforcement (end to end)", () => {
       payload: JSON.stringify({ name: "loose agent" }),
     });
     expect(standalone.statusCode).toBe(201);
+    const standaloneId = standalone.json().agent.id as string;
 
     const aliceAgents = await app.inject({
       method: "GET",
@@ -218,6 +220,29 @@ describe("Project access enforcement (end to end)", () => {
     });
     expect(bobAgents.statusCode).toBe(200);
     expect(bobAgents.json().agents).toEqual([]);
+
+    const bobUpgradesAgent = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + standaloneId + "/upgrade-to-project",
+      headers: { authorization: "Bearer " + bob, "content-type": "application/json" },
+      payload: JSON.stringify({ projectName: "Stolen Project" }),
+    });
+    expect(bobUpgradesAgent.statusCode).toBe(403);
+
+    const aliceUpgradesAgent = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + standaloneId + "/upgrade-to-project",
+      headers: asAlice,
+      payload: JSON.stringify({ projectName: "Upgraded Project" }),
+    });
+    expect(aliceUpgradesAgent.statusCode).toBe(201);
+    expect(aliceUpgradesAgent.json()).toMatchObject({
+      project: { name: "Upgraded Project", parentAgentId: standaloneId },
+      parentAgent: { id: standaloneId, kind: "parent" },
+    });
+    const upgradedProjectId = aliceUpgradesAgent.json().project.id as string;
+    const agentsAfterUpgrade = await app.inject({ method: "GET", url: "/api/agents", headers: asAlice });
+    expect(agentsAfterUpgrade.json().agents).toEqual([]);
 
     const auditAsAlice = await app.inject({ method: "GET", url: "/api/audit", headers: asAlice });
     const entries = auditAsAlice.json().entries as Array<{
@@ -249,7 +274,109 @@ describe("Project access enforcement (end to end)", () => {
       url: "/api/projects",
       headers: asAlice,
     });
-    expect(projectsAfterDelete.json().projects).toEqual([]);
+    expect(projectsAfterDelete.json().projects.map((item: { id: string }) => item.id)).toEqual([
+      upgradedProjectId,
+    ]);
+    const deletesUpgradedProject = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/" + upgradedProjectId,
+      headers: { authorization: "Bearer " + alice },
+    });
+    expect(deletesUpgradedProject.statusCode).toBe(200);
+
+    await app.close();
+  });
+
+  it("deletes an account and its dependent Agents, projects, memberships, and history", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-account-delete-test-"));
+    temporaryDirectories.push(root);
+    const config = loadConfig({
+      NODE_ENV: "test",
+      APP_DATA_DIR: path.join(root, "data"),
+      AGENT_WORKSPACE_ROOT: path.join(root, "workspaces"),
+      CODEX_HOME: path.join(root, "codex"),
+      ARK_API_KEY: "test-key",
+      ARK_MODEL: "ep-test",
+    });
+    const store = new JsonStore(path.join(root, "data", "db.json"));
+    const workspaces = new WorkspaceManager(path.join(root, "workspaces"));
+    const history = new WorkspaceHistory(path.join(root, "data", "branchpoint"));
+    const projects = new ProjectService(store, workspaces, history);
+    const accountService = new AgentService(config, store, workspaces, realRunner, history);
+    await accountService.initialize();
+    const app = await createApp(config, accountService, projects);
+
+    const alice = await accountService.createUser("Account Alice");
+    const bob = await accountService.createUser("Account Bob");
+    const standalone = await accountService.createAgent({ name: "Alice standalone" }, alice.id);
+    const standaloneRun = await accountService.sendMessage(standalone.id, "remember this");
+    await expect.poll(() => accountService.getRun(standaloneRun.run.id).status).toBe("completed");
+
+    const aliceProject = await projects.createProject("Alice owned", alice.id);
+    const bobOnAliceProject = await projects.addMember(aliceProject.id, alice, {
+      userName: bob.name,
+      role: "Backend",
+    });
+    const bobProject = await projects.createProject("Bob owned", bob.id);
+    const aliceOnBobProject = await projects.addMember(bobProject.id, bob, {
+      userName: alice.name,
+      role: "Frontend",
+    });
+
+    const before = store.snapshot();
+    const deletedAgentIds = new Set([
+      standalone.id,
+      aliceProject.parentAgentId,
+      bobOnAliceProject.childAgentId,
+      aliceOnBobProject.childAgentId,
+    ]);
+    expect(before.agents.filter((agent) => deletedAgentIds.has(agent.id))).toHaveLength(4);
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/api/users/me",
+      headers: { authorization: "Bearer " + alice.token },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      deletedUserId: alice.id,
+      deletedProjects: 1,
+      deletedMemberships: 2,
+      deletedAgents: 4,
+      archivedWorkspaces: 3,
+      archivedSnapshots: 3,
+    });
+
+    expect(accountService.getUserByToken(alice.token)).toBeNull();
+    expect(accountService.getUserByToken(bob.token)?.id).toBe(bob.id);
+    const after = store.snapshot();
+    expect(after.users.map((user) => user.id)).toEqual([bob.id]);
+    expect(after.projects.map((project) => project.id)).toEqual([bobProject.id]);
+    expect(after.projectMembers).toEqual([]);
+    expect(after.agents.map((agent) => agent.id)).toEqual([bobProject.parentAgentId]);
+    expect(after.branches.some((branch) => deletedAgentIds.has(branch.agentId))).toBe(false);
+    expect(after.messages.some((message) => deletedAgentIds.has(message.agentId))).toBe(false);
+    expect(after.runs.some((run) => deletedAgentIds.has(run.agentId))).toBe(false);
+    expect(after.traces.some((event) => deletedAgentIds.has(event.agentId))).toBe(false);
+    expect(after.snapshots.some((snapshot) => deletedAgentIds.has(snapshot.agentId))).toBe(false);
+    expect(after.contexts.some((context) => deletedAgentIds.has(context.agentId))).toBe(false);
+    expect(after.checkpoints.some((checkpoint) => deletedAgentIds.has(checkpoint.agentId))).toBe(false);
+    expect(after.audit.some((entry) => entry.userId === alice.id)).toBe(false);
+
+    const oldToken = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { authorization: "Bearer " + alice.token },
+    });
+    expect(oldToken.statusCode).toBe(401);
+    const bobProjects = await app.inject({
+      method: "GET",
+      url: "/api/projects",
+      headers: { authorization: "Bearer " + bob.token },
+    });
+    expect(bobProjects.statusCode).toBe(200);
+    expect(bobProjects.json().projects.map((project: { id: string }) => project.id))
+      .toEqual([bobProject.id]);
 
     await app.close();
   });
@@ -352,7 +479,8 @@ describe("BranchPoint API authorization (end to end)", () => {
       payload: { content: "branch turn one", branchId },
     });
     expect(firstBranchTurn.statusCode).toBe(202);
-    await expect.poll(() => branchService.getRun(firstBranchTurn.json().run.id).status).toBe("completed");
+    const firstBranchRunId = firstBranchTurn.json().run.id as string;
+    await expect.poll(() => branchService.getRun(firstBranchRunId).status).toBe("completed");
 
     const secondBranchTurn = await app.inject({
       method: "POST",
@@ -380,6 +508,33 @@ describe("BranchPoint API authorization (end to end)", () => {
     const ownerRestore = await app.inject({ method: "POST", url: "/api/checkpoints/" + checkpoint.id + "/restore", headers: alice });
     expect(ownerRestore.statusCode).toBe(200);
     expect(ownerRestore.json().workspaceHash).toBe(checkpoint.workspaceHash);
+    expect(ownerRestore.json().activeWorkspacePath).toBe(
+      branchService.getAgent(agentId).workspacePath,
+    );
+
+    const deniedDelete = await app.inject({
+      method: "DELETE",
+      url: "/api/agents/" + agentId + "/branches/" + branchId,
+      headers: bob,
+    });
+    expect(deniedDelete.statusCode).toBe(403);
+    expect(branchService.getBranch(branchId).id).toBe(branchId);
+
+    const ownerDelete = await app.inject({
+      method: "DELETE",
+      url: "/api/agents/" + agentId + "/branches/" + branchId,
+      headers: alice,
+    });
+    expect(ownerDelete.statusCode).toBe(200);
+    expect(ownerDelete.json().branchId).toBe(branchId);
+    expect(ownerDelete.json().archivedWorkspace).toContain(".deleted");
+    expect(branchService.getBranches(agentId)).toEqual([]);
+    const deletedRunDetails = await app.inject({
+      method: "GET",
+      url: "/api/runs/" + firstBranchRunId + "/details",
+      headers: alice,
+    });
+    expect(deletedRunDetails.statusCode).toBe(404);
 
     await app.close();
   });

@@ -15,6 +15,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<"individual" | "collaboration">("individual");
+  const [projectToOpen, setProjectToOpen] = useState<string | null>(null);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -65,10 +66,21 @@ export default function App() {
     setAuthToken("");
     setCurrentUser(null);
     setMode("individual");
+    setProjectToOpen(null);
+  };
+
+  const deleteAccount = async () => {
+    await api.deleteAccount();
+    signOut();
   };
 
   const toggleMode = () => {
     setMode((current) => (current === "individual" ? "collaboration" : "individual"));
+  };
+
+  const openUpgradedProject = (projectId: string) => {
+    setProjectToOpen(projectId);
+    setMode("collaboration");
   };
 
   if (!authChecked) {
@@ -112,9 +124,20 @@ export default function App() {
   }
 
   return mode === "collaboration" ? (
-    <ProjectsView currentUser={currentUser} onSignOut={signOut} onToggleMode={toggleMode} />
+    <ProjectsView
+      currentUser={currentUser}
+      initialProjectId={projectToOpen}
+      onSignOut={signOut}
+      onDeleteAccount={deleteAccount}
+      onToggleMode={toggleMode}
+    />
   ) : (
-    <IndividualDashboard currentUser={currentUser} onSignOut={signOut} onToggleMode={toggleMode} />
+    <IndividualDashboard
+      currentUser={currentUser}
+      onProjectUpgraded={openUpgradedProject}
+      onSignOut={signOut}
+      onDeleteAccount={deleteAccount}
+      onToggleMode={toggleMode}
+    />
   );
 }
-

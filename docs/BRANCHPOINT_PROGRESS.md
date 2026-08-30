@@ -54,9 +54,13 @@ trace events, snapshot manifest, and workspace hash. Comparison shows the
 created/modified/deleted files and bounded content hunks relative to the parent.
 
 Restoration materializes a snapshot under
-`data/branchpoint/restores/<checkpoint>-<timestamp>`. It does not overwrite the
-source Agent workspace. The API checks access to the checkpoint's Agent before
-materializing the restored files.
+`data/branchpoint/restores/<checkpoint>-<timestamp>` as a recovery copy and also
+replaces the checkpoint's active workspace with the saved state. Main
+checkpoints restore the Agent's main workspace; branch checkpoints restore only
+their branch workspace. The replacement is staged and hash-verified, preserves
+platform-owned directories such as `branches/`, and rolls back to the previous
+workspace if publication fails. The API checks access and rejects restoration
+while the affected Agent or branch is running.
 
 ### Independent branches and persistent threads
 

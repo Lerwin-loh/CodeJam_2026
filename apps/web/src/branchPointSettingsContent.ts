@@ -2,7 +2,12 @@
  * Shared BranchPoint "How it works?" settings content, used by both the flat
  * individual-mode App and the collaboration-mode ProjectsView workspace.
  */
-export type BranchPointSettingsTabKey = "trace" | "run" | "checkpoint" | "branching";
+export type BranchPointSettingsTabKey =
+  | "trace"
+  | "run"
+  | "checkpoint"
+  | "branching"
+  | "security";
 
 export interface BranchPointSettingsTab {
   key: BranchPointSettingsTabKey;
@@ -131,5 +136,47 @@ export const branchPointSettingsTabs: BranchPointSettingsTab[] = [
     ],
     summary: "Branching gives you a genuinely independent workspace and conversation, cut at exactly the right point.",
     tip: "If session files are missing, a Branch still restores its workspace — it just starts with no prior Codex memory.",
+  },
+  {
+    key: "security",
+    icon: "🛡",
+    label: "Security analysis",
+    title: "Security analysis",
+    subtitle: "A lightweight OWASP gate over only the code a member changed.",
+    intro:
+      "Before a member submits work, the security gate compares their workspace with project main and reviews only created or modified files against the OWASP Top 10. A passing result unlocks the commit request for that exact workspace state.",
+    recordedHeading: "How the analysis runs",
+    recordedDescription:
+      "The gate chooses the cheapest reliable path first. No changes pass without a model call. Obvious risky patterns fail in a local static scan. Only a clean static result reaches one direct, JSON-only model request — without starting an Agent session.",
+    recordedItems: [
+      { icon: "⇄", label: "Diff only", caption: "Created and modified files" },
+      { icon: "⚡", label: "Static pre-check", caption: "Zero-token pattern scan" },
+      { icon: "◎", label: "One model call", caption: "No tools, thread, or history" },
+      { icon: "▤", label: "OWASP verdict", caption: "10 structured JSON results" },
+      { icon: "#", label: "Freshness check", caption: "Bound to workspace hash" },
+    ],
+    storedText:
+      "The result stores its timestamp, workspace hash, OWASP category verdicts, bounded evidence, and remediation guidance on the project member record, with an allow or deny audit entry. If the workspace hash changes, the previous pass becomes stale and submission is blocked until a new scan passes.",
+    whyItems: [
+      {
+        icon: "0",
+        title: "Free fast paths",
+        caption: "No changes or a static finding require zero model calls.",
+      },
+      {
+        icon: "📦",
+        title: "Bounded input",
+        caption: "Changed source is capped at 12k characters per file and 48k total.",
+      },
+      {
+        icon: "🎯",
+        title: "Targeted fixes",
+        caption: "Auto-fix calls the model once per affected file, then re-scans.",
+      },
+    ],
+    summary:
+      "Security analysis avoids a full coding-Agent session: most checks are free, and the model path is one bounded request over changed code only.",
+    tip:
+      "A passing verdict is reused while the workspace hash is unchanged; any later edit invalidates it and requires a fresh analysis before submission.",
   },
 ];

@@ -115,6 +115,74 @@ export class WorkspaceHistory {
     }
   }
 
+  /**
+   * Replace an active workspace with a snapshot while preserving directories
+   * owned by the platform or Runtime. The replacement is prepared and hashed
+   * before publication; if publication fails, the original workspace is put
+   * back in place.
+   */
+  async restoreSnapshotInPlace(
+    snapshot: WorkspaceSnapshot,
+    destination: string,
+  ): Promise<void> {
+    const operationId = randomUUID();
+    const parent = path.dirname(destination);
+    const base = path.basename(destination);
+    const staging = path.join(parent, `.${base}.restore-${operationId}`);
+    const backup = path.join(parent, `.${base}.before-restore-${operationId}`);
+    let originalMoved = false;
+    let replacementPublished = false;
+
+    try {
+      await this.restoreSnapshot(snapshot, staging);
+      const stagedManifest = await this.manifest(staging);
+      if (stagedManifest.workspaceHash !== snapshot.manifest.workspaceHash) {
+        throw new Error("The staged workspace does not match the checkpoint snapshot");
+      }
+
+      // Copy platform/Runtime-owned state into the fully prepared replacement
+      // before the directory swap. The original stays intact and is therefore
+      // sufficient for rollback until publication has been verified.
+      for (const name of ignoredNames) {
+        try {
+          await cp(path.join(destination, name), path.join(staging, name), {
+            recursive: true,
+            force: false,
+            errorOnExist: true,
+            preserveTimestamps: true,
+          });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+
+      await rename(destination, backup);
+      originalMoved = true;
+      await rename(staging, destination);
+      replacementPublished = true;
+
+      const restoredManifest = await this.manifest(destination);
+      if (restoredManifest.workspaceHash !== snapshot.manifest.workspaceHash) {
+        throw new Error("The active workspace does not match the checkpoint snapshot");
+      }
+    } catch (error) {
+      if (originalMoved) {
+        if (replacementPublished) {
+          await rm(destination, { recursive: true, force: true });
+        }
+        await rename(backup, destination);
+      }
+      throw error;
+    } finally {
+      await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    }
+
+    // The active workspace is already verified and authoritative. Failure to
+    // remove this private backup must not turn a successful restore into an
+    // apparent failure; a later cleanup can safely remove the orphan.
+    await rm(backup, { recursive: true, force: true }).catch(() => undefined);
+  }
+
   async archiveSnapshots(
     projectId: string,
     snapshots: WorkspaceSnapshot[],

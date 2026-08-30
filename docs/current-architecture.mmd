@@ -1,0 +1,75 @@
+flowchart LR
+  User["Owner / Team Member"]
+
+  subgraph Browser["Browser · React 19 + TypeScript"]
+    UI["Web UI<br/>Individual mode · Project mode<br/>Playground · BranchPoint · Security results"]
+  end
+
+  subgraph Server["Single-node control plane · Node.js + Fastify"]
+    API["Fastify API boundary<br/>Bearer identity · Zod validation<br/>RBAC · JSON + SSE"]
+
+    subgraph Middleware["Team-designed middleware"]
+      Agent["AgentService<br/>CRUD · Runs · messages · traces<br/>checkpoints · restore · branch/thread fork<br/>branch merge · audit"]
+      Project["ProjectService<br/>projects · membership · role policy<br/>workspace isolation · Agent promotion<br/>commit gate + requests"]
+      Security["Security gate<br/>diff vs main → static pre-check<br/>one bounded direct model call if clean<br/>targeted per-file fix → re-scan"]
+      History["WorkspaceHistory / BranchPoint<br/>manifests · hashes · diffs<br/>immutable snapshots · recovery copies<br/>verified in-place restore + rollback"]
+      Session["Native session fork<br/>SQLite index + JSONL rollout offset<br/>independent Codex thread IDs"]
+    end
+
+    Store[("JsonStore<br/>data/launchpad.json<br/>users · Agents · projects · Runs<br/>messages · traces · checkpoints<br/>security verdicts · audit")]
+    Workspaces[("Managed workspaces<br/>standalone/&lt;agent&gt;<br/>projects/&lt;project&gt;/main<br/>projects/&lt;project&gt;/members/&lt;member&gt;<br/>branches nested under their Agent")]
+    Snapshots[("BranchPoint files<br/>snapshots/&lt;id&gt;<br/>restores/&lt;checkpoint-time&gt;")]
+    CodexHome[("Codex home<br/>thread/session state")]
+
+    Runner{"AgentRunner"}
+    Container["Local POC<br/>disposable Docker / Colima / Podman<br/>resource limits · dropped capabilities<br/>selected workspace bind mount"]
+    Process["Local development / ECS<br/>Codex CLI child process<br/>same application host/container"]
+    Classifier["arkClassify<br/>single non-streaming Responses call<br/>no Agent loop · tools · chat history"]
+  end
+
+  Ark["Volcengine Ark<br/>Responses API"]
+
+  User --> UI
+  UI <-->|"Bearer JSON requests<br/>SSE live traces"| API
+  API --> Agent
+  API --> Project
+
+  Agent <--> Store
+  Project <--> Store
+  Agent <--> Workspaces
+  Project <--> Workspaces
+  Agent --> History
+  Project --> History
+  History <--> Snapshots
+  Agent --> Session
+  Session <--> CodexHome
+
+  Agent --> Runner
+  Runner -->|"container profile"| Container
+  Runner -->|"process / ECS profile"| Process
+  Container <--> Workspaces
+  Container <--> CodexHome
+  Process <--> Workspaces
+  Process <--> CodexHome
+  Container --> Ark
+  Process --> Ark
+
+  Project --> Security
+  Security -->|"clean static pass"| Classifier
+  Classifier --> Ark
+  Security -->|"hash-bound verdict + audit"| Store
+
+  classDef user fill:#f8fafc,stroke:#64748b,color:#172033,stroke-width:2px;
+  classDef ui fill:#f4f0ff,stroke:#7157d9,color:#2f2860,stroke-width:2px;
+  classDef api fill:#edf5ff,stroke:#3b82c4,color:#18364e,stroke-width:2px;
+  classDef middleware fill:#fff8e7,stroke:#c38a2c,color:#493612,stroke-width:2px;
+  classDef data fill:#eefaf2,stroke:#3f9060,color:#173d28,stroke-width:2px;
+  classDef runtime fill:#fff3e8,stroke:#d27736,color:#4b2d18,stroke-width:2px;
+  classDef external fill:#fff0f2,stroke:#c74d65,color:#551f2a,stroke-width:2px;
+  class User user;
+  class UI ui;
+  class API api;
+  class Agent,Project,Security,History,Session middleware;
+  class Store,Workspaces,Snapshots,CodexHome data;
+  class Runner,Container,Process,Classifier runtime;
+  class Ark external;
