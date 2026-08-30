@@ -130,6 +130,10 @@ export async function createApp(
     user: { id: request.user.id, name: request.user.name },
   }));
 
+  app.delete("/api/users/me", async (request) =>
+    service.deleteAccount(request.user),
+  );
+
   app.get("/api/audit", async (request) => ({
     entries: service.listAudit(request.user),
   }));

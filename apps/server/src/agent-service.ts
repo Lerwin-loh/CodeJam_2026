@@ -201,6 +201,102 @@ export class AgentService {
     });
   }
 
+  /**
+   * Delete one user and every resource whose lifetime depends on that account.
+   * Owned projects are removed in full; memberships in projects owned by other
+   * users remove only this user's member workspace and child Agent.
+   */
+  async deleteAccount(user: User): Promise<{
+    deletedUserId: string;
+    deletedProjects: number;
+    deletedMemberships: number;
+    deletedAgents: number;
+    archivedWorkspaces: number;
+    archivedSnapshots: number;
+  }> {
+    const database = this.store.snapshot();
+    if (!database.users.some((item) => item.id === user.id)) {
+      throw new HttpError(404, "User not found");
+    }
+
+    const ownedProjectIds = new Set(
+      database.projects
+        .filter((project) => project.ownerId === user.id)
+        .map((project) => project.id),
+    );
+    const removedMemberships = database.projectMembers.filter(
+      (member) => member.userId === user.id || ownedProjectIds.has(member.projectId),
+    );
+    const removedMembershipIds = new Set(removedMemberships.map((member) => member.id));
+    const affectedAgents = database.agents.filter(
+      (agent) => agent.ownerId === user.id ||
+        (agent.projectId !== null && ownedProjectIds.has(agent.projectId)),
+    );
+    const affectedAgentIds = new Set(affectedAgents.map((agent) => agent.id));
+
+    // No workspace is moved while an Agent could still be writing to it.
+    for (const agent of affectedAgents) {
+      await this.cancelExecution(agent.id);
+    }
+
+    let archivedWorkspaces = 0;
+    for (const projectId of ownedProjectIds) {
+      if (await this.workspaces.archiveProject(projectId)) archivedWorkspaces += 1;
+    }
+    for (const agent of affectedAgents) {
+      if (agent.projectId !== null && ownedProjectIds.has(agent.projectId)) continue;
+      try {
+        await this.workspaces.archive(agent);
+        archivedWorkspaces += 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+
+    const affectedSnapshots = database.snapshots.filter((snapshot) =>
+      affectedAgentIds.has(snapshot.agentId),
+    );
+    const archivedSnapshots = await this.history.archiveSnapshots(
+      "account-" + user.id,
+      affectedSnapshots,
+    );
+
+    await this.store.mutate((next) => {
+      next.users = next.users.filter((item) => item.id !== user.id);
+      next.projects = next.projects.filter((item) => !ownedProjectIds.has(item.id));
+      next.projectMembers = next.projectMembers.filter(
+        (item) => !removedMembershipIds.has(item.id),
+      );
+      next.commitRequests = next.commitRequests.filter(
+        (item) => !ownedProjectIds.has(item.projectId) &&
+          !removedMembershipIds.has(item.memberId) &&
+          !affectedAgentIds.has(item.childAgentId),
+      );
+      next.agents = next.agents.filter((item) => !affectedAgentIds.has(item.id));
+      next.branches = next.branches.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.messages = next.messages.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.runs = next.runs.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.traces = next.traces.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.snapshots = next.snapshots.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.contexts = next.contexts.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.checkpoints = next.checkpoints.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.audit = next.audit.filter(
+        (item) => item.userId !== user.id &&
+          (item.agentId === null || !affectedAgentIds.has(item.agentId)) &&
+          !ownedProjectIds.has(item.resource.replace(/^project:/, "")),
+      );
+    });
+
+    return {
+      deletedUserId: user.id,
+      deletedProjects: ownedProjectIds.size,
+      deletedMemberships: removedMemberships.length,
+      deletedAgents: affectedAgents.length,
+      archivedWorkspaces,
+      archivedSnapshots,
+    };
+  }
+
   async recordAudit(entry: {
     user: User;
     agentId: string | null;

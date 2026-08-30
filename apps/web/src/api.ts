@@ -89,6 +89,15 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
   me: () => request<{ user: User }>("/api/me"),
+  deleteAccount: () =>
+    request<{
+      deletedUserId: string;
+      deletedProjects: number;
+      deletedMemberships: number;
+      deletedAgents: number;
+      archivedWorkspaces: number;
+      archivedSnapshots: number;
+    }>("/api/users/me", { method: "DELETE" }),
   audit: () => request<{ entries: AuditEntry[] }>("/api/audit"),
   system: () => request<SystemInfo>("/api/system"),
   listAgents: () => request<{ agents: Agent[] }>("/api/agents"),

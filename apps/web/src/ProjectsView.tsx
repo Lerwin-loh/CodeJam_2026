@@ -49,10 +49,11 @@ interface Props {
   currentUser: User;
   initialProjectId: string | null;
   onSignOut: () => void;
+  onDeleteAccount: () => Promise<void>;
   onToggleMode: () => void;
 }
 
-export default function ProjectsView({ currentUser, initialProjectId, onSignOut, onToggleMode }: Props) {
+export default function ProjectsView({ currentUser, initialProjectId, onSignOut, onDeleteAccount, onToggleMode }: Props) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(initialProjectId);
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
@@ -242,6 +243,25 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
       fail(reason);
     } finally {
       if (mounted.current) setBusy(false);
+    }
+  };
+
+  const deleteAccount = async () => {
+    const confirmation = window.prompt(
+      `Delete ${currentUser.name}'s account and all dependent Agents and Projects?\n\nType the account name to confirm:`,
+    );
+    if (confirmation === null) return;
+    if (confirmation !== currentUser.name) {
+      setError("Account name did not match. Nothing was deleted.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onDeleteAccount();
+    } catch (reason) {
+      fail(reason);
+      setBusy(false);
     }
   };
 
@@ -511,6 +531,11 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
             </button>
             <button className="button button-ghost" onClick={onSignOut}>
               Sign out
+            </button>
+          </div>
+          <div className="user-card-danger-row">
+            <button className="button button-danger" disabled={busy} onClick={() => void deleteAccount()}>
+              Delete account
             </button>
           </div>
         </div>

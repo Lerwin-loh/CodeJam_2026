@@ -66,6 +66,12 @@ export default function App() {
     setAuthToken("");
     setCurrentUser(null);
     setMode("individual");
+    setProjectToOpen(null);
+  };
+
+  const deleteAccount = async () => {
+    await api.deleteAccount();
+    signOut();
   };
 
   const toggleMode = () => {
@@ -122,6 +128,7 @@ export default function App() {
       currentUser={currentUser}
       initialProjectId={projectToOpen}
       onSignOut={signOut}
+      onDeleteAccount={deleteAccount}
       onToggleMode={toggleMode}
     />
   ) : (
@@ -129,6 +136,7 @@ export default function App() {
       currentUser={currentUser}
       onProjectUpgraded={openUpgradedProject}
       onSignOut={signOut}
+      onDeleteAccount={deleteAccount}
       onToggleMode={toggleMode}
     />
   );

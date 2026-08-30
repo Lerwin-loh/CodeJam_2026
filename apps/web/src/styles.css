@@ -461,6 +461,16 @@ button {
   background: #45443d;
 }
 
+.user-card-danger-row {
+  display: grid;
+}
+
+.user-card-danger-row .button {
+  width: 100%;
+  min-height: 32px;
+  font-size: 11px;
+}
+
 .audit-list {
   display: grid;
   gap: 8px;

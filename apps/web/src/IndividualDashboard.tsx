@@ -52,11 +52,12 @@ interface Props {
   currentUser: User;
   onProjectUpgraded: (projectId: string) => void;
   onSignOut: () => void;
+  onDeleteAccount: () => Promise<void>;
   onToggleMode: () => void;
 }
 
 /** Flat, single-Agent-list dashboard — the default "individual" mode of the app. */
-export default function IndividualDashboard({ currentUser, onProjectUpgraded, onSignOut, onToggleMode }: Props) {
+export default function IndividualDashboard({ currentUser, onProjectUpgraded, onSignOut, onDeleteAccount, onToggleMode }: Props) {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -506,6 +507,25 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
     onSignOut();
   };
 
+  const handleDeleteAccount = async () => {
+    const confirmation = window.prompt(
+      `Delete ${currentUser.name}'s account and all dependent Agents and Projects?\n\nType the account name to confirm:`,
+    );
+    if (confirmation === null) return;
+    if (confirmation !== currentUser.name) {
+      setError("Account name did not match. Nothing was deleted.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onDeleteAccount();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setBusy(false);
+    }
+  };
+
   return (
     <div className={"app-shell " + (showBranchPoint && !showBranchPointSettings ? "branchpoint-open" : "")}>
       <aside className="sidebar">
@@ -569,6 +589,11 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
             </button>
             <button className="button button-ghost" onClick={handleSignOut}>
               Switch
+            </button>
+          </div>
+          <div className="user-card-danger-row">
+            <button className="button button-danger" disabled={busy} onClick={() => void handleDeleteAccount()}>
+              Delete account
             </button>
           </div>
         </div>
