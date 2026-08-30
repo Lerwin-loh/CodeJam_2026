@@ -5,13 +5,15 @@ import { HttpError } from "./errors.js";
 import { JsonStore } from "./store.js";
 import type {
   Agent,
+  AgentRun,
   AuditDecision,
   ChangedFiles,
   CommitRequest,
+  OwaspStatus,
   Project,
   ProjectMember,
-  SecurityCheckResult,
-  SecurityFinding,
+  SecurityAnalysis,
+  SecurityAnalysisPoint,
   User,
 } from "./types.js";
 import { WorkspaceHistory } from "./workspace-history.js";
@@ -60,19 +62,119 @@ const PROJECT_LIFECYCLE_ACTIONS = new Set([
   "project.delete",
 ]);
 
-/** Cheap static checks run against a member's workspace before a commit request. */
-const SCAN_RULES: Array<{ rule: string; re: RegExp }> = [
-  {
-    rule: "hardcoded-secret",
-    re: /(?:api[_-]?key|secret|passwd|password|access[_-]?token|auth[_-]?token)\s*[:=]\s*['"][^'"]{6,}['"]/i,
-  },
-  { rule: "private-key", re: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/ },
-  { rule: "aws-access-key-id", re: /\bAKIA[0-9A-Z]{16}\b/ },
-  { rule: "use-of-eval", re: /\beval\s*\(/ },
-  { rule: "shell-injection-risk", re: /\bexec(?:Sync)?\s*\(\s*[`'"][^`'"]*\$\{/ },
+/** OWASP Top 10 (2021) categories, in canonical order. */
+const OWASP_TOP_10: ReadonlyArray<{ id: string; name: string }> = [
+  { id: "A01:2021", name: "Broken Access Control" },
+  { id: "A02:2021", name: "Cryptographic Failures" },
+  { id: "A03:2021", name: "Injection" },
+  { id: "A04:2021", name: "Insecure Design" },
+  { id: "A05:2021", name: "Security Misconfiguration" },
+  { id: "A06:2021", name: "Vulnerable and Outdated Components" },
+  { id: "A07:2021", name: "Identification and Authentication Failures" },
+  { id: "A08:2021", name: "Software and Data Integrity Failures" },
+  { id: "A09:2021", name: "Security Logging and Monitoring Failures" },
+  { id: "A10:2021", name: "Server-Side Request Forgery (SSRF)" },
 ];
+const OWASP_IDS = new Set(OWASP_TOP_10.map((entry) => entry.id));
+const OWASP_NAME_BY_ID = new Map(OWASP_TOP_10.map((entry) => [entry.id, entry.name]));
 
-const SCAN_SKIP = new Set([".git", "node_modules", "dist", ".codex", "branches"]);
+/** Hard-coded prompt pushed to the member's child agent for the pre-commit gate. */
+export const OWASP_ANALYSIS_PROMPT = [
+  "SECURITY ANALYSIS — read-only. Do NOT create, edit, run, or delete anything.",
+  "",
+  "Review the source code in your current workspace (your branch) against the",
+  "OWASP Top 10 (2021). Inspect the actual files. For each of the ten categories",
+  "decide one status:",
+  '  "pass" — you found no issue of this class in the code you can see',
+  '  "fail" — at least one concrete instance of this class exists (name the file)',
+  '  "na"   — this class cannot apply to this codebase',
+  "",
+  OWASP_TOP_10.map((entry) => `  ${entry.id}  ${entry.name}`).join("\n"),
+  "",
+  "For every category you mark \"fail\", also include:",
+  '  "file"        — the file path (relative to your workspace root)',
+  '  "evidence"    — the offending lines, copied verbatim (<= 1500 chars)',
+  '  "remediation" — concrete steps to fix it (<= 600 chars)',
+  'Omit those three keys (or leave them "") for "pass" and "na".',
+  "",
+  "You may explain your reasoning first. Then, as the LAST thing in your reply,",
+  "output EXACTLY ONE fenced code block tagged `json` and nothing after it:",
+  "",
+  "```json",
+  "[",
+  OWASP_TOP_10.map(
+    (entry) =>
+      `  {"id":"${entry.id}","name":"${entry.name}","status":"pass|fail|na","detail":"<=200 chars","file":"","evidence":"","remediation":""}`,
+  ).join(",\n"),
+  "]",
+  "```",
+].join("\n");
+
+interface OwaspVerdict {
+  ok: boolean;
+  points: SecurityAnalysisPoint[];
+  summary: string;
+}
+
+/** Pull the last ```json fenced block out of the agent reply and validate it. */
+function parseOwaspVerdict(output: string): OwaspVerdict {
+  const fences = [...output.matchAll(/```json\s*([\s\S]*?)```/gi)];
+  const raw = fences.length ? fences[fences.length - 1]?.[1]?.trim() : undefined;
+  if (!raw) {
+    return { ok: false, points: [], summary: "The agent did not return a JSON verdict block." };
+  }
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return { ok: false, points: [], summary: "The agent's JSON verdict block was not valid JSON." };
+  }
+  if (!Array.isArray(data)) {
+    return { ok: false, points: [], summary: "The agent's verdict was not a JSON array." };
+  }
+  const byId = new Map<string, SecurityAnalysisPoint>();
+  for (const entry of data) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const id = String(record.id ?? "").trim();
+    const status = String(record.status ?? "").trim().toLowerCase();
+    if (!OWASP_IDS.has(id)) continue;
+    if (status !== "pass" && status !== "fail" && status !== "na") continue;
+    const point: SecurityAnalysisPoint = {
+      id,
+      name: OWASP_NAME_BY_ID.get(id) ?? String(record.name ?? id),
+      status: status as OwaspStatus,
+      detail: String(record.detail ?? "").replace(/\s+/g, " ").trim().slice(0, 300),
+    };
+    if (status === "fail") {
+      const file = String(record.file ?? "").trim().slice(0, 400);
+      const evidence = String(record.evidence ?? "").slice(0, 4000);
+      const remediation = String(record.remediation ?? "").replace(/\s+/g, " ").trim().slice(0, 1200);
+      if (file) point.file = file;
+      if (evidence.trim()) point.evidence = evidence;
+      if (remediation) point.remediation = remediation;
+    }
+    byId.set(id, point);
+  }
+  if (byId.size !== OWASP_TOP_10.length) {
+    return {
+      ok: false,
+      points: [...byId.values()],
+      summary:
+        "The verdict covered " + byId.size + " of 10 OWASP categories — re-run the analysis.",
+    };
+  }
+  const points = OWASP_TOP_10.map((entry) => byId.get(entry.id)!);
+  const failed = points.filter((point) => point.status === "fail");
+  return {
+    ok: true,
+    points,
+    summary: failed.length
+      ? failed.length + " OWASP categor" + (failed.length === 1 ? "y" : "ies") +
+        " failed: " + failed.map((point) => point.id).join(", ")
+      : "All 10 OWASP categories passed.",
+  };
+}
 
 function childInstructions(projectName: string, role: string): string {
   return [
@@ -88,7 +190,7 @@ export interface ProjectMemberView {
   name: string;
   role: string;
   childAgentId: string;
-  lastSecurityCheck: SecurityCheckResult | null;
+  securityAnalysis: SecurityAnalysis | null;
   createdAt: string;
 }
 
@@ -97,6 +199,25 @@ export interface RosterEntry {
   name: string;
   role: string;
 }
+
+export interface MemberSecurityView {
+  analysis: SecurityAnalysis | null;
+  currentWorkspaceHash: string;
+  /** True only when a passing analysis exists for the branch's current state. */
+  canCommit: boolean;
+  reason: "ok" | "never-run" | "failed" | "incomplete" | "branch-changed";
+}
+
+/** Why the commit button is disabled, phrased for the member. */
+const COMMIT_GATE_MESSAGE: Record<Exclude<MemberSecurityView["reason"], "ok">, string> = {
+  "never-run": "Run the security analysis before submitting a commit request.",
+  failed:
+    "The last security analysis failed one or more OWASP checks. Fix the issues and run it again.",
+  incomplete:
+    "The last security analysis did not cover all 10 OWASP categories. Run it again.",
+  "branch-changed":
+    "Your branch changed since the last security analysis. Run it again before submitting.",
+};
 
 export class ProjectService {
   constructor(
@@ -113,6 +234,14 @@ export class ProjectService {
     const project = this.store.snapshot().projects.find((item) => item.id === projectId);
     if (!project) throw new HttpError(404, "Project not found");
     return project;
+  }
+
+  getMemberById(projectId: string, memberId: string): ProjectMember {
+    const member = this.store
+      .snapshot()
+      .projectMembers.find((item) => item.id === memberId && item.projectId === projectId);
+    if (!member) throw new HttpError(404, "Member not found");
+    return member;
   }
 
   /** Resolve the caller's standing on a project and enforce an action's floor. */
@@ -413,7 +542,7 @@ export class ProjectService {
       name: nameOf(item.userId),
       role: item.role,
       childAgentId: item.childAgentId,
-      lastSecurityCheck: item.lastSecurityCheck,
+      securityAnalysis: item.securityAnalysis,
       createdAt: item.createdAt,
     }));
   }
@@ -492,7 +621,7 @@ export class ProjectService {
       role,
       childAgentId,
       workspacePath,
-      lastSecurityCheck: null,
+      securityAnalysis: null,
       invitedBy: actor.id,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -565,57 +694,98 @@ export class ProjectService {
   }
 
   // --------------------------------------------------------------------------
-  // security checks & commit requests (Part 2 scaffold)
+  // pre-commit security gate (Part 1B) & commit requests (Part 2 scaffold)
   // --------------------------------------------------------------------------
 
-  /** Run the static scan against a member's workspace and store the result. */
-  async runSecurityCheck(projectId: string, memberId: string): Promise<SecurityCheckResult> {
+  /**
+   * Store the verdict from a completed child-agent OWASP analysis run and return
+   * the resulting commit-gate state. `run` is the terminal run produced by
+   * `AgentService.runToCompletion(childAgentId, OWASP_ANALYSIS_PROMPT)`.
+   */
+  async recordSecurityAnalysis(
+    projectId: string,
+    memberId: string,
+    run: AgentRun,
+  ): Promise<MemberSecurityView> {
     const database = this.store.snapshot();
     const member = database.projectMembers.find(
       (item) => item.id === memberId && item.projectId === projectId,
     );
     if (!member) throw new HttpError(404, "Member not found");
 
-    const manifest = await this.history.manifest(member.workspacePath);
-    const findings: SecurityFinding[] = [];
-    let filesScanned = 0;
-    for (const file of manifest.files) {
-      if (file.path.split("/").some((part) => SCAN_SKIP.has(part))) continue;
-      if (file.size > 200_000) continue;
-      let text: string;
-      try {
-        text = await readFile(path.join(member.workspacePath, file.path), "utf8");
-      } catch {
-        continue;
-      }
-      const NUL = String.fromCharCode(0);
-      if (text.indexOf(NUL) !== -1) continue; // skip binary files
-      filesScanned += 1;
-      const lines = text.split("\n");
-      for (let index = 0; index < lines.length; index += 1) {
-        const line = lines[index] ?? "";
-        for (const { rule, re } of SCAN_RULES) {
-          if (re.test(line)) {
-            findings.push({
-              file: file.path,
-              line: index + 1,
-              rule,
-              excerpt: line.trim().slice(0, 200),
-            });
-          }
-        }
-      }
-    }
+    const before = run.beforeWorkspaceHash;
+    const after = run.afterWorkspaceHash ?? before;
+    const workspaceHash =
+      after ?? (await this.history.manifest(member.workspacePath)).workspaceHash;
 
-    const result: SecurityCheckResult = { ranAt: now(), filesScanned, findings };
+    const verdict: OwaspVerdict =
+      run.status === "completed"
+        ? parseOwaspVerdict(run.output ?? "")
+        : {
+            ok: false,
+            points: [],
+            summary:
+              "The analysis run " +
+              run.status +
+              (run.error ? ": " + run.error : "") +
+              " — try again.",
+          };
+    const passed = verdict.ok && verdict.points.every((point) => point.status !== "fail");
+
+    const analysis: SecurityAnalysis = {
+      ranAt: now(),
+      runId: run.id,
+      workspaceHash,
+      passed,
+      points: verdict.points,
+      summary: verdict.summary,
+      modifiedWorkspace: before != null && after != null && before !== after,
+    };
+
     await this.store.mutate((db) => {
       const row = db.projectMembers.find((item) => item.id === memberId);
       if (row) {
-        row.lastSecurityCheck = result;
+        row.securityAnalysis = analysis;
         row.updatedAt = now();
       }
+      // The analysis is a system-issued prompt, not the member's conversation.
+      // Keep its turn out of the child agent's chat transcript — the verdict is
+      // shown in the security panel. The run + trace stay for provenance.
+      db.messages = db.messages.filter((message) => message.runId !== run.id);
     });
-    return result;
+
+    const memberName =
+      database.users.find((user) => user.id === member.userId)?.name ?? "Member";
+    await this.recordAudit(
+      { id: member.userId, name: memberName } as User,
+      projectId,
+      member.childAgentId,
+      "security.check",
+      passed ? "allow" : "deny",
+      passed ? "OWASP analysis passed — commit unlocked" : "OWASP analysis: " + verdict.summary,
+    );
+
+    return this.getMemberSecurity(projectId, memberId);
+  }
+
+  /** Current commit-gate state for a member: is a fresh passing analysis on file? */
+  async getMemberSecurity(projectId: string, memberId: string): Promise<MemberSecurityView> {
+    const member = this.store
+      .snapshot()
+      .projectMembers.find((item) => item.id === memberId && item.projectId === projectId);
+    if (!member) throw new HttpError(404, "Member not found");
+
+    const currentWorkspaceHash = (await this.history.manifest(member.workspacePath)).workspaceHash;
+    const analysis = member.securityAnalysis;
+
+    let reason: MemberSecurityView["reason"];
+    if (!analysis) reason = "never-run";
+    else if (!analysis.passed) {
+      reason = analysis.points.length === 10 ? "failed" : "incomplete";
+    } else if (analysis.workspaceHash !== currentWorkspaceHash) reason = "branch-changed";
+    else reason = "ok";
+
+    return { analysis, currentWorkspaceHash, canCommit: reason === "ok", reason };
   }
 
   private async diffMemberAgainstMain(
@@ -650,14 +820,13 @@ export class ProjectService {
     const totalChanged =
       changedFiles.created.length + changedFiles.modified.length + changedFiles.deleted.length;
     if (totalChanged === 0) {
-      throw new HttpError(409, "Nothing to commit - your workspace matches main.");
+      throw new HttpError(409, "Nothing to commit - your branch matches main.");
     }
-    if (
-      database.commitRequests.some(
-        (item) => item.memberId === memberId && item.status === "pending",
-      )
-    ) {
-      throw new HttpError(409, "You already have a commit request awaiting review.");
+
+    // Part 1B: a passing OWASP analysis for the branch's current state is required.
+    const security = await this.getMemberSecurity(projectId, memberId);
+    if (security.reason !== "ok") {
+      throw new HttpError(409, COMMIT_GATE_MESSAGE[security.reason]);
     }
 
     const memberName =
@@ -673,7 +842,7 @@ export class ProjectService {
       note: (input.note ?? "").trim().slice(0, 2_000),
       status: "pending",
       changedFiles,
-      securityCheck: member.lastSecurityCheck,
+      securityAnalysis: security.analysis,
       decidedBy: null,
       decidedAt: null,
       createdAt: now(),

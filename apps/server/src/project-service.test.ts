@@ -4,9 +4,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
-import { ProjectService } from "./project-service.js";
+import { OWASP_ANALYSIS_PROMPT, ProjectService } from "./project-service.js";
 import { JsonStore } from "./store.js";
-import type { AgentRunner } from "./types.js";
+import type { AgentRunner, OwaspStatus } from "./types.js";
 import { WorkspaceHistory } from "./workspace-history.js";
 import { WorkspaceManager } from "./workspace.js";
 
@@ -15,6 +15,49 @@ const noopRunner: AgentRunner = {
   cancel: async () => false,
   isAvailable: async () => true,
 };
+
+const OWASP_TEST_IDS = [
+  ["A01:2021", "Broken Access Control"],
+  ["A02:2021", "Cryptographic Failures"],
+  ["A03:2021", "Injection"],
+  ["A04:2021", "Insecure Design"],
+  ["A05:2021", "Security Misconfiguration"],
+  ["A06:2021", "Vulnerable and Outdated Components"],
+  ["A07:2021", "Identification and Authentication Failures"],
+  ["A08:2021", "Software and Data Integrity Failures"],
+  ["A09:2021", "Security Logging and Monitoring Failures"],
+  ["A10:2021", "Server-Side Request Forgery (SSRF)"],
+] as const;
+
+function owaspFence(overrides: Record<string, OwaspStatus> = {}): string {
+  const rows = OWASP_TEST_IDS.map(([id, name]) => {
+    const status = overrides[id] ?? "pass";
+    return status === "fail"
+      ? {
+          id,
+          name,
+          status,
+          detail: "issue found",
+          file: "src/app.ts",
+          evidence: "const q = `SELECT * FROM u WHERE id=${req.query.id}`;",
+          remediation: "Use a parameterized query.",
+        }
+      : { id, name, status, detail: "checked" };
+  });
+  return "Analysis complete.\n\n```json\n" + JSON.stringify(rows, null, 2) + "\n```\n";
+}
+
+/** Runner that answers the OWASP analysis prompt with a verdict, echoes otherwise. */
+function owaspRunner(overrides: Record<string, OwaspStatus> = {}): AgentRunner {
+  return {
+    run: async (request) =>
+      request.prompt.includes("OWASP Top 10")
+        ? { output: owaspFence(overrides), threadId: "t", usage: null }
+        : { output: "ok in " + request.workspacePath, threadId: "t", usage: null },
+    cancel: async () => false,
+    isAvailable: async () => true,
+  };
+}
 
 const temporaryDirectories: string[] = [];
 afterEach(async () => {
@@ -382,40 +425,98 @@ describe("Part 1 — agent access across the project", () => {
     expect(agents.listAgents(sam.id)).toEqual([]);
   });
 
-  it("scans a member workspace, files a commit request, and lets the owner decide", async () => {
-    const { projects, agents } = await makeStack();
+  it("gates a commit request on a passing OWASP analysis, then lets the owner decide", async () => {
+    const { projects, agents } = await makeStack(owaspRunner());
     const owner = await agents.createUser("Owner");
     const dana = await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
     const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
 
-    // seed a risky file in the member's workspace
     const { mkdir, writeFile } = await import("node:fs/promises");
     await mkdir(path.join(member.workspacePath, "src"), { recursive: true });
-    await writeFile(
-      path.join(member.workspacePath, "src/app.ts"),
-      'const password = "hunter2hunter";\nexport const run = (x) => eval(x);\n',
-      "utf8",
-    );
+    await writeFile(path.join(member.workspacePath, "src/app.ts"), "export const run = 1;\n", "utf8");
 
-    const check = await projects.runSecurityCheck(project.id, member.id);
-    expect(check.findings.map((f) => f.rule).sort()).toEqual(["hardcoded-secret", "use-of-eval"]);
+    // no analysis on file yet -> commit blocked
+    await expect(
+      projects.submitCommitRequest(project.id, member.id, { title: "add app" }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect((await projects.getMemberSecurity(project.id, member.id)).reason).toBe("never-run");
+
+    // child agent runs the OWASP review -> all pass -> commit unlocked
+    const run = await agents.runToCompletion(member.childAgentId, OWASP_ANALYSIS_PROMPT);
+    const security = await projects.recordSecurityAnalysis(project.id, member.id, run);
+    expect(security.canCommit).toBe(true);
+    expect(security.analysis?.points).toHaveLength(10);
+    expect(security.analysis?.passed).toBe(true);
+    // the analysis turn is kept out of the child agent's chat transcript
+    expect(agents.getMessages(member.childAgentId).some((m) => m.runId === run.id)).toBe(false);
 
     const request = await projects.submitCommitRequest(project.id, member.id, { title: "add app" });
     expect(request.status).toBe("pending");
     expect(request.changedFiles.created).toContain("src/app.ts");
-    expect(request.securityCheck?.findings).toHaveLength(2);
+    expect(request.securityAnalysis?.passed).toBe(true);
 
-    // a member cannot decide; the owner can
-    expect(projects.listCommitRequests(project.id, member)).toHaveLength(1);
+    // a member may file more requests while an earlier one is still pending
+    const second = await projects.submitCommitRequest(project.id, member.id, { title: "add app v2" });
+    expect(second.status).toBe("pending");
+    expect(second.id).not.toBe(request.id);
+    expect(projects.listCommitRequests(project.id, member)).toHaveLength(2);
     await expect(
       projects.assertProjectAccess(project.id, dana, "commit.request.decide"),
     ).rejects.toMatchObject({ statusCode: 403 });
 
     const decided = await projects.decideCommitRequest(request.id, "approved", owner);
     expect(decided.status).toBe("approved");
+  });
+
+  it("keeps the commit gate closed on a failing OWASP point", async () => {
+    const { projects, agents } = await makeStack(owaspRunner({ "A03:2021": "fail" }));
+    const owner = await agents.createUser("Owner");
+    await agents.createUser("Dana");
+    const project = await projects.createProject("App", owner.id);
+    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(path.join(member.workspacePath, "app.ts"), "export const x = 1;\n", "utf8");
+
+    const run = await agents.runToCompletion(member.childAgentId, OWASP_ANALYSIS_PROMPT);
+    const security = await projects.recordSecurityAnalysis(project.id, member.id, run);
+    expect(security.canCommit).toBe(false);
+    expect(security.reason).toBe("failed");
+    const failed = security.analysis?.points.find((p) => p.id === "A03:2021");
+    expect(failed?.status).toBe("fail");
+    // the fail carries the flagged code + remediation for the "View & fix" popup
+    expect(failed?.file).toBe("src/app.ts");
+    expect(failed?.evidence).toContain("SELECT * FROM");
+    expect(failed?.remediation).toContain("parameterized");
+    // passing points don't carry those fields
+    expect(security.analysis?.points.find((p) => p.id === "A01:2021")?.evidence).toBeUndefined();
+
     await expect(
-      projects.decideCommitRequest(request.id, "rejected", owner),
+      projects.submitCommitRequest(project.id, member.id, {}),
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("invalidates a passing analysis once the branch changes again", async () => {
+    const { projects, agents } = await makeStack(owaspRunner());
+    const owner = await agents.createUser("Owner");
+    await agents.createUser("Dana");
+    const project = await projects.createProject("App", owner.id);
+    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(path.join(member.workspacePath, "a.ts"), "export const a = 1;\n", "utf8");
+
+    const run = await agents.runToCompletion(member.childAgentId, OWASP_ANALYSIS_PROMPT);
+    expect((await projects.recordSecurityAnalysis(project.id, member.id, run)).canCommit).toBe(true);
+
+    // member keeps coding -> the branch no longer matches the analyzed state
+    await writeFile(path.join(member.workspacePath, "b.ts"), "export const b = 2;\n", "utf8");
+    const stale = await projects.getMemberSecurity(project.id, member.id);
+    expect(stale.canCommit).toBe(false);
+    expect(stale.reason).toBe("branch-changed");
+    await expect(
+      projects.submitCommitRequest(project.id, member.id, {}),
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
@@ -500,5 +601,85 @@ describe("Part 1 — agent access across the project", () => {
     const checkpoint = agents.getCheckpoints(member.childAgentId)[0];
     expect(checkpoint?.changedFiles.created).toEqual(["anywhere/file.ts"]);
     expect(await readFile(path.join(member.workspacePath, "anywhere/file.ts"), "utf8")).toBe("ok\n");
+  });
+
+  it("merges selected sub-branches into the trunk workspace and deletes them", async () => {
+    const { projects, agents } = await makeStack({
+      run: async (request) => {
+        const { writeFile } = await import("node:fs/promises");
+        await writeFile(path.join(request.workspacePath, "feature.ts"), "v1\n");
+        return { output: "done", threadId: "t", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const owner = await agents.createUser("Owner");
+    await agents.createUser("Dana");
+    const project = await projects.createProject("App", owner.id);
+    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+
+    // a run creates a checkpoint on the trunk
+    const { run } = await agents.sendMessage(member.childAgentId, "add feature");
+    await expect.poll(() => agents.getRun(run.id).status).toBe("completed");
+    const checkpoint = agents.getCheckpoints(member.childAgentId)[0]!;
+
+    // fork two branches off it and edit them directly
+    const { writeFile, rm } = await import("node:fs/promises");
+    const b1 = await agents.createBranchFromCheckpoint(member.childAgentId, checkpoint.id, "exp");
+    await writeFile(path.join(b1.workspacePath, "feature.ts"), "v2-from-b1\n"); // modify
+    await writeFile(path.join(b1.workspacePath, "added-by-b1.ts"), "new\n"); // add
+    const b2 = await agents.createBranchFromCheckpoint(member.childAgentId, checkpoint.id, "exp2");
+    await rm(path.join(b2.workspacePath, "feature.ts")); // delete
+
+    expect(agents.getBranches(member.childAgentId)).toHaveLength(2);
+
+    const result = await agents.mergeBranches(member.childAgentId, [b1.id, b2.id]);
+    expect(result.mergedBranchIds.sort()).toEqual([b1.id, b2.id].sort());
+    expect(result.changedFiles).toContain("added-by-b1.ts");
+
+    // b2 was created after b1, so its delete of feature.ts wins
+    await expect(readFile(path.join(member.workspacePath, "feature.ts"), "utf8")).rejects.toThrow();
+    expect(await readFile(path.join(member.workspacePath, "added-by-b1.ts"), "utf8")).toBe("new\n");
+
+    // branches gone from the store and disk
+    expect(agents.getBranches(member.childAgentId)).toHaveLength(0);
+    await expect(readFile(path.join(b1.workspacePath, "added-by-b1.ts"), "utf8")).rejects.toThrow();
+
+    // merging an unknown branch id is a 404
+    await expect(
+      agents.mergeBranches(member.childAgentId, ["00000000-0000-4000-8000-000000000000"]),
+    ).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("still removes a branch whose workspace folder is already gone", async () => {
+    const { projects, agents } = await makeStack({
+      run: async (request) => {
+        const { writeFile } = await import("node:fs/promises");
+        await writeFile(path.join(request.workspacePath, "feature.ts"), "v1\n");
+        return { output: "done", threadId: "t", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const owner = await agents.createUser("Owner");
+    await agents.createUser("Dana");
+    const project = await projects.createProject("App", owner.id);
+    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+
+    const { run } = await agents.sendMessage(member.childAgentId, "add feature");
+    await expect.poll(() => agents.getRun(run.id).status).toBe("completed");
+    const checkpoint = agents.getCheckpoints(member.childAgentId)[0]!;
+    const branch = await agents.createBranchFromCheckpoint(member.childAgentId, checkpoint.id, "stale");
+
+    const trunkBefore = await readFile(path.join(member.workspacePath, "feature.ts"), "utf8");
+    const { rm } = await import("node:fs/promises");
+    await rm(branch.workspacePath, { recursive: true, force: true }); // simulate an old/missing branch dir
+
+    const result = await agents.mergeBranches(member.childAgentId, [branch.id]);
+    expect(result.mergedBranchIds).toEqual([branch.id]);
+    expect(result.changedFiles).toEqual([]); // nothing to fold in
+    expect(agents.getBranches(member.childAgentId)).toHaveLength(0); // record gone
+    // trunk untouched
+    expect(await readFile(path.join(member.workspacePath, "feature.ts"), "utf8")).toBe(trunkBefore);
   });
 });
