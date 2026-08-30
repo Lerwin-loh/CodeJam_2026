@@ -1202,20 +1202,6 @@ export class AgentService {
     return { run, message };
   }
 
-  /**
-   * Send a prompt and wait for the run to reach a terminal state. Used for
-   * server-orchestrated runs (e.g. the pre-commit security analysis) where the
-   * caller needs the final output, not a queued handle.
-   */
-  async runToCompletion(agentId: string, prompt: string): Promise<AgentRun> {
-    const { run } = await this.sendMessage(agentId, prompt);
-    const execution = this.activeExecutions.get(agentId);
-    if (execution) {
-      await execution.catch(() => undefined);
-    }
-    return this.getRun(run.id);
-  }
-
   async systemInfo(): Promise<Record<string, unknown>> {
     return {
       arkConfigured: isArkConfigured(this.config),
