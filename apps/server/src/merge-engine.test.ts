@@ -60,6 +60,29 @@ describe("MergeEngine", () => {
     expect(result.conversation.map((item) => item.prompt)).toEqual(["keep source instructions"]); expect(await readFile(path.join(f.target, "shared.txt"), "utf8")).toBe("source\n");
   });
 
+  it("lets AI resolve different conflicts from different branches", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.target, "first.txt"), "target first\n");
+    await writeFile(path.join(f.source, "first.txt"), "source first\n");
+    await writeFile(path.join(f.target, "second.txt"), "target second\n");
+    await writeFile(path.join(f.source, "second.txt"), "source second\n");
+    const ai: MergeAiResolver = {
+      choosePrompt: async ({ conflictId }) => conflictId.endsWith(":0") ? "target" : "source",
+      chooseWorkspace: async ({ path }) => path === "first.txt" ? "target" : "source",
+    };
+    const engine = new MergeEngine(f.history, ai);
+    const target = side("target", f.target, f.baseSnapshot, "target prompt");
+    const source = side("source", f.source, f.baseSnapshot, "source prompt");
+    const preview = await engine.preview(target, source);
+    const result = await engine.apply(target, source, {
+      workspace: Object.fromEntries(preview.workspaceConflicts.map((conflict) => [conflict.path, "ai"])),
+      context: Object.fromEntries(preview.contextConflicts.map((conflict) => [conflict.id, "ai"])),
+    }, async () => null);
+    expect(await readFile(path.join(f.target, "first.txt"), "utf8")).toBe("target first\n");
+    expect(await readFile(path.join(f.target, "second.txt"), "utf8")).toBe("source second\n");
+    expect(result.conversation.map((item) => item.prompt)).toEqual(["target prompt"]);
+  });
+
   it("detects semantic username/email conflicts and lets isolated AI keep the compatible login", async () => {
     const f = await fixture();
     await writeFile(path.join(f.target, "login.html"), "<form id=login><input name=email><input name=password></form>\n");
@@ -99,6 +122,18 @@ describe("MergeEngine", () => {
     const result = await engine.apply(target, source, { workspace: {}, context: { [preview.contextConflicts[0]!.id]: "source" } }, async () => null);
     expect(result.conversation.map((item) => item.prompt)).toEqual(["make login page", "use username to login", "add dashboard page"]);
     expect(result.conversation.find((item) => item.prompt === "use username to login")?.response).toBe("use username to login response");
+  });
+
+  it("keeps independent same-anchor additions from both sides when prompt intents differ", async () => {
+    const f = await fixture();
+    const engine = new MergeEngine(f.history);
+    const base = commit("base", "create a landing page", "base");
+    const target = { ...side("target", f.target, f.baseSnapshot, ""), prompts: ["create a landing page", "add navigation bar"], conversation: [base, commit("nav", "add navigation bar", "target")], baseConversation: [base] };
+    const source = { ...side("source", f.source, f.baseSnapshot, ""), prompts: ["create a landing page", "add hero section"], conversation: [base, commit("hero", "add hero section", "source")], baseConversation: [base] };
+    const preview = await engine.preview(target, source);
+    expect(preview.contextConflicts).toHaveLength(0);
+    const result = await engine.apply(target, source, { workspace: {}, context: {} }, async () => null);
+    expect(result.conversation.map((item) => item.prompt)).toEqual(["create a landing page", "add navigation bar", "add hero section"]);
   });
 
   it("supports target choice and delete-versus-modify conversation conflicts", async () => {

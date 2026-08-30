@@ -84,6 +84,7 @@ export function createIsolatedMergeAiResolver(runner: AgentRunner): MergeAiResol
           prompt: [
             "You are an isolated merge resolver. Do not edit files. Return JSON with exactly this shape: {\"choice\":\"TARGET\" or \"SOURCE\",\"explanation\":\"one concise sentence\"}.",
             "Choose the prompt that best satisfies the complete combined acceptance criteria and workspace outcomes.",
+            "Evaluate this conflict independently. The final merge may keep some prompts from TARGET and other prompts from SOURCE; never choose a side merely to keep one branch intact.",
             JSON.stringify(input.preview),
             "Conflict " + input.conflictId,
             "TARGET COMMIT:\n" + JSON.stringify(input.target),
@@ -106,6 +107,7 @@ export function createIsolatedMergeAiResolver(runner: AgentRunner): MergeAiResol
             "You are an isolated merge resolver. Do not edit files. Return JSON with exactly this shape: {\"choice\":\"TARGET\" or \"SOURCE\",\"explanation\":\"one concise sentence\"}.",
             "Choose the implementation that best satisfies the complete acceptance criteria and preserves downstream dependencies.",
             "Prefer an identity implementation that supports verification, recovery, and existing integrations over one that removes those capabilities.",
+            "Evaluate this file independently. The final merge may keep some files from TARGET and other files from SOURCE; never choose a side merely to keep one branch intact.",
             JSON.stringify(input.preview),
             "Workspace conflict: " + input.path,
             "TARGET IMPLEMENTATION:\n" + (input.targetContent ?? "<deleted>"),
@@ -473,11 +475,26 @@ function buildConversationMerge(
   for (const anchor of [...anchors]) {
     const targetCommits = targetAdditions.get(anchor) ?? [];
     const sourceCommits = sourceAdditions.get(anchor) ?? [];
-    const pairCount = Math.min(targetCommits.length, sourceCommits.length);
-    for (let index = 0; index < pairCount; index += 1) {
+    if (targetCommits.length === 0 || sourceCommits.length === 0) continue;
+
+    const pairedCount = Math.min(targetCommits.length, sourceCommits.length);
+    for (let index = 0; index < pairedCount; index += 1) {
       const targetCommit = targetCommits[index]!;
       const sourceCommit = sourceCommits[index]!;
-      if (!sameConversationCommit(targetCommit, sourceCommit)) addConflict(targetCommit, sourceCommit);
+      if (!sameConversationCommit(targetCommit, sourceCommit)) {
+        const sameTurnIntent = isSameConversationIntent(targetCommit, sourceCommit);
+        if (sameTurnIntent) addConflict(targetCommit, sourceCommit);
+      }
+    }
+
+    if (targetCommits.length > pairedCount && sourceCommits.length > pairedCount) {
+      for (let index = pairedCount; index < targetCommits.length; index += 1) {
+        const targetCommit = targetCommits[index]!;
+        const sourceCommit = sourceCommits[index - pairedCount] ?? sourceCommits[sourceCommits.length - 1]!;
+        if (isSameConversationIntent(targetCommit, sourceCommit)) {
+          addConflict(targetCommit, sourceCommit);
+        }
+      }
     }
   }
 
@@ -538,6 +555,17 @@ function buildConversationMerge(
 
 function sameConversationCommit(left: ConversationCommit, right: ConversationCommit): boolean {
   return left.prompt === right.prompt && left.response === right.response;
+}
+
+function isSameConversationIntent(left: ConversationCommit, right: ConversationCommit): boolean {
+  const leftPrompt = (left.prompt ?? "").trim().toLowerCase();
+  const rightPrompt = (right.prompt ?? "").trim().toLowerCase();
+  if (!leftPrompt || !rightPrompt) return false;
+  if (leftPrompt === rightPrompt) return true;
+  const leftWords = new Set(leftPrompt.split(/\W+/).filter(Boolean));
+  const rightWords = new Set(rightPrompt.split(/\W+/).filter(Boolean));
+  const overlap = [...leftWords].filter((word) => word.length > 2 && rightWords.has(word));
+  return overlap.length > 0 && overlap.length >= Math.min(leftWords.size, rightWords.size) * 0.5;
 }
 
 function hasLoginIdentityConflict(targetPrompt: string, sourcePrompt: string): boolean {
