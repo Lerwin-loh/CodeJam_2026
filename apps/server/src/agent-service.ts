@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rename } from "node:fs/promises";
+import { cp, mkdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
@@ -72,6 +72,7 @@ const ARCHIVE_FROZEN_AGENT_ACTIONS = new Set([
   "agent.stop",
   "agent.run",
   "branch.create",
+  "branch.merge",
   "checkpoint.create",
 ]);
 
@@ -641,6 +642,107 @@ export class AgentService {
     return branch;
   }
 
+  /**
+   * Fold each selected branch's net changes (vs the checkpoint it forked from)
+   * into the agent's trunk workspace, then remove the branches. File-level: the
+   * branch's created/modified files overwrite the trunk, its deletions are
+   * applied. Later branches in the list win on overlap.
+   */
+  async mergeBranches(
+    agentId: string,
+    branchIds: string[],
+  ): Promise<{ mergedBranchIds: string[]; changedFiles: string[] }> {
+    const agent = this.getAgent(agentId);
+    if (agent.status === "busy") {
+      throw new HttpError(409, "Stop the active run before merging branches");
+    }
+
+    const database = this.store.snapshot();
+    const wanted = [...new Set(branchIds)];
+    const branches = wanted.map((branchId) => {
+      const branch = database.branches.find(
+        (item) => item.id === branchId && item.agentId === agentId,
+      );
+      if (!branch) throw new HttpError(404, "Branch not found");
+      if (branch.status === "busy") {
+        throw new HttpError(409, "Branch \"" + branch.name + "\" is running — stop it first");
+      }
+      return branch;
+    });
+    if (branches.length === 0) throw new HttpError(400, "Select at least one branch to merge");
+    // Oldest first so a newer branch's edits land last.
+    branches.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+
+    const changed = new Set<string>();
+    for (const branch of branches) {
+      // A branch whose workspace folder is gone (older path scheme, manual
+      // delete) has no changes to fold in — just drop the stale record below.
+      let branchManifest: WorkspaceManifest | null;
+      try {
+        branchManifest = await this.history.manifest(branch.workspacePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          branchManifest = null;
+        } else {
+          throw error;
+        }
+      }
+      if (!branchManifest) continue;
+
+      const baseCheckpoint = branch.parentCheckpointId
+        ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)
+        : null;
+      const baseSnapshot = baseCheckpoint
+        ? database.snapshots.find((item) => item.id === baseCheckpoint.snapshotId)
+        : null;
+      const baseManifest: WorkspaceManifest = baseSnapshot?.manifest ?? {
+        workspaceHash: "",
+        files: [],
+        createdAt: now(),
+      };
+      const diff = this.history.diff(baseManifest, branchManifest);
+
+      for (const relPath of [...diff.created, ...diff.modified]) {
+        if (relPath === "AGENTS.md") continue; // platform-managed
+        const from = path.join(branch.workspacePath, relPath);
+        const to = path.join(agent.workspacePath, relPath);
+        await mkdir(path.dirname(to), { recursive: true });
+        await cp(from, to, { force: true, recursive: false, preserveTimestamps: true });
+        changed.add(relPath);
+      }
+      for (const relPath of diff.deleted) {
+        if (relPath === "AGENTS.md") continue;
+        await rm(path.join(agent.workspacePath, relPath), { force: true });
+        changed.add(relPath);
+      }
+    }
+
+    for (const branch of branches) {
+      await this.workspaces.archiveBranch(branch.id, branch.workspacePath);
+    }
+
+    const mergedIds = new Set(branches.map((branch) => branch.id));
+    await this.store.mutate((next) => {
+      next.branches = next.branches.filter((item) => !mergedIds.has(item.id));
+      next.checkpoints = next.checkpoints.filter(
+        (item) => item.branchId === null || !mergedIds.has(item.branchId),
+      );
+      next.runs = next.runs.filter(
+        (item) => item.branchId === null || !mergedIds.has(item.branchId),
+      );
+      next.messages = next.messages.filter(
+        (item) => item.branchId === null || !mergedIds.has(item.branchId),
+      );
+      next.traces = next.traces.filter(
+        (item) => item.branchId === null || !mergedIds.has(item.branchId),
+      );
+      const storedAgent = next.agents.find((item) => item.id === agentId);
+      if (storedAgent) storedAgent.updatedAt = now();
+    });
+
+    return { mergedBranchIds: [...mergedIds], changedFiles: [...changed].sort() };
+  }
+
   getCheckpoints(agentId: string, branchId: string | null = null): AgentCheckpoint[] {
     this.getAgent(agentId);
     const database = this.store.snapshot();
@@ -956,6 +1058,20 @@ export class AgentService {
       })
       .catch(() => undefined);
     return { run, message };
+  }
+
+  /**
+   * Send a prompt and wait for the run to reach a terminal state. Used for
+   * server-orchestrated runs (e.g. the pre-commit security analysis) where the
+   * caller needs the final output, not a queued handle.
+   */
+  async runToCompletion(agentId: string, prompt: string): Promise<AgentRun> {
+    const { run } = await this.sendMessage(agentId, prompt);
+    const execution = this.activeExecutions.get(agentId);
+    if (execution) {
+      await execution.catch(() => undefined);
+    }
+    return this.getRun(run.id);
   }
 
   async systemInfo(): Promise<Record<string, unknown>> {

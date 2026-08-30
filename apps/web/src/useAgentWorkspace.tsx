@@ -289,26 +289,35 @@ export function useAgentWorkspace(
     setBpExpanded("history");
   }, []);
 
+  const sendText = useCallback(
+    async (rawText: string) => {
+      const text = rawText.trim();
+      if (!agentId || !canManage || !text) return;
+      const branchAtSend = activeBranchId;
+      setError(null);
+      setMessages((current) => [...current, optimistic(agentId, text)]);
+      try {
+        const { run, message } = await api.sendMessage(agentId, text, activeBranchId);
+        if (agentIdRef.current === agentId && activeBranchIdRef.current === branchAtSend) {
+          setMessages((current) => [...current.filter((item) => !item.id.startsWith("pending-")), message]);
+          setActiveRun(run);
+          streamRunTrace(run.id);
+        }
+        await pollRun(run.id, agentId, branchAtSend);
+      } catch (reason) {
+        fail(reason);
+        if (agentIdRef.current === agentId) setActiveRun(null);
+      }
+    },
+    [agentId, canManage, activeBranchId, streamRunTrace, pollRun, fail],
+  );
+
   const send = useCallback(async () => {
-    if (!agentId || !canManage || !prompt.trim()) return;
-    const branchAtSend = activeBranchId;
+    if (!prompt.trim()) return;
     const text = prompt.trim();
     setPrompt("");
-    setError(null);
-    setMessages((current) => [...current, optimistic(agentId, text)]);
-    try {
-      const { run, message } = await api.sendMessage(agentId, text, activeBranchId);
-      if (agentIdRef.current === agentId && activeBranchIdRef.current === branchAtSend) {
-        setMessages((current) => [...current.filter((item) => !item.id.startsWith("pending-")), message]);
-        setActiveRun(run);
-        streamRunTrace(run.id);
-      }
-      await pollRun(run.id, agentId, branchAtSend);
-    } catch (reason) {
-      fail(reason);
-      if (agentIdRef.current === agentId) setActiveRun(null);
-    }
-  }, [agentId, canManage, prompt, activeBranchId, streamRunTrace, pollRun, fail]);
+    await sendText(text);
+  }, [prompt, sendText]);
 
   const saveCheckpoint = useCallback(async () => {
     if (!agentId || !checkpointLabel.trim() || savingCheckpoint) return;
@@ -399,6 +408,25 @@ export function useAgentWorkspace(
         setBpExpanded("history");
       } catch (reason) {
         fail(reason);
+      }
+    },
+    [agentId, fail],
+  );
+
+  const mergeBranches = useCallback(
+    async (branchIds: string[]): Promise<{ mergedBranchIds: string[]; changedFiles: string[] }> => {
+      const empty = { mergedBranchIds: [] as string[], changedFiles: [] as string[] };
+      if (!agentId || branchIds.length === 0) return empty;
+      setError(null);
+      try {
+        const result = await api.mergeBranches(agentId, branchIds);
+        const merged = new Set(result.mergedBranchIds);
+        setBranches((current) => current.filter((item) => !merged.has(item.id)));
+        setActiveBranchId((current) => (current && merged.has(current) ? null : current));
+        return result;
+      } catch (reason) {
+        fail(reason);
+        return empty;
       }
     },
     [agentId, fail],
@@ -527,7 +555,9 @@ export function useAgentWorkspace(
     historyItems,
     branchGraphRows,
     selectBranch,
+    mergeBranches,
     send,
+    sendText,
     saveCheckpoint,
     openCheckpointAction,
     openRunDetails,

@@ -7,12 +7,15 @@ import {
   WorkspaceOverlays,
 } from "./useAgentWorkspace";
 import type {
+  AgentBranch,
   CommitRequest,
+  MemberSecurityView,
   ParentAgentView,
   Project,
   ProjectDetail,
   ProjectMemberView,
-  SecurityCheckResult,
+  SecurityAnalysis,
+  SecurityAnalysisPoint,
   User,
 } from "./types";
 
@@ -26,6 +29,59 @@ function formatTime(value: string): string {
 
 function changedCount(cr: CommitRequest): number {
   return cr.changedFiles.created.length + cr.changedFiles.modified.length + cr.changedFiles.deleted.length;
+}
+
+const SECURITY_GATE_TEXT: Record<MemberSecurityView["reason"], string> = {
+  ok: "",
+  "never-run": "run the security analysis first",
+  failed: "the last OWASP analysis found an issue — fix it and run again",
+  incomplete: "the last analysis didn't cover all 10 OWASP categories — run it again",
+  "branch-changed": "your branch changed since the last analysis — run it again",
+};
+
+function owaspFailCount(a: SecurityAnalysis | null): number {
+  return a ? a.points.filter((p) => p.status === "fail").length : 0;
+}
+
+function owaspItemBlock(p: SecurityAnalysisPoint, evidenceCap: number): string {
+  const evidence =
+    p.evidence && p.evidence.length > evidenceCap
+      ? p.evidence.slice(0, evidenceCap) + "\n… (truncated)"
+      : p.evidence;
+  return [
+    `OWASP ${p.id} (${p.name})`,
+    p.detail ? `  Problem: ${p.detail}` : "",
+    p.file ? `  File: ${p.file}` : "",
+    evidence ? "  Flagged code:\n```\n" + evidence + "\n```" : "",
+    p.remediation ? `  Recommended fix: ${p.remediation}` : "",
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+}
+
+/** The message sent to the member's child agent when they press "Fix" on one row. */
+function buildFixPrompt(p: SecurityAnalysisPoint): string {
+  return [
+    `Fix this OWASP ${p.id} (${p.name}) issue in my branch.`,
+    "",
+    owaspItemBlock(p, 4000),
+    "",
+    "Apply the fix directly to the file(s). Keep the change minimal and don't touch",
+    "unrelated code. When done, briefly say what you changed.",
+  ].join("\n");
+}
+
+/** The message sent when the member presses "Fix all". */
+function buildFixAllPrompt(points: SecurityAnalysisPoint[]): string {
+  return [
+    `Fix all ${points.length} OWASP issues the security analysis found in my branch.`,
+    "Work through them one file at a time and apply each fix directly.",
+    "Keep every change minimal and scoped to its issue.",
+    "",
+    ...points.map((p, index) => `${index + 1}. ` + owaspItemBlock(p, 1000).replace(/\n/g, "\n   ")),
+    "",
+    "When done, summarise what you changed for each item.",
+  ].join("\n");
 }
 
 type ProjectTab = "parent" | "mine" | "commits" | "team";
@@ -45,13 +101,19 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
   const [busy, setBusy] = useState(false);
 
   const [showCreate, setShowCreate] = useState(false);
+  const [fixPoint, setFixPoint] = useState<SecurityAnalysisPoint | null>(null);
+  const [showMerge, setShowMerge] = useState(false);
+  const [mergeSel, setMergeSel] = useState<Set<string>>(new Set());
+  const [merging, setMerging] = useState(false);
+  const [mergeNote, setMergeNote] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
 
   const [parent, setParent] = useState<ParentAgentView | null>(null);
   const [child, setChild] = useState<ParentAgentView | null>(null);
 
   const [commitRequests, setCommitRequests] = useState<CommitRequest[]>([]);
-  const [securityResult, setSecurityResult] = useState<SecurityCheckResult | null>(null);
+  const [security, setSecurity] = useState<MemberSecurityView | null>(null);
+  const [securityExpanded, setSecurityExpanded] = useState(false);
   const [securityRunning, setSecurityRunning] = useState(false);
   const [submittingCommit, setSubmittingCommit] = useState(false);
 
@@ -93,7 +155,11 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
   const loadChild = useCallback(async (projectId: string) => {
     try {
       const view = await api.projects.myAgent(projectId);
-      if (mounted.current) setChild(view);
+      if (mounted.current) {
+        setChild(view);
+        setSecurity(view.security ?? null);
+        setSecurityExpanded(false);
+      }
     } catch (reason) {
       fail(reason);
     }
@@ -113,7 +179,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
       const next = await api.projects.get(id);
       if (!mounted.current) return;
       setDetail(next);
-      setSecurityResult(next.myMembership?.lastSecurityCheck ?? null);
+      setSecurity(null);
       const parentView = await api.projects.parentAgent(id).catch(() => null);
       if (mounted.current) setParent(parentView);
       await refreshCommitRequests(id);
@@ -168,6 +234,14 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     activeAgent?.seed ?? null,
     handleAgentDeleted,
   );
+
+  // A child-agent turn (coding or the analysis itself) can change the branch and
+  // therefore the commit gate — re-pull the security state whenever a run settles.
+  useEffect(() => {
+    if (tab === "mine" && selectedId && childId && ws.status === "ready" && !securityRunning) {
+      void loadChild(selectedId);
+    }
+  }, [ws.status, tab, selectedId, childId, securityRunning, loadChild]);
 
   const createProject = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -275,17 +349,64 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     }
   };
 
-  const startSecurityCheck = async () => {
+  const runSecurityAnalysis = async () => {
     if (!selectedId || !myMember) return;
     setSecurityRunning(true);
     setError(null);
+    setMergeNote(null);
     try {
-      const { result } = await api.projects.securityCheck(selectedId, myMember.id);
-      if (mounted.current) setSecurityResult(result);
+      const { security: next } = await api.projects.securityAnalysis(selectedId, myMember.id);
+      if (mounted.current) setSecurity(next);
+      // the analysis is a child-agent run — refresh its transcript
+      await loadChild(selectedId);
     } catch (reason) {
       fail(reason);
     } finally {
       if (mounted.current) setSecurityRunning(false);
+    }
+  };
+
+  const fixWithAgent = (p: SecurityAnalysisPoint) => {
+    setFixPoint(null);
+    setTab("mine");
+    void ws.sendText(buildFixPrompt(p));
+  };
+
+  const fixAllWithAgent = (points: SecurityAnalysisPoint[]) => {
+    if (points.length === 0) return;
+    setFixPoint(null);
+    setTab("mine");
+    void ws.sendText(buildFixAllPrompt(points));
+  };
+
+  const openMerge = () => {
+    setMergeSel(new Set());
+    setShowMerge(true);
+  };
+
+  const doMerge = async () => {
+    if (mergeSel.size === 0) return;
+    setMerging(true);
+    setError(null);
+    setMergeNote(null);
+    try {
+      const result = await ws.mergeBranches([...mergeSel]);
+      setShowMerge(false);
+      setMergeSel(new Set());
+      if (selectedId) await loadChild(selectedId);
+      if (mounted.current && result.mergedBranchIds.length > 0) {
+        const n = result.mergedBranchIds.length;
+        const f = result.changedFiles.length;
+        setMergeNote(
+          "Merged " + n + " sub-branch" + (n === 1 ? "" : "es") + " and deleted them" +
+            (f > 0
+              ? " — " + f + " file" + (f === 1 ? "" : "s") +
+                " changed, re-run the security analysis before committing."
+              : " (no file changes)."),
+        );
+      }
+    } finally {
+      if (mounted.current) setMerging(false);
     }
   };
 
@@ -491,52 +612,134 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                 <div className="mine-panel">
                   {isArchived && (
                     <p className="muted-note">
-                      This project is archived. Your agent is frozen — security checks and commit
-                      requests are unavailable until the owner unarchives it.
+                      This project is archived. Your agent is frozen — the security analysis and
+                      commit requests are unavailable until the owner unarchives it.
                     </p>
                   )}
                   <div className="mine-toolbar">
                     <button
                       className="button button-ghost"
-                      onClick={() => void startSecurityCheck()}
-                      disabled={securityRunning || busy || isArchived}
+                      onClick={() => void runSecurityAnalysis()}
+                      disabled={securityRunning || busy || isArchived || ws.status === "busy"}
+                      title={
+                        ws.status === "busy"
+                          ? "Wait for the current agent run to finish"
+                          : undefined
+                      }
                     >
-                      {securityRunning ? <Spinner /> : "Start security checks"}
+                      {securityRunning ? <Spinner /> : "Run security analysis"}
                     </button>
                     <button
                       className="button button-primary"
                       onClick={() => void submitCommitRequest()}
-                      disabled={submittingCommit || busy || isArchived}
+                      disabled={submittingCommit || busy || isArchived || !security?.canCommit}
+                      title={security?.canCommit ? undefined : SECURITY_GATE_TEXT[security?.reason ?? "never-run"]}
                     >
                       {submittingCommit ? <Spinner /> : "Submit commit request"}
                     </button>
-                  </div>
-
-                  {securityResult && (
-                    <div
-                      className={
-                        "security-result " + (securityResult.findings.length === 0 ? "is-clean" : "has-findings")
+                    <button
+                      className="button button-ghost"
+                      onClick={openMerge}
+                      disabled={busy || isArchived || ws.status === "busy" || ws.branches.length === 0}
+                      title={
+                        ws.branches.length === 0
+                          ? "You have no sub-branches to merge"
+                          : ws.status === "busy"
+                            ? "Wait for the current agent run to finish"
+                            : undefined
                       }
                     >
-                      <strong>
-                        {securityResult.findings.length === 0
-                          ? "Security check passed"
-                          : securityResult.findings.length +
-                            " potential issue" +
-                            (securityResult.findings.length === 1 ? "" : "s")}
-                      </strong>
-                      <span>
-                        {securityResult.filesScanned} files scanned · {formatTime(securityResult.ranAt)}
-                      </span>
-                      {securityResult.findings.map((f, index) => (
-                        <div className="security-finding" key={index}>
-                          <code>{f.file}:{f.line}</code>
-                          <span className="finding-rule">{f.rule}</span>
-                          <pre>{f.excerpt}</pre>
-                        </div>
-                      ))}
-                    </div>
+                      Merge sub-branches{ws.branches.length ? " (" + ws.branches.length + ")" : ""}
+                    </button>
+                  </div>
+
+                  {mergeNote && <p className="muted-note">{mergeNote}</p>}
+
+                  {securityRunning && (
+                    <p className="muted-note">
+                      Your child agent is reviewing the branch against the OWASP Top 10… this runs a
+                      full agent turn and can take a minute.
+                    </p>
                   )}
+
+                  {security && !securityRunning && (() => {
+                    const points = security.analysis?.points ?? [];
+                    const fails = points.filter((p) => p.status === "fail");
+                    return (
+                      <div
+                        className={
+                          "security-result " + (security.canCommit ? "is-clean" : "has-findings")
+                        }
+                      >
+                        <div className="security-result-head">
+                          <div className="security-result-copy">
+                            <strong>
+                              {security.canCommit
+                                ? "OWASP analysis passed — commit unlocked"
+                                : "Commit blocked — " + SECURITY_GATE_TEXT[security.reason]}
+                            </strong>
+                            {security.analysis && (
+                              <span>
+                                {security.analysis.summary} · {formatTime(security.analysis.ranAt)}
+                                {security.analysis.modifiedWorkspace
+                                  ? " · ⚠ the analysis run changed files"
+                                  : ""}
+                              </span>
+                            )}
+                          </div>
+                          <div className="security-result-actions">
+                            {fails.length > 0 && (
+                              <button
+                                className="button button-primary"
+                                onClick={() => fixAllWithAgent(fails)}
+                                disabled={isArchived || ws.status === "busy"}
+                                title={
+                                  isArchived
+                                    ? "This project is archived"
+                                    : ws.status === "busy"
+                                      ? "Wait for the current agent run to finish"
+                                      : undefined
+                                }
+                              >
+                                Fix all {fails.length}
+                              </button>
+                            )}
+                            {points.length > 0 && (
+                              <button
+                                className="button button-ghost"
+                                onClick={() => setSecurityExpanded((v) => !v)}
+                                aria-expanded={securityExpanded}
+                              >
+                                {securityExpanded ? "Hide details" : "Show details"}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {securityExpanded && points.length > 0 && (
+                          <ul className="owasp-list">
+                            {points.map((p) => (
+                              <li key={p.id} className={"owasp-row owasp-" + p.status}>
+                                <span className="owasp-status">{p.status}</span>
+                                <span className="owasp-name">
+                                  <code>{p.id}</code> {p.name}
+                                </span>
+                                {p.detail && <span className="owasp-detail">{p.detail}</span>}
+                                {p.status === "fail" && (
+                                  <button
+                                    className="button button-ghost owasp-fix-btn"
+                                    onClick={() => setFixPoint(p)}
+                                  >
+                                    View &amp; fix
+                                  </button>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {activeAgent && activeAgent.id === childId && (
                     <div className="project-agent-layout">
@@ -589,18 +792,22 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                       </div>
 
                       <div className="commit-security">
-                        {cr.securityCheck ? (
-                          cr.securityCheck.findings.length === 0 ? (
-                            <span className="sec-ok">Security check passed ({cr.securityCheck.filesScanned} files)</span>
+                        {cr.securityAnalysis ? (
+                          cr.securityAnalysis.passed ? (
+                            <span className="sec-ok">
+                              OWASP Top 10 analysis passed · {formatTime(cr.securityAnalysis.ranAt)}
+                            </span>
                           ) : (
                             <span className="sec-bad">
-                              {cr.securityCheck.findings.length} security finding
-                              {cr.securityCheck.findings.length === 1 ? "" : "s"} —{" "}
-                              {cr.securityCheck.findings.map((f) => f.rule).join(", ")}
+                              OWASP analysis: {owaspFailCount(cr.securityAnalysis)} failed —{" "}
+                              {cr.securityAnalysis.points
+                                .filter((p) => p.status === "fail")
+                                .map((p) => p.id)
+                                .join(", ")}
                             </span>
                           )
                         ) : (
-                          <span className="sec-none">No security check was run before submitting.</span>
+                          <span className="sec-none">No security analysis attached.</span>
                         )}
                       </div>
 
@@ -705,6 +912,150 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
           </form>
         </div>
       )}
+
+      {fixPoint && (
+        <div className="modal-backdrop" onMouseDown={() => setFixPoint(null)}>
+          <div className="modal owasp-fix-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">OWASP {fixPoint.id} · flagged</span>
+                <h2>{fixPoint.name}</h2>
+                {fixPoint.detail && <p>{fixPoint.detail}</p>}
+              </div>
+              <button type="button" onClick={() => setFixPoint(null)}>
+                ×
+              </button>
+            </div>
+
+            {fixPoint.file && (
+              <p className="owasp-fix-file">
+                File: <code>{fixPoint.file}</code>
+              </p>
+            )}
+
+            <span className="eyebrow">Flagged code</span>
+            <pre className="owasp-fix-code">
+              {fixPoint.evidence || "The analysis did not capture a snippet — the agent will locate it."}
+            </pre>
+
+            <span className="eyebrow">Suggested fix</span>
+            <p className="owasp-fix-remediation">
+              {fixPoint.remediation || "No specific remediation was provided; the agent will propose one."}
+            </p>
+
+            <div className="modal-footer">
+              <button type="button" className="button button-ghost" onClick={() => setFixPoint(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button button-primary"
+                onClick={() => fixWithAgent(fixPoint)}
+                disabled={isArchived || ws.status === "busy"}
+                title={
+                  isArchived
+                    ? "This project is archived"
+                    : ws.status === "busy"
+                      ? "Wait for the current agent run to finish"
+                      : undefined
+                }
+              >
+                Fix
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMerge && (
+        <div className="modal-backdrop" onMouseDown={() => !merging && setShowMerge(false)}>
+          <div className="modal merge-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">Your agent · sub-branches</span>
+                <h2>Merge sub-branches</h2>
+                <p>
+                  Picked branches are folded into your workspace, then deleted. Overlapping
+                  files: the newer branch wins. Re-run the security analysis afterwards —
+                  anything not in your workspace at commit time is not committed.
+                </p>
+              </div>
+              <button type="button" onClick={() => !merging && setShowMerge(false)}>
+                ×
+              </button>
+            </div>
+
+            {ws.branches.length === 0 ? (
+              <p className="muted-note">No sub-branches.</p>
+            ) : (
+              <>
+                <div className="merge-select-all">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={mergeSel.size === ws.branches.length}
+                      onChange={(e) =>
+                        setMergeSel(
+                          e.target.checked
+                            ? new Set(ws.branches.map((b) => b.id))
+                            : new Set(),
+                        )
+                      }
+                    />
+                    Select all ({ws.branches.length})
+                  </label>
+                </div>
+                <ul className="merge-branch-list">
+                  {[...ws.branches]
+                    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+                    .map((b: AgentBranch) => (
+                      <li key={b.id}>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={mergeSel.has(b.id)}
+                            onChange={(e) =>
+                              setMergeSel((cur) => {
+                                const next = new Set(cur);
+                                if (e.target.checked) next.add(b.id);
+                                else next.delete(b.id);
+                                return next;
+                              })
+                            }
+                          />
+                          <span className="merge-branch-name">{b.name}</span>
+                          <span className="merge-branch-meta">
+                            {b.status === "busy" ? "running · " : ""}
+                            {formatTime(b.createdAt)}
+                          </span>
+                        </label>
+                      </li>
+                    ))}
+                </ul>
+              </>
+            )}
+
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="button button-ghost"
+                onClick={() => setShowMerge(false)}
+                disabled={merging}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button button-primary"
+                onClick={() => void doMerge()}
+                disabled={merging || mergeSel.size === 0}
+              >
+                {merging ? <Spinner /> : "Merge " + mergeSel.size + " & delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -721,7 +1072,7 @@ function MemberCard({
   onRemove: () => void;
 }) {
   const [role, setRole] = useState(member.role);
-  const check = member.lastSecurityCheck;
+  const analysis = member.securityAnalysis;
   return (
     <article className="member-row">
       <div className="member-avatar">{member.name.slice(0, 1).toUpperCase()}</div>
@@ -752,10 +1103,10 @@ function MemberCard({
             Remove
           </button>
         </div>
-        {check && (
+        {analysis && (
           <span className="member-sec">
-            Last security check: {check.findings.length === 0 ? "clean" : check.findings.length + " findings"} ·{" "}
-            {formatTime(check.ranAt)}
+            OWASP analysis: {analysis.passed ? "passed" : owaspFailCount(analysis) + " failed"} ·{" "}
+            {formatTime(analysis.ranAt)}
           </span>
         )}
       </div>

@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import type { AgentService } from "./agent-service.js";
-import type { ProjectService } from "./project-service.js";
+import { OWASP_ANALYSIS_PROMPT, type ProjectService } from "./project-service.js";
 import type { User } from "./types.js";
 
 declare module "fastify" {
@@ -37,6 +37,9 @@ const branchBody = z.object({
 const branchMessageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
   branchId: z.string().uuid().nullable().optional(),
+});
+const mergeBranchesBody = z.object({
+  branchIds: z.array(z.string().uuid()).min(1).max(50),
 });
 const branchQuery = z.object({ branchId: z.string().uuid().optional() });
 const createCheckpointBody = z.object({
@@ -246,6 +249,13 @@ export async function createApp(
     const body = branchBody.parse(request.body);
     const branch = await service.createBranchFromCheckpoint(id, body.checkpointId, body.name);
     return reply.code(201).send({ branch });
+  });
+
+  app.post("/api/agents/:id/branches/merge", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "branch.merge");
+    const { branchIds } = mergeBranchesBody.parse(request.body);
+    return service.mergeBranches(id, branchIds);
   });
 
   app.post("/api/agents/:id/checkpoints", async (request, reply) => {
@@ -494,14 +504,34 @@ export async function createApp(
       messages: service.getMessages(agent.id),
       trace: service.getTrace(agent.id),
       checkpoints: service.getCheckpoints(agent.id),
+      security: await projects.getMemberSecurity(id, member.id),
     };
   });
 
-  app.post("/api/projects/:id/members/:memberId/security-check", async (request) => {
+  // Part 1B: run the member's child agent as an OWASP Top 10 reviewer of their
+  // branch. A passing result (bound to the branch's current state) unlocks commit.
+  app.post("/api/projects/:id/members/:memberId/security-analysis", async (request) => {
     const { id, memberId } = memberParams.parse(request.params);
-    await projects.assertProjectAccess(id, request.user, "security.check", { memberId });
-    const result = await projects.runSecurityCheck(id, memberId);
-    return { result };
+    const { member } = await projects.assertProjectAccess(id, request.user, "security.check", {
+      memberId,
+    });
+    const target =
+      member && member.id === memberId
+        ? member
+        : projects.getMemberById(id, memberId);
+    // The analysis is a full agent run — make sure the child agent is running.
+    const childAgent = service.getAgent(target.childAgentId);
+    if (childAgent.status === "stopped") {
+      await service.startAgent(target.childAgentId);
+    } else if (childAgent.status === "busy") {
+      throw new HttpError(
+        409,
+        "Your agent is currently running. Wait for it to finish, then run the analysis.",
+      );
+    }
+    const run = await service.runToCompletion(target.childAgentId, OWASP_ANALYSIS_PROMPT);
+    const security = await projects.recordSecurityAnalysis(id, memberId, run);
+    return { security };
   });
 
   app.post("/api/projects/:id/members/:memberId/commit-request", async (request, reply) => {
