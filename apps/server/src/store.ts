@@ -4,7 +4,12 @@ import type { Database } from "./types.js";
 
 const emptyDatabase = (): Database => ({
   version: 1,
+  users: [],
+  audit: [],
   agents: [],
+  projects: [],
+  projectMembers: [],
+  commitRequests: [],
   branches: [],
   messages: [],
   runs: [],
@@ -29,7 +34,14 @@ export class JsonStore {
       if (parsed.version !== 1 || !Array.isArray(parsed.agents)) {
         throw new Error("Unsupported database format");
       }
+      parsed.users ??= [];
+      parsed.audit ??= [];
+      parsed.projects ??= [];
+      parsed.projectMembers ??= [];
+      parsed.commitRequests ??= [];
       parsed.traces ??= [];
+      for (const member of parsed.projectMembers) member.lastSecurityCheck ??= null;
+      for (const project of parsed.projects) project.archivedAt ??= null;
       parsed.branches ??= [];
       parsed.snapshots ??= [];
       parsed.contexts ??= [];
@@ -42,8 +54,21 @@ export class JsonStore {
         run.checkpointId ??= null;
       }
       for (const message of parsed.messages) message.branchId ??= null;
-      for (const checkpoint of parsed.checkpoints) checkpoint.branchId ??= null;
+      for (const context of parsed.contexts) {
+        context.sessionRolloutPath ??= null;
+        context.sessionLineOffset ??= null;
+      }
+      for (const checkpoint of parsed.checkpoints) {
+        checkpoint.branchId ??= null;
+        checkpoint.label ??= null;
+      }
       for (const event of parsed.traces) event.branchId ??= null;
+      for (const agent of parsed.agents) {
+        agent.ownerId ??= "";
+        agent.projectId ??= null;
+        agent.kind ??= "standalone";
+        agent.memberId ??= null;
+      }
       this.data = parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {

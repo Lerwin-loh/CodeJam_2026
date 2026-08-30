@@ -8,7 +8,9 @@ import type {
   WorkspaceSnapshot,
 } from "./types.js";
 
-const ignoredNames = new Set([".codex", ".git", "node_modules", "dist"]);
+// Branch workspaces live beside their source workspace, but are platform state:
+// never include them recursively in source manifests, snapshots, or restores.
+const ignoredNames = new Set([".codex", ".git", "node_modules", "dist", "branches"]);
 
 export class WorkspaceHistory {
   constructor(private readonly root: string) {}
@@ -111,6 +113,34 @@ export class WorkspaceHistory {
       await cp(source, target, { force: true, recursive: false, preserveTimestamps: true });
       await chmod(target, file.mode);
     }
+  }
+
+  async archiveSnapshots(
+    projectId: string,
+    snapshots: WorkspaceSnapshot[],
+  ): Promise<number> {
+    if (snapshots.length === 0) return 0;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const archiveRoot = path.join(
+      this.root,
+      ".deleted",
+      projectId + "-" + timestamp,
+      "snapshots",
+    );
+    const snapshotRoot = path.resolve(this.root, "snapshots") + path.sep;
+    let archived = 0;
+    for (const snapshot of snapshots) {
+      const source = path.resolve(snapshot.directory);
+      if (!source.startsWith(snapshotRoot)) continue;
+      await mkdir(archiveRoot, { recursive: true });
+      try {
+        await rename(source, path.join(archiveRoot, snapshot.id));
+        archived += 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    return archived;
   }
 
   private async removeUnexpectedFiles(workspacePath: string, allowedFiles: Set<string>): Promise<void> {

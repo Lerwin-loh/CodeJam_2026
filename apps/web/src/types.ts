@@ -1,17 +1,128 @@
 export type AgentStatus = "ready" | "busy" | "stopped" | "error";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
+export interface User {
+  id: string;
+  name: string;
+}
+
+export interface AuditEntry {
+  id: string;
+  userId: string;
+  userName: string;
+  agentId: string | null;
+  action: string;
+  resource: string;
+  decision: "allow" | "deny";
+  reason: string;
+  timestamp: string;
+}
+
+export type AgentKind = "standalone" | "parent" | "child";
+
 export interface Agent {
   id: string;
   name: string;
   description: string;
   instructions: string;
+  ownerId: string;
+  projectId?: string | null;
+  kind?: AgentKind;
+  memberId?: string | null;
   status: AgentStatus;
   workspacePath: string;
   codexThreadId: string | null;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  ownerId: string;
+  mainWorkspacePath: string;
+  parentAgentId: string;
+  headSnapshotId: string;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SecurityFinding {
+  file: string;
+  line: number;
+  rule: string;
+  excerpt: string;
+}
+
+export interface SecurityCheckResult {
+  ranAt: string;
+  filesScanned: number;
+  findings: SecurityFinding[];
+}
+
+export type CommitRequestStatus = "pending" | "approved" | "rejected" | "merged";
+
+export interface CommitRequest {
+  id: string;
+  projectId: string;
+  memberId: string;
+  memberName: string;
+  role: string;
+  childAgentId: string;
+  title: string;
+  note: string;
+  status: CommitRequestStatus;
+  changedFiles: ChangedFiles;
+  securityCheck: SecurityCheckResult | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  createdAt: string;
+}
+
+export interface ProjectMember {
+  id: string;
+  projectId: string;
+  userId: string;
+  role: string;
+  childAgentId: string;
+  workspacePath: string;
+  lastSecurityCheck: SecurityCheckResult | null;
+  invitedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Owner sees this shape for each member; a member sees only the RosterEntry subset. */
+export interface ProjectMemberView {
+  id: string;
+  userId: string;
+  name: string;
+  role: string;
+  childAgentId: string;
+  lastSecurityCheck: SecurityCheckResult | null;
+  createdAt: string;
+}
+
+export interface RosterEntry {
+  userId: string;
+  name: string;
+  role: string;
+}
+
+export interface ParentAgentView {
+  agent: { id: string; name: string; description: string; status: AgentStatus; kind: AgentKind };
+  messages: Message[];
+  trace: TraceEvent[];
+  checkpoints: AgentCheckpoint[];
+}
+
+export interface ProjectDetail {
+  project: Project;
+  role: "owner" | "member";
+  myMembership: ProjectMember | null;
+  members: ProjectMemberView[] | RosterEntry[];
 }
 
 export interface AgentBranch {
@@ -79,6 +190,7 @@ export interface AgentCheckpoint {
   changedFiles: ChangedFiles;
   status: "complete" | "partial";
   reason: "auto-mutation" | "explicit";
+  label: string | null;
   createdAt: string;
 }
 

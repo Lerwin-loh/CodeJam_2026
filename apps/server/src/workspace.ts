@@ -9,8 +9,20 @@ export class WorkspaceManager {
     return path.join(this.root, agentId);
   }
 
-  branchWorkspacePath(agentId: string, branchId: string): string {
-    return path.join(this.root, agentId, "branches", branchId);
+  branchWorkspacePath(agentWorkspacePath: string, branchId: string): string {
+    return path.join(agentWorkspacePath, "branches", branchId);
+  }
+
+  projectMainPath(projectId: string): string {
+    return path.join(this.root, "projects", projectId, "main");
+  }
+
+  projectPath(projectId: string): string {
+    return path.join(this.root, "projects", projectId);
+  }
+
+  projectMemberPath(projectId: string, memberId: string): string {
+    return path.join(this.root, "projects", projectId, "members", memberId);
   }
 
   async initialize(): Promise<void> {
@@ -75,5 +87,19 @@ export class WorkspaceManager {
     );
     await rename(agent.workspacePath, destination);
     return destination;
+  }
+
+  async archiveProject(projectId: string): Promise<string | null> {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const archiveRoot = path.join(this.root, ".deleted", "projects");
+    const destination = path.join(archiveRoot, projectId + "-" + timestamp);
+    await mkdir(archiveRoot, { recursive: true });
+    try {
+      await rename(this.projectPath(projectId), destination);
+      return destination;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
   }
 }

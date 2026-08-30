@@ -2,17 +2,110 @@ export type AgentStatus = "ready" | "busy" | "stopped" | "error";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type MessageRole = "user" | "assistant";
 
+export interface User {
+  id: string;
+  name: string;
+  token: string;
+  createdAt: string;
+}
+
+export type AuditDecision = "allow" | "deny";
+
+export interface AuditEntry {
+  id: string;
+  userId: string;
+  userName: string;
+  agentId: string | null;
+  action: string;
+  resource: string;
+  decision: AuditDecision;
+  reason: string;
+  timestamp: string;
+}
+
+/** Where an Agent sits in the project structure. */
+export type AgentKind = "standalone" | "parent" | "child";
+
 export interface Agent {
   id: string;
   name: string;
   description: string;
   instructions: string;
+  ownerId: string;
+  /** null for a standalone Agent; the owning Project otherwise. */
+  projectId: string | null;
+  kind: AgentKind;
+  /** For a child Agent: the ProjectMember it belongs to. */
+  memberId: string | null;
   status: AgentStatus;
   workspacePath: string;
   codexThreadId: string | null;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** A collaboration project: one canonical `main` tree, one owner, many members. */
+export interface Project {
+  id: string;
+  name: string;
+  ownerId: string;
+  mainWorkspacePath: string;
+  parentAgentId: string;
+  /** Snapshot id of the current canonical `main` tree. */
+  headSnapshotId: string;
+  /** ISO timestamp when the owner archived the project; null while active. */
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A human on a project. The owner is implicit (Project.ownerId) and has no row. */
+export interface ProjectMember {
+  id: string;
+  projectId: string;
+  userId: string;
+  /** Free-text label the owner assigns, e.g. "Frontend", "Backend". */
+  role: string;
+  childAgentId: string;
+  workspacePath: string;
+  lastSecurityCheck: SecurityCheckResult | null;
+  invitedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SecurityFinding {
+  file: string;
+  line: number;
+  rule: string;
+  excerpt: string;
+}
+
+export interface SecurityCheckResult {
+  ranAt: string;
+  filesScanned: number;
+  findings: SecurityFinding[];
+}
+
+export type CommitRequestStatus = "pending" | "approved" | "rejected" | "merged";
+
+/** A member asking for their current work to be pushed to main. */
+export interface CommitRequest {
+  id: string;
+  projectId: string;
+  memberId: string;
+  memberName: string;
+  role: string;
+  childAgentId: string;
+  title: string;
+  note: string;
+  status: CommitRequestStatus;
+  changedFiles: ChangedFiles;
+  securityCheck: SecurityCheckResult | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  createdAt: string;
 }
 
 export interface AgentBranch {
@@ -110,6 +203,8 @@ export interface AgentContextSnapshot {
   instructions: string;
   messages: Message[];
   sourceThreadId: string | null;
+  sessionRolloutPath: string | null;
+  sessionLineOffset: number | null;
   createdAt: string;
 }
 
@@ -131,6 +226,7 @@ export interface AgentCheckpoint {
   changedFiles: ChangedFiles;
   status: "complete" | "partial";
   reason: "auto-mutation" | "explicit";
+  label: string | null;
   createdAt: string;
 }
 
@@ -164,7 +260,12 @@ export interface RunDetails {
 
 export interface Database {
   version: 1;
+  users: User[];
+  audit: AuditEntry[];
   agents: Agent[];
+  projects: Project[];
+  projectMembers: ProjectMember[];
+  commitRequests: CommitRequest[];
   branches: AgentBranch[];
   messages: Message[];
   runs: AgentRun[];
