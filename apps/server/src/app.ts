@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import type { AgentService } from "./agent-service.js";
-import { OWASP_ANALYSIS_PROMPT, type ProjectService } from "./project-service.js";
+import type { ProjectService } from "./project-service.js";
 import type { User } from "./types.js";
 
 declare module "fastify" {
@@ -40,6 +40,9 @@ const branchMessageBody = z.object({
 });
 const mergeBranchesBody = z.object({
   branchIds: z.array(z.string().uuid()).min(1).max(50),
+});
+const securityFixBody = z.object({
+  pointIds: z.array(z.string().max(20)).max(10).optional(),
 });
 const branchQuery = z.object({ branchId: z.string().uuid().optional() });
 const createCheckpointBody = z.object({
@@ -508,30 +511,24 @@ export async function createApp(
     };
   });
 
-  // Part 1B: run the member's child agent as an OWASP Top 10 reviewer of their
-  // branch. A passing result (bound to the branch's current state) unlocks commit.
+  // Part 1B: the pre-commit OWASP gate, cheapest-path-first —
+  //  1. only the branch-vs-main diff is in scope (no full-tree scan);
+  //  2. a fast static pass runs with zero tokens; if it finds issues we stop there;
+  //  3. otherwise ONE direct model call over just the changed files (no agent,
+  //     no tools, no conversation history).
   app.post("/api/projects/:id/members/:memberId/security-analysis", async (request) => {
     const { id, memberId } = memberParams.parse(request.params);
-    const { member } = await projects.assertProjectAccess(id, request.user, "security.check", {
-      memberId,
-    });
-    const target =
-      member && member.id === memberId
-        ? member
-        : projects.getMemberById(id, memberId);
-    // The analysis is a full agent run — make sure the child agent is running.
-    const childAgent = service.getAgent(target.childAgentId);
-    if (childAgent.status === "stopped") {
-      await service.startAgent(target.childAgentId);
-    } else if (childAgent.status === "busy") {
-      throw new HttpError(
-        409,
-        "Your agent is currently running. Wait for it to finish, then run the analysis.",
-      );
-    }
-    const run = await service.runToCompletion(target.childAgentId, OWASP_ANALYSIS_PROMPT);
-    const security = await projects.recordSecurityAnalysis(id, memberId, run);
-    return { security };
+    await projects.assertProjectAccess(id, request.user, "security.check", { memberId });
+    return { security: await projects.runSecurityGate(id, memberId) };
+  });
+
+  // Auto-fix flagged OWASP findings — one direct model call per affected file,
+  // no agent run. `pointIds` optional: omit to fix every flagged finding.
+  app.post("/api/projects/:id/members/:memberId/security-fix", async (request) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "security.check", { memberId });
+    const { pointIds } = securityFixBody.parse(request.body ?? {});
+    return { security: await projects.applySecurityFixes(id, memberId, pointIds ?? null) };
   });
 
   app.post("/api/projects/:id/members/:memberId/commit-request", async (request, reply) => {

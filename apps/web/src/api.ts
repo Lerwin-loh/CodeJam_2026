@@ -211,6 +211,11 @@ export const api = {
         "/api/projects/" + id + "/members/" + memberId + "/security-analysis",
         { method: "POST" },
       ),
+    securityFix: (id: string, memberId: string, pointIds?: string[]) =>
+      request<{ security: MemberSecurityView }>(
+        "/api/projects/" + id + "/members/" + memberId + "/security-fix",
+        { method: "POST", body: JSON.stringify(pointIds ? { pointIds } : {}) },
+      ),
     submitCommitRequest: (
       id: string,
       memberId: string,
