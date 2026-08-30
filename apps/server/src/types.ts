@@ -43,7 +43,6 @@ export interface Agent {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
-  mergedContext?: string[];
 }
 
 /** A collaboration project: one canonical `main` tree, one owner, many members. */
@@ -59,7 +58,6 @@ export interface Project {
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
-  mergedContext?: string[];
 }
 
 /** A human on a project. The owner is implicit (Project.ownerId) and has no row. */
@@ -150,7 +148,27 @@ export interface MergeSide {
   workspacePath: string;
   outcome: MergeOutcome;
   prompts: string[];
+  conversation: ConversationCommit[];
+  baseConversation?: ConversationCommit[];
+  session?: {
+    threadId: string | null;
+    rolloutRelativePath: string | null;
+    baseLineOffset: number | null;
+    baseThreadId?: string | null;
+  };
   baseSnapshot?: WorkspaceSnapshot | null;
+}
+
+export interface ConversationCommit {
+  id: string;
+  runId: string;
+  branchId: string | null;
+  prompt: string;
+  response: string | null;
+  createdAt: string;
+  sessionRolloutPath?: string | null;
+  sessionLineOffset?: number | null;
+  origin?: "base" | "target" | "source";
 }
 
 export interface MergeWorkspaceConflict {
@@ -164,15 +182,22 @@ export interface MergeWorkspaceConflict {
 
 export interface MergeContextConflict {
   id: string;
-  targetPrompt: string;
-  sourcePrompt: string;
+  target: ConversationCommit;
+  source: ConversationCommit;
   targetSideId: string;
   sourceSideId: string;
+  targetDeleted?: boolean;
+  sourceDeleted?: boolean;
 }
 
 export interface MergePreview {
   target: MergeOutcome;
   source: MergeOutcome;
+  targetPrompts: string[];
+  sourcePrompts: string[];
+  baseConversation: ConversationCommit[];
+  targetConversation: ConversationCommit[];
+  sourceConversation: ConversationCommit[];
   acceptanceCriteria: string[];
   changedFiles: ChangedFiles;
   workspaceConflicts: MergeWorkspaceConflict[];
@@ -186,7 +211,7 @@ export interface MergeResolution {
 
 export interface MergeResult {
   preview: MergePreview;
-  keptPrompts: string[];
+  conversation: ConversationCommit[];
   snapshot: WorkspaceSnapshot | null;
 }
 

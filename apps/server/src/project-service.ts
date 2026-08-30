@@ -1,25 +1,26 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { captureSessionOffset, rebuildSessionFromTimeline } from "./codex-session-fork.js";
 import { HttpError } from "./errors.js";
+import { MergeEngine, conversationCommits, outcomeDetails, outcomeSummary } from "./merge-engine.js";
 import { JsonStore } from "./store.js";
 import type {
-  Agent,
-  AgentRun,
-  AuditDecision,
-  ChangedFiles,
-  CommitRequest,
-  OwaspStatus,
-  Project,
-  ProjectMember,
-  SecurityAnalysis,
-  SecurityAnalysisPoint,
-  User,
+    Agent,
+    AgentRun,
+    AuditDecision,
+    ChangedFiles,
+    CommitRequest,
+    MergeResolution,
+    OwaspStatus,
+    Project,
+    ProjectMember,
+    SecurityAnalysis,
+    SecurityAnalysisPoint,
+    User,
 } from "./types.js";
 import { WorkspaceHistory } from "./workspace-history.js";
 import { WorkspaceManager } from "./workspace.js";
-import { MergeEngine, outcomeDetails, outcomeSummary } from "./merge-engine.js";
-import type { MergeResolution } from "./types.js";
 
 const now = () => new Date().toISOString();
 
@@ -227,6 +228,7 @@ export class ProjectService {
     private readonly workspaces: WorkspaceManager,
     private readonly history: WorkspaceHistory,
     private readonly mergeEngine = new MergeEngine(history),
+    private readonly codexHome = "",
   ) {}
 
   // --------------------------------------------------------------------------
@@ -884,11 +886,20 @@ export class ProjectService {
   private async projectMergeSide(agent: Agent, workspacePath: string, id: string, label: string, baseSnapshotId: string | null, branchId: string | null = null) {
     const database = this.store.snapshot();
     const runs = database.runs.filter((run) => run.agentId === agent.id && run.branchId === branchId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    const prompts = database.messages.filter((message) => message.agentId === agent.id && message.role === "user" && (branchId === null ? message.branchId === null : message.branchId === branchId)).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map((message) => message.content);
+    const branch = branchId ? database.branches.find((item) => item.id === branchId) : null;
+    const checkpoint = branch?.parentCheckpointId ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId) : null;
+    const context = checkpoint ? database.contexts.find((item) => item.id === checkpoint.contextId) ?? null : null;
+    const contextMessages = context?.messages ?? [];
+    const sideMessages = database.messages.filter((message) => message.agentId === agent.id && (branchId === null ? message.branchId === null : message.branchId === branchId));
+    const conversation = conversationCommits([...contextMessages, ...sideMessages], database.runs);
+    const baseConversation = conversationCommits(contextMessages, database.runs);
+    const currentThreadId = branch?.codexThreadId ?? agent.codexThreadId;
+    const currentOffset = this.codexHome ? captureSessionOffset(this.codexHome, currentThreadId) : null;
+    const prompts = conversation.map((commit) => commit.prompt);
     const baseSnapshot = baseSnapshotId ? database.snapshots.find((snapshot) => snapshot.id === baseSnapshotId) ?? null : null;
     const changed = baseSnapshot ? this.history.diff(baseSnapshot.manifest, await this.history.manifest(workspacePath)) : { created: [], modified: [], deleted: [] };
     const fileSummary = [changed.created.length ? "created " + changed.created.join(", ") : "", changed.modified.length ? "updated " + changed.modified.join(", ") : "", changed.deleted.length ? "deleted " + changed.deleted.join(", ") : ""].filter(Boolean).join("; ");
-    return { id, label, workspacePath, outcome: { id, label, summary: outcomeSummary(runs[0]?.output ?? "", fileSummary), details: outcomeDetails(runs[0]?.output ?? "", fileSummary), requestedFeatures: prompts }, prompts, baseSnapshot };
+    return { id, label, workspacePath, outcome: { id, label, summary: outcomeSummary(runs[0]?.output ?? "", fileSummary), details: outcomeDetails(runs[0]?.output ?? "", fileSummary), requestedFeatures: prompts }, prompts, conversation, baseConversation, session: { threadId: currentThreadId, rolloutRelativePath: currentOffset?.rolloutRelativePath ?? context?.sessionRolloutPath ?? null, baseLineOffset: context?.sessionLineOffset ?? null, baseThreadId: context?.sourceThreadId ?? null }, baseSnapshot };
   }
 
   async previewChildMerge(projectId: string, memberId: string, branchId: string | null = null) {
@@ -915,12 +926,25 @@ export class ProjectService {
     const childBase = branch ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null : database.snapshots.filter((snapshot) => snapshot.agentId === child.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.id ?? null;
     const target = await this.projectMergeSide(parent, project.mainWorkspacePath, parent.id, "main", childBase);
     const source = await this.projectMergeSide(child, branch?.workspacePath ?? child.workspacePath, branch?.id ?? child.id, branch?.name ?? child.name, childBase, branch?.id ?? null);
-    return this.mergeEngine.apply(target, source, resolution, async (manifest, keptPrompts) => {
+    return this.mergeEngine.apply(target, source, resolution, async (manifest, conversation) => {
       const snapshot = await this.history.createSnapshot(parent.id, project.id, project.mainWorkspacePath, manifest);
+      const mergedThreadId = target.session && source.session
+        ? await rebuildSessionFromTimeline(this.codexHome, target.session, source.session, conversation)
+        : null;
       await this.store.mutate((db) => {
         db.snapshots.push(snapshot);
         const row = db.projects.find((item) => item.id === projectId);
-        if (row) { row.headSnapshotId = snapshot.id; row.updatedAt = now(); row.mergedContext = keptPrompts; }
+        if (row) {
+          row.headSnapshotId = snapshot.id;
+          row.updatedAt = now();
+          db.messages = db.messages.filter((message) => !(message.agentId === parent.id && message.branchId === null));
+          for (const commit of conversation) {
+            db.messages.push({ id: randomUUID(), agentId: parent.id, runId: commit.runId, branchId: null, role: "user", content: commit.prompt, createdAt: commit.createdAt });
+            if (commit.response !== null) db.messages.push({ id: randomUUID(), agentId: parent.id, runId: commit.runId, branchId: null, role: "assistant", content: commit.response, createdAt: commit.createdAt });
+          }
+          const parentAgent = db.agents.find((item) => item.id === parent.id);
+          if (parentAgent) parentAgent.codexThreadId = mergedThreadId;
+        }
         const request = db.commitRequests.find((item) => item.projectId === projectId && item.memberId === memberId && item.status === "approved");
         if (request) { request.status = "merged"; request.decidedAt = now(); }
       });
@@ -948,6 +972,14 @@ export class ProjectService {
       request.decidedBy = decidedBy.id;
       request.decidedAt = now();
       return structuredClone(request);
+    });
+  }
+
+  async resolveChildMerge(projectId: string, memberId: string, branchId: string | null) {
+    const preview = await this.previewChildMerge(projectId, memberId, branchId);
+    return this.mergeEngine.resolve(preview, {
+      workspace: Object.fromEntries(preview.workspaceConflicts.map((conflict) => [conflict.path, "ai"])),
+      context: Object.fromEntries(preview.contextConflicts.map((conflict) => [conflict.id, "ai"])),
     });
   }
 

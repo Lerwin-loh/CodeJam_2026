@@ -3,12 +3,12 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import type { AgentService } from "./agent-service.js";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
-import type { AgentService } from "./agent-service.js";
+import { MergeConflictError } from "./merge-engine.js";
 import { OWASP_ANALYSIS_PROMPT, type ProjectService } from "./project-service.js";
 import type { User } from "./types.js";
-import { MergeConflictError } from "./merge-engine.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -268,6 +268,13 @@ export async function createApp(
     const body = agentMergeBody.parse(request.body);
     if (!body.resolution) throw new HttpError(400, "Merge resolutions are required.");
     return service.mergeBranch(id, body.branchId, body.resolution);
+  });
+
+  app.post("/api/agents/:id/merge-ai", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "agent.run");
+    const body = agentMergeBody.parse(request.body);
+    return service.resolveBranchMerge(id, body.branchId);
   });
 
   app.post("/api/agents/:id/checkpoints", async (request, reply) => {
@@ -577,6 +584,13 @@ export async function createApp(
     const body = projectMergeBody.parse(request.body);
     if (!body.resolution) throw new HttpError(400, "Merge resolutions are required.");
     return projects.mergeChild(id, body.memberId, body.branchId ?? null, body.resolution);
+  });
+
+  app.post("/api/projects/:id/merge-ai", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.decide");
+    const body = projectMergeBody.parse(request.body);
+    return projects.resolveChildMerge(id, body.memberId, body.branchId ?? null);
   });
 
   app.get("/api/projects/:id/commit-requests", async (request) => {

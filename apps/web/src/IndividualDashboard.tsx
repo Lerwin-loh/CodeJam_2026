@@ -141,8 +141,8 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
     );
   }, []);
 
-  const refreshMessages = useCallback(async (agentId: string) => {
-    const result = await api.messages(agentId, activeBranchId);
+  const refreshMessages = useCallback(async (agentId: string, branchId: string | null = activeBranchId) => {
+    const result = await api.messages(agentId, branchId);
     if (mountedRef.current && selectedIdRef.current === agentId) {
       setMessages(result.messages);
     }
@@ -466,7 +466,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
     try {
       await api.merge(selected.id, branch.id, resolution);
       setMergePreview(null); setActiveBranchId(null);
-      await Promise.all([refreshMessages(selected.id), refreshBranchPoint(selected.id)]);
+      await Promise.all([refreshMessages(selected.id, null), refreshBranchPoint(selected.id)]);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { if (mountedRef.current) setMergeBusy(false); }
   };
@@ -1214,7 +1214,8 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
         </div>
       )}
 
-      {mergePreview && selected && <MergeReview preview={mergePreview} busy={mergeBusy} onCancel={() => setMergePreview(null)} onMerge={(resolution) => { const branch = branches.find((item) => item.id === mergePreview.source.id); if (branch) void applyBranchMerge(branch, resolution); }} />}
+      {mergeBusy && !mergePreview && <div className="modal-backdrop merge-loading-backdrop"><section className="merge-loading-card" role="status" aria-live="polite"><span className="spinner" /><div><strong>Preparing merge review…</strong><p>Comparing outcomes, workspace files, and context prompts.</p></div></section></div>}
+      {mergePreview && selected && <MergeReview preview={mergePreview} busy={mergeBusy} onCancel={() => setMergePreview(null)} onFixWithAi={() => { const branch = branches.find((item) => item.id === mergePreview.source.id); if (!branch) throw new Error("Branch not found"); return api.mergeAi(selected.id, branch.id); }} onMerge={(resolution) => { const branch = branches.find((item) => item.id === mergePreview.source.id); if (branch) void applyBranchMerge(branch, resolution); }} />}
 
       {showCreate && (
         <div className="modal-backdrop" onMouseDown={() => setShowCreate(false)}>

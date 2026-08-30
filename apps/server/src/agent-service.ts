@@ -1,35 +1,34 @@
 import { randomUUID } from "node:crypto";
 import { cp, mkdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
+import { captureSessionOffset, forkSessionAtOffset, rebuildSessionFromTimeline } from "./codex-session-fork.js";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
+import { MergeEngine, conversationCommits, outcomeDetails, outcomeSummary } from "./merge-engine.js";
 import { JsonStore } from "./store.js";
 import type {
-  Agent,
-  AgentRun,
-  AgentRunner,
-  AgentCheckpoint,
-  AuditDecision,
-  AuditEntry,
-  CheckpointDetails,
-  CheckpointDiff,
-  CreateAgentInput,
-  Message,
-  RunnerEvent,
-  AgentContextSnapshot,
-  TraceEvent,
-  TraceEventType,
-  RunDetails,
-  User,
-  WorkspaceManifest,
-  UpdateAgentInput,
+    Agent,
+    AgentCheckpoint,
+    AgentContextSnapshot,
+    AgentRun,
+    AgentRunner,
+    AuditDecision,
+    AuditEntry,
+    CheckpointDetails,
+    CheckpointDiff,
+    CreateAgentInput,
+    MergeResolution,
+    Message,
+    RunDetails,
+    TraceEvent,
+    TraceEventType,
+    UpdateAgentInput,
+    User,
+    WorkspaceManifest
 } from "./types.js";
-import { WorkspaceManager } from "./workspace.js";
 import { WorkspaceHistory } from "./workspace-history.js";
-import { MergeEngine, outcomeDetails, outcomeSummary } from "./merge-engine.js";
-import type { MergeResolution } from "./types.js";
-import { captureSessionOffset, forkSessionAtOffset } from "./codex-session-fork.js";
+import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
@@ -555,8 +554,8 @@ export class AgentService {
   }
 
   getMessages(agentId: string, branchId: string | null = null): Message[] {
-    this.getAgent(agentId);
     const database = this.store.snapshot();
+    if (!database.agents.some((item) => item.id === agentId)) throw new HttpError(404, "Agent not found");
     return this.store
       .snapshot()
       .messages.filter((message) => message.agentId === agentId)
@@ -610,7 +609,17 @@ export class AgentService {
   private async mergeSide(agent: Agent, workspacePath: string, id: string, label: string, baseSnapshotId: string | null, branchId: string | null = null) {
     const database = this.store.snapshot();
     const runs = database.runs.filter((run) => run.agentId === agent.id && run.branchId === branchId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    const prompts = this.getMessages(agent.id, branchId).filter((message) => message.role === "user").map((message) => message.content);
+    const messages = this.getMessages(agent.id, branchId);
+    const conversation = conversationCommits(messages, database.runs);
+    const branch = branchId ? database.branches.find((item) => item.id === branchId) : null;
+    const checkpoint = branch?.parentCheckpointId
+      ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)
+      : null;
+    const context = checkpoint ? database.contexts.find((item) => item.id === checkpoint.contextId) : null;
+    const baseConversation = context ? conversationCommits(context.messages, database.runs) : [];
+    const currentThreadId = branch?.codexThreadId ?? agent.codexThreadId;
+    const currentOffset = captureSessionOffset(this.config.codexHome, currentThreadId);
+    const prompts = conversation.map((commit) => commit.prompt);
     const baseSnapshot = baseSnapshotId ? database.snapshots.find((snapshot) => snapshot.id === baseSnapshotId) ?? null : null;
     const changed = baseSnapshot ? this.history.diff(baseSnapshot.manifest, await this.history.manifest(workspacePath)) : { created: [], modified: [], deleted: [] };
     const fileSummary = [
@@ -622,6 +631,14 @@ export class AgentService {
       id, label, workspacePath,
       outcome: { id, label, summary: outcomeSummary(runs[0]?.output ?? "", fileSummary), details: outcomeDetails(runs[0]?.output ?? "", fileSummary), requestedFeatures: prompts },
       prompts,
+      conversation,
+      baseConversation,
+      session: {
+        threadId: currentThreadId,
+        rolloutRelativePath: currentOffset?.rolloutRelativePath ?? context?.sessionRolloutPath ?? null,
+        baseLineOffset: context?.sessionLineOffset ?? null,
+        baseThreadId: context?.sourceThreadId ?? null,
+      },
       baseSnapshot,
     };
   }
@@ -641,14 +658,42 @@ export class AgentService {
     const baseId = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null;
     const target = await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId);
     const source = await this.mergeSide(agent, branch.workspacePath, branch.id, branch.name, baseId, branch.id);
-    return this.mergeEngine.apply(target, source, resolution, async (manifest, keptPrompts) => {
+    return this.mergeEngine.apply(target, source, resolution, async (manifest, conversation) => {
       const snapshot = await this.history.createSnapshot(agent.id, null, agent.workspacePath, manifest);
+      const mergedThreadId = target.session && source.session
+        ? await rebuildSessionFromTimeline(this.config.codexHome, target.session, source.session, conversation)
+        : null;
       await this.store.mutate((database) => {
         database.snapshots.push(snapshot);
         const row = database.agents.find((item) => item.id === agent.id);
-        if (row) row.mergedContext = keptPrompts;
+        if (row) {
+          database.messages = database.messages.filter((message) =>
+            !(message.agentId === agent.id && message.branchId === null),
+          );
+          for (const commit of conversation) {
+            database.messages.push({
+              id: randomUUID(), agentId: agent.id, runId: commit.runId, branchId: null,
+              role: "user", content: commit.prompt, createdAt: commit.createdAt,
+            });
+            if (commit.response !== null) {
+              database.messages.push({
+                id: randomUUID(), agentId: agent.id, runId: commit.runId, branchId: null,
+                role: "assistant", content: commit.response, createdAt: commit.createdAt,
+              });
+            }
+          }
+          row.codexThreadId = mergedThreadId;
+        }
       });
       return snapshot;
+    });
+  }
+
+  async resolveBranchMerge(agentId: string, branchId: string) {
+    const preview = await this.previewBranchMerge(agentId, branchId);
+    return this.mergeEngine.resolve(preview, {
+      workspace: Object.fromEntries(preview.workspaceConflicts.map((conflict) => [conflict.path, "ai"])),
+      context: Object.fromEntries(preview.contextConflicts.map((conflict) => [conflict.id, "ai"])),
     });
   }
 

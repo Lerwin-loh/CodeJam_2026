@@ -17,7 +17,7 @@ const workspaces = new WorkspaceManager(config.workspaceRoot);
 const history = new WorkspaceHistory(path.join(config.dataDirectory, "branchpoint"));
 const runner = createRunner(config);
 const mergeEngine = new MergeEngine(history, createIsolatedMergeAiResolver(runner));
-const projects = new ProjectService(store, workspaces, history, mergeEngine);
+const projects = new ProjectService(store, workspaces, history, mergeEngine, config.codexHome);
 const service = new AgentService(config, store, workspaces, runner, history, mergeEngine);
 await service.initialize();
 

@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile, chmod } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
-  ChangedFiles,
-  WorkspaceFile,
-  WorkspaceManifest,
-  WorkspaceSnapshot,
+    ChangedFiles,
+    WorkspaceFile,
+    WorkspaceManifest,
+    WorkspaceSnapshot,
 } from "./types.js";
 
 // Branch workspaces live beside their source workspace, but are platform state:

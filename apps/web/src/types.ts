@@ -159,10 +159,16 @@ export interface AgentBranch {
 
 export interface MergeOutcome { id: string; label: string; summary: string; details: string[]; requestedFeatures: string[]; }
 export interface MergeWorkspaceConflict { path: string; targetContent: string | null; sourceContent: string | null; baseContent: string | null; targetPaths?: string[]; sourcePaths?: string[]; }
-export interface MergeContextConflict { id: string; targetPrompt: string; sourcePrompt: string; targetSideId: string; sourceSideId: string; }
+export interface ConversationCommit { id: string; runId: string; branchId: string | null; prompt: string; response: string | null; createdAt: string; }
+export interface MergeContextConflict { id: string; target: ConversationCommit; source: ConversationCommit; targetSideId: string; sourceSideId: string; targetDeleted?: boolean; sourceDeleted?: boolean; }
 export interface MergePreview {
   target: MergeOutcome;
   source: MergeOutcome;
+  targetPrompts: string[];
+  sourcePrompts: string[];
+  baseConversation: ConversationCommit[];
+  targetConversation: ConversationCommit[];
+  sourceConversation: ConversationCommit[];
   acceptanceCriteria: string[];
   changedFiles: ChangedFiles;
   workspaceConflicts: MergeWorkspaceConflict[];

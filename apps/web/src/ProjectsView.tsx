@@ -1,24 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
-import {
-  AgentPlayground,
-  BranchPointPanel,
-  useAgentWorkspace,
-  WorkspaceOverlays,
-} from "./useAgentWorkspace";
-import type {
-  CommitRequest,
-  MemberSecurityView,
-  ParentAgentView,
-  Project,
-  ProjectDetail,
-  ProjectMemberView,
-  SecurityAnalysis,
-  SecurityAnalysisPoint,
-  User,
-  MergePreview,
-} from "./types";
 import { MergeReview } from "./MergeReview";
+import type {
+    CommitRequest,
+    MemberSecurityView,
+    MergePreview,
+    ParentAgentView,
+    Project,
+    ProjectDetail,
+    ProjectMemberView,
+    SecurityAnalysis,
+    SecurityAnalysisPoint,
+    User,
+} from "./types";
+import {
+    AgentPlayground,
+    BranchPointPanel,
+    useAgentWorkspace,
+    WorkspaceOverlays,
+} from "./useAgentWorkspace";
 
 function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
@@ -937,7 +937,8 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
         </div>
       )}
 
-      {mergePreview && <MergeReview preview={mergePreview.preview} busy={mergeBusy} onCancel={() => setMergePreview(null)} onMerge={(resolution) => void applyChildMerge(resolution)} />}
+      {mergeBusy && !mergePreview && <div className="modal-backdrop merge-loading-backdrop"><section className="merge-loading-card" role="status" aria-live="polite"><span className="spinner" /><div><strong>Preparing merge review…</strong><p>Comparing outcomes, workspace files, and context prompts.</p></div></section></div>}
+      {mergePreview && <MergeReview preview={mergePreview.preview} busy={mergeBusy} onCancel={() => setMergePreview(null)} onFixWithAi={() => { if (!selectedId) return Promise.reject(new Error("Project not selected")); return api.projects.mergeAi(selectedId, mergePreview.memberId, mergePreview.branchId); }} onMerge={(resolution) => void applyChildMerge(resolution)} />}
     </div>
   );
 }

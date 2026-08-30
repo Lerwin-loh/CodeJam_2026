@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { captureSessionOffset, forkSessionAtOffset } from "./codex-session-fork.js";
+import { captureSessionOffset, forkSessionAtOffset, rebuildSessionFromTimeline } from "./codex-session-fork.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -101,5 +101,32 @@ describe("codex session forking", () => {
   it("returns null when the thread has no recorded session", () => {
     expect(captureSessionOffset("/nonexistent/path", "some-id")).toBeNull();
     expect(captureSessionOffset("/nonexistent/path", null)).toBeNull();
+  });
+
+  it("rebuilds and registers a resolved main transcript from base plus selected units", async () => {
+    const { codexHome, threadId, rolloutAbsolutePath } = await makeCodexHome();
+    const metaLine = JSON.stringify({ type: "session_meta", payload: { id: threadId } });
+    const turn1 = turnLines(1);
+    const turn2 = turnLines(2);
+    await writeFile(rolloutAbsolutePath, [metaLine, ...turn1, ...turn2].join("\n") + "\n", "utf8");
+    const mergedThreadId = await rebuildSessionFromTimeline(
+      codexHome,
+      { threadId, rolloutRelativePath: "sessions/2026/08/29/rollout-test-" + threadId + ".jsonl", baseLineOffset: 1 + turn1.length, baseThreadId: threadId },
+      { threadId, rolloutRelativePath: "sessions/2026/08/29/rollout-test-" + threadId + ".jsonl", baseLineOffset: 1 + turn1.length },
+      [
+        { id: "base", runId: "base", branchId: null, prompt: "turn 1", response: "base", createdAt: "2026-01-01", origin: "base" },
+        { id: "selected", runId: "selected", branchId: "branch", prompt: "turn 2", response: "selected", createdAt: "2026-01-01", origin: "source" },
+      ],
+    );
+    expect(mergedThreadId).not.toBeNull();
+    const db = new DatabaseSync(path.join(codexHome, "state_5.sqlite"));
+    const row = db.prepare("SELECT rollout_path FROM threads WHERE id = ?").get(mergedThreadId) as { rollout_path: string } | undefined;
+    db.close();
+    expect(row).toBeDefined();
+    const mergedContent = await readFile(row!.rollout_path, "utf8");
+    expect(mergedContent).toContain("turn 1");
+    expect(mergedContent).toContain("turn 2");
+    expect(mergedContent.match(/turn 1/g)).toHaveLength(1);
+    expect(JSON.parse(mergedContent.split("\n")[0]!).payload.id).toBe(mergedThreadId);
   });
 });
