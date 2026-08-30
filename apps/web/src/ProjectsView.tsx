@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import {
   AgentPlayground,
   BranchPointPanel,
@@ -33,55 +33,14 @@ function changedCount(cr: CommitRequest): number {
 
 const SECURITY_GATE_TEXT: Record<MemberSecurityView["reason"], string> = {
   ok: "",
-  "never-run": "run the security analysis first",
-  failed: "the last OWASP analysis found an issue — fix it and run again",
-  incomplete: "the last analysis didn't cover all 10 OWASP categories — run it again",
-  "branch-changed": "your branch changed since the last analysis — run it again",
+  "never-run": "run Submit commit request to start the security analysis",
+  failed: "the OWASP analysis found an issue — fix it, then press Submit commit request again",
+  incomplete: "the analysis didn't cover all 10 OWASP categories — press Submit commit request again",
+  "branch-changed": "your branch changed since the analysis — press Submit commit request again",
 };
 
 function owaspFailCount(a: SecurityAnalysis | null): number {
   return a ? a.points.filter((p) => p.status === "fail").length : 0;
-}
-
-function owaspItemBlock(p: SecurityAnalysisPoint, evidenceCap: number): string {
-  const evidence =
-    p.evidence && p.evidence.length > evidenceCap
-      ? p.evidence.slice(0, evidenceCap) + "\n… (truncated)"
-      : p.evidence;
-  return [
-    `OWASP ${p.id} (${p.name})`,
-    p.detail ? `  Problem: ${p.detail}` : "",
-    p.file ? `  File: ${p.file}` : "",
-    evidence ? "  Flagged code:\n```\n" + evidence + "\n```" : "",
-    p.remediation ? `  Recommended fix: ${p.remediation}` : "",
-  ]
-    .filter((line) => line !== "")
-    .join("\n");
-}
-
-/** The message sent to the member's child agent when they press "Fix" on one row. */
-function buildFixPrompt(p: SecurityAnalysisPoint): string {
-  return [
-    `Fix this OWASP ${p.id} (${p.name}) issue in my branch.`,
-    "",
-    owaspItemBlock(p, 4000),
-    "",
-    "Apply the fix directly to the file(s). Keep the change minimal and don't touch",
-    "unrelated code. When done, briefly say what you changed.",
-  ].join("\n");
-}
-
-/** The message sent when the member presses "Fix all". */
-function buildFixAllPrompt(points: SecurityAnalysisPoint[]): string {
-  return [
-    `Fix all ${points.length} OWASP issues the security analysis found in my branch.`,
-    "Work through them one file at a time and apply each fix directly.",
-    "Keep every change minimal and scoped to its issue.",
-    "",
-    ...points.map((p, index) => `${index + 1}. ` + owaspItemBlock(p, 1000).replace(/\n/g, "\n   ")),
-    "",
-    "When done, summarise what you changed for each item.",
-  ].join("\n");
 }
 
 type ProjectTab = "parent" | "mine" | "commits" | "team";
@@ -115,8 +74,8 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
   const [commitRequests, setCommitRequests] = useState<CommitRequest[]>([]);
   const [security, setSecurity] = useState<MemberSecurityView | null>(null);
   const [securityExpanded, setSecurityExpanded] = useState(false);
-  const [securityRunning, setSecurityRunning] = useState(false);
-  const [submittingCommit, setSubmittingCommit] = useState(false);
+  // "Submit commit request" now runs the OWASP analysis first, then submits.
+  const [commitPhase, setCommitPhase] = useState<null | "fixing" | "analyzing" | "submitting">(null);
 
   const [mUserName, setMUserName] = useState("");
   const [mRole, setMRole] = useState("");
@@ -239,10 +198,10 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
   // A child-agent turn (coding or the analysis itself) can change the branch and
   // therefore the commit gate — re-pull the security state whenever a run settles.
   useEffect(() => {
-    if (tab === "mine" && selectedId && childId && ws.status === "ready" && !securityRunning) {
+    if (tab === "mine" && selectedId && childId && ws.status === "ready" && commitPhase === null) {
       void loadChild(selectedId);
     }
-  }, [ws.status, tab, selectedId, childId, securityRunning, loadChild]);
+  }, [ws.status, tab, selectedId, childId, commitPhase, loadChild]);
 
   const createProject = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -350,36 +309,6 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
     }
   };
 
-  const runSecurityAnalysis = async () => {
-    if (!selectedId || !myMember) return;
-    setSecurityRunning(true);
-    setError(null);
-    setMergeNote(null);
-    try {
-      const { security: next } = await api.projects.securityAnalysis(selectedId, myMember.id);
-      if (mounted.current) setSecurity(next);
-      // the analysis is a child-agent run — refresh its transcript
-      await loadChild(selectedId);
-    } catch (reason) {
-      fail(reason);
-    } finally {
-      if (mounted.current) setSecurityRunning(false);
-    }
-  };
-
-  const fixWithAgent = (p: SecurityAnalysisPoint) => {
-    setFixPoint(null);
-    setTab("mine");
-    void ws.sendText(buildFixPrompt(p));
-  };
-
-  const fixAllWithAgent = (points: SecurityAnalysisPoint[]) => {
-    if (points.length === 0) return;
-    setFixPoint(null);
-    setTab("mine");
-    void ws.sendText(buildFixAllPrompt(points));
-  };
-
   const openMerge = () => {
     setMergeSel(new Set());
     setShowMerge(true);
@@ -402,7 +331,7 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
           "Merged " + n + " sub-branch" + (n === 1 ? "" : "es") + " and deleted them" +
             (f > 0
               ? " — " + f + " file" + (f === 1 ? "" : "s") +
-                " changed, re-run the security analysis before committing."
+                " changed. Press Submit commit request to re-check and commit."
               : " (no file changes)."),
         );
       }
@@ -411,21 +340,86 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
     }
   };
 
-  const submitCommitRequest = async () => {
+  // One action: run the OWASP analysis, and only submit the commit request if it
+  // passes. On failure the result panel shows the issues and nothing is submitted.
+  // `silent` skips the title prompt (used by the auto-continue after a Fix).
+  const submitCommitRequest = async (silent = false) => {
     if (!selectedId || !myMember) return;
-    const title = window.prompt("Title for this commit request", myMember.role + " changes");
-    if (title === null) return;
-    setSubmittingCommit(true);
     setError(null);
-    try {
-      await api.projects.submitCommitRequest(selectedId, myMember.id, { title: title.trim() });
+    setMergeNote(null);
+
+    const finishSubmit = async () => {
+      setCommitPhase("submitting");
+      const defaultTitle = myMember.role + " changes";
+      const title = silent
+        ? defaultTitle
+        : window.prompt("Title for this commit request", defaultTitle);
+      if (title === null) return;
+      await api.projects.submitCommitRequest(selectedId, myMember.id, {
+        title: title.trim() || defaultTitle,
+      });
       await refreshCommitRequests(selectedId);
       setTab("commits");
+    };
+
+    try {
+      // A passing analysis already bound to the current branch state? Skip the
+      // (token-costly) re-scan and submit straight away. If the server gate
+      // disagrees (stale), fall back to a fresh analysis.
+      if (security?.canCommit) {
+        try {
+          setCommitPhase("submitting");
+          await finishSubmit();
+          return;
+        } catch (reason) {
+          if (!(reason instanceof ApiError) || reason.status !== 409) throw reason;
+        }
+      }
+
+      setCommitPhase("analyzing");
+      const { security: next } = await api.projects.securityAnalysis(selectedId, myMember.id);
+      if (!mounted.current) return;
+      setSecurity(next);
+      if (!next.canCommit) {
+        setSecurityExpanded(true);
+        return;
+      }
+      await finishSubmit();
     } catch (reason) {
       fail(reason);
     } finally {
-      if (mounted.current) setSubmittingCommit(false);
+      if (mounted.current) setCommitPhase(null);
     }
+  };
+
+  // After the agent finishes a fix, auto re-run the analysis + commit — the user
+  // shouldn't have to press Submit again.
+  // Direct model rewrite of the flagged file(s) — no agent run — then auto
+  // re-scan + commit. `pointIds` undefined = fix every flagged finding.
+  const runAutoFix = async (pointIds?: string[]) => {
+    if (!selectedId || !myMember || commitPhase !== null) return;
+    setFixPoint(null);
+    setTab("mine");
+    setError(null);
+    setMergeNote(null);
+    setCommitPhase("fixing");
+    let fixed = false;
+    try {
+      const { security: next } = await api.projects.securityFix(selectedId, myMember.id, pointIds);
+      if (mounted.current) setSecurity(next);
+      if (selectedId) await loadChild(selectedId); // surface the fix turn in chat
+      fixed = true;
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      if (mounted.current) setCommitPhase(null);
+    }
+    if (fixed) await submitCommitRequest(true);
+  };
+
+  const fixWithAgent = (p: SecurityAnalysisPoint) => void runAutoFix([p.id]);
+  const fixAllWithAgent = (points: SecurityAnalysisPoint[]) => {
+    if (points.length > 0) void runAutoFix();
   };
 
   const decideCommit = async (requestId: string, decision: "approved" | "rejected") => {
@@ -619,29 +613,39 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
                   )}
                   <div className="mine-toolbar">
                     <button
-                      className="button button-ghost"
-                      onClick={() => void runSecurityAnalysis()}
-                      disabled={securityRunning || busy || isArchived || ws.status === "busy"}
-                      title={
-                        ws.status === "busy"
-                          ? "Wait for the current agent run to finish"
-                          : undefined
-                      }
-                    >
-                      {securityRunning ? <Spinner /> : "Run security analysis"}
-                    </button>
-                    <button
                       className="button button-primary"
                       onClick={() => void submitCommitRequest()}
-                      disabled={submittingCommit || busy || isArchived || !security?.canCommit}
-                      title={security?.canCommit ? undefined : SECURITY_GATE_TEXT[security?.reason ?? "never-run"]}
+                      disabled={commitPhase !== null || busy || isArchived || ws.status === "busy"}
+                      title={
+                        ws.status === "busy" ? "Wait for the current agent run to finish" : undefined
+                      }
                     >
-                      {submittingCommit ? <Spinner /> : "Submit commit request"}
+                      {commitPhase === "fixing" ? (
+                        <>
+                          <Spinner /> Applying fix…
+                        </>
+                      ) : commitPhase === "analyzing" ? (
+                        <>
+                          <Spinner /> Running security analysis…
+                        </>
+                      ) : commitPhase === "submitting" ? (
+                        <>
+                          <Spinner /> Submitting…
+                        </>
+                      ) : (
+                        "Submit commit request"
+                      )}
                     </button>
                     <button
                       className="button button-ghost"
                       onClick={openMerge}
-                      disabled={busy || isArchived || ws.status === "busy" || ws.branches.length === 0}
+                      disabled={
+                        commitPhase !== null ||
+                        busy ||
+                        isArchived ||
+                        ws.status === "busy" ||
+                        ws.branches.length === 0
+                      }
                       title={
                         ws.branches.length === 0
                           ? "You have no sub-branches to merge"
@@ -656,14 +660,15 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
 
                   {mergeNote && <p className="muted-note">{mergeNote}</p>}
 
-                  {securityRunning && (
+                  {commitPhase === "analyzing" && (
                     <p className="muted-note">
-                      Your child agent is reviewing the branch against the OWASP Top 10… this runs a
-                      full agent turn and can take a minute.
+                      Checking your changed files against the OWASP Top 10… a fast static pass runs
+                      first, then one model call if that's clean. The commit request is submitted only
+                      if every category passes.
                     </p>
                   )}
 
-                  {security && !securityRunning && (() => {
+                  {security && commitPhase !== "analyzing" && (() => {
                     const points = security.analysis?.points ?? [];
                     const fails = points.filter((p) => p.status === "fail");
                     return (
@@ -693,14 +698,8 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
                               <button
                                 className="button button-primary"
                                 onClick={() => fixAllWithAgent(fails)}
-                                disabled={isArchived || ws.status === "busy"}
-                                title={
-                                  isArchived
-                                    ? "This project is archived"
-                                    : ws.status === "busy"
-                                      ? "Wait for the current agent run to finish"
-                                      : undefined
-                                }
+                                disabled={isArchived || commitPhase !== null}
+                                title={isArchived ? "This project is archived" : undefined}
                               >
                                 Fix all {fails.length}
                               </button>
@@ -730,6 +729,7 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
                                   <button
                                     className="button button-ghost owasp-fix-btn"
                                     onClick={() => setFixPoint(p)}
+                                    disabled={commitPhase !== null}
                                   >
                                     View &amp; fix
                                   </button>
@@ -936,12 +936,16 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
 
             <span className="eyebrow">Flagged code</span>
             <pre className="owasp-fix-code">
-              {fixPoint.evidence || "The analysis did not capture a snippet — the agent will locate it."}
+              {fixPoint.evidence || "The analysis did not capture a snippet."}
             </pre>
 
             <span className="eyebrow">Suggested fix</span>
             <p className="owasp-fix-remediation">
-              {fixPoint.remediation || "No specific remediation was provided; the agent will propose one."}
+              {fixPoint.remediation || "No specific remediation was provided."}
+            </p>
+            <p className="muted-note">
+              Fix rewrites <code>{fixPoint.file || "the file"}</code> in one model call, then re-runs
+              the analysis and commits if it passes.
             </p>
 
             <div className="modal-footer">
@@ -952,14 +956,8 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
                 type="button"
                 className="button button-primary"
                 onClick={() => fixWithAgent(fixPoint)}
-                disabled={isArchived || ws.status === "busy"}
-                title={
-                  isArchived
-                    ? "This project is archived"
-                    : ws.status === "busy"
-                      ? "Wait for the current agent run to finish"
-                      : undefined
-                }
+                disabled={isArchived || commitPhase !== null}
+                title={isArchived ? "This project is archived" : undefined}
               >
                 Fix
               </button>
