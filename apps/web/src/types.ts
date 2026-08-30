@@ -40,6 +40,7 @@ export interface Agent {
 export interface Project {
   id: string;
   name: string;
+  description: string;
   ownerId: string;
   mainWorkspacePath: string;
   parentAgentId: string;
@@ -47,6 +48,25 @@ export interface Project {
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type ProjectMemberStatus = "invited" | "active";
+
+export interface ProjectInvitation {
+  projectId: string;
+  projectName: string;
+  role: string;
+  invitedByName: string;
+  invitedAt: string;
+}
+
+export interface ActivityEntry {
+  id: string;
+  userName: string;
+  action: string;
+  decision: "allow" | "deny";
+  reason: string;
+  timestamp: string;
 }
 
 export type OwaspStatus = "pass" | "fail" | "na";
@@ -102,6 +122,7 @@ export interface ProjectMember {
   id: string;
   projectId: string;
   userId: string;
+  status: ProjectMemberStatus;
   role: string;
   childAgentId: string;
   workspacePath: string;
@@ -116,15 +137,19 @@ export interface ProjectMemberView {
   id: string;
   userId: string;
   name: string;
+  status: ProjectMemberStatus;
   role: string;
   childAgentId: string;
   securityAnalysis: SecurityAnalysis | null;
+  invitedByName: string;
+  pendingCommits: number;
   createdAt: string;
 }
 
 export interface RosterEntry {
   userId: string;
   name: string;
+  status: ProjectMemberStatus;
   role: string;
 }
 
@@ -140,6 +165,7 @@ export interface ParentAgentView {
 export interface ProjectDetail {
   project: Project;
   role: "owner" | "member";
+  owner: { id: string; name: string };
   myMembership: ProjectMember | null;
   members: ProjectMemberView[] | RosterEntry[];
 }

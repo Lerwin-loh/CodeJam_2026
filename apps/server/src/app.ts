@@ -59,6 +59,13 @@ const memberParams = z.object({
   memberId: z.string().uuid(),
 });
 const createProjectBody = z.object({ name: z.string().trim().min(1).max(120) });
+const updateProjectBody = z
+  .object({
+    name: z.string().trim().min(1).max(120).optional(),
+    description: z.string().max(500).optional(),
+  })
+  .refine((v) => v.name !== undefined || v.description !== undefined, "Nothing to update");
+const transferProjectBody = z.object({ toUserId: z.string().uuid() });
 const upgradeAgentBody = z.object({ projectName: z.string().trim().min(1).max(120) });
 const addMemberBody = z.object({
   userName: z.string().trim().min(1).max(60),
@@ -438,11 +445,52 @@ export async function createApp(
 
   app.get("/api/projects", async (request) => ({
     projects: projects.listProjects(request.user.id),
+    invitations: projects.listPendingInvitations(request.user.id),
   }));
 
   app.get("/api/projects/:id", async (request) => {
     const { id } = projectIdParams.parse(request.params);
     return projects.getProject(id, request.user);
+  });
+
+  app.patch("/api/projects/:id", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.update");
+    const body = updateProjectBody.parse(request.body);
+    return { project: await projects.updateProject(id, request.user, body) };
+  });
+
+  app.post("/api/projects/:id/transfer", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.transfer");
+    const { toUserId } = transferProjectBody.parse(request.body);
+    return { project: await projects.transferOwnership(id, request.user, toUserId) };
+  });
+
+  app.post("/api/projects/:id/leave", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.leave");
+    await projects.leaveProject(id, request.user);
+    return { ok: true };
+  });
+
+  app.post("/api/projects/:id/invitation/accept", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "invitation.respond");
+    return { member: await projects.acceptInvitation(id, request.user) };
+  });
+
+  app.post("/api/projects/:id/invitation/decline", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "invitation.respond");
+    await projects.declineInvitation(id, request.user);
+    return { ok: true };
+  });
+
+  app.get("/api/projects/:id/activity", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "activity.read");
+    return { activity: projects.getActivity(id) };
   });
 
   app.delete("/api/projects/:id", async (request) => {
@@ -494,7 +542,7 @@ export async function createApp(
     const { id } = projectIdParams.parse(request.params);
     await projects.assertProjectAccess(id, request.user, "member.manage");
     const body = addMemberBody.parse(request.body);
-    const member = await projects.addMember(id, request.user, body);
+    const member = await projects.inviteMember(id, request.user, body);
     return reply.code(201).send({ member });
   });
 
@@ -502,14 +550,14 @@ export async function createApp(
     const { id, memberId } = memberParams.parse(request.params);
     await projects.assertProjectAccess(id, request.user, "member.manage");
     const body = updateMemberBody.parse(request.body);
-    const member = await projects.updateMember(id, memberId, body);
+    const member = await projects.updateMember(id, memberId, request.user, body);
     return { member };
   });
 
   app.delete("/api/projects/:id/members/:memberId", async (request) => {
     const { id, memberId } = memberParams.parse(request.params);
     await projects.assertProjectAccess(id, request.user, "member.manage");
-    await projects.removeMember(id, memberId);
+    await projects.removeMember(id, memberId, request.user);
     return { ok: true };
   });
 

@@ -27,6 +27,7 @@ const service = {
 
 const projectsStub = {
   listProjects: () => [],
+  listPendingInvitations: () => [],
 } as unknown as ProjectService;
 
 describe("HTTP boundary", () => {

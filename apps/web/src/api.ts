@@ -185,13 +185,39 @@ export const api = {
   runDetails: (id: string) => request<RunDetails>("/api/runs/" + id + "/details"),
 
   projects: {
-    list: () => request<{ projects: Project[] }>("/api/projects"),
+    list: () =>
+      request<{ projects: Project[]; invitations: import("./types").ProjectInvitation[] }>(
+        "/api/projects",
+      ),
     create: (name: string) =>
       request<{ project: Project }>("/api/projects", {
         method: "POST",
         body: JSON.stringify({ name }),
       }),
     get: (id: string) => request<ProjectDetail>("/api/projects/" + id),
+    update: (id: string, body: { name?: string; description?: string }) =>
+      request<{ project: Project }>("/api/projects/" + id, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    transfer: (id: string, toUserId: string) =>
+      request<{ project: Project }>("/api/projects/" + id + "/transfer", {
+        method: "POST",
+        body: JSON.stringify({ toUserId }),
+      }),
+    leave: (id: string) =>
+      request<{ ok: true }>("/api/projects/" + id + "/leave", { method: "POST" }),
+    acceptInvite: (id: string) =>
+      request<{ member: import("./types").ProjectMember }>(
+        "/api/projects/" + id + "/invitation/accept",
+        { method: "POST" },
+      ),
+    declineInvite: (id: string) =>
+      request<{ ok: true }>("/api/projects/" + id + "/invitation/decline", { method: "POST" }),
+    activity: (id: string) =>
+      request<{ activity: import("./types").ActivityEntry[] }>(
+        "/api/projects/" + id + "/activity",
+      ),
     delete: (id: string) =>
       request<{ archivedWorkspace: string | null; archivedSnapshots: number }>(
         "/api/projects/" + id,

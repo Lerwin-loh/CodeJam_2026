@@ -49,6 +49,7 @@ export interface Agent {
 export interface Project {
   id: string;
   name: string;
+  description: string;
   ownerId: string;
   mainWorkspacePath: string;
   parentAgentId: string;
@@ -60,14 +61,23 @@ export interface Project {
   updatedAt: string;
 }
 
-/** A human on a project. The owner is implicit (Project.ownerId) and has no row. */
+export type ProjectMemberStatus = "invited" | "active";
+
+/**
+ * A human on a project. The owner is implicit (Project.ownerId) and has no row.
+ * An "invited" row has no child agent / workspace yet — those are created when
+ * the invitee accepts.
+ */
 export interface ProjectMember {
   id: string;
   projectId: string;
   userId: string;
+  status: ProjectMemberStatus;
   /** Free-text label the owner assigns, e.g. "Frontend", "Backend". */
   role: string;
+  /** "" until the invite is accepted. */
   childAgentId: string;
+  /** "" until the invite is accepted. */
   workspacePath: string;
   /** Latest OWASP analysis the member's child agent ran against this branch. */
   securityAnalysis: SecurityAnalysis | null;

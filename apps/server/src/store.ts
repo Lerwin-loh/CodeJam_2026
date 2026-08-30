@@ -56,13 +56,19 @@ export class JsonStore {
       parsed.traces ??= [];
       for (const member of parsed.projectMembers) {
         member.securityAnalysis ??= null;
+        member.status ??= "active";
+        member.childAgentId ??= "";
+        member.workspacePath ??= "";
         delete (member as { lastSecurityCheck?: unknown }).lastSecurityCheck;
       }
       for (const request of parsed.commitRequests) {
         request.securityAnalysis ??= null;
         delete (request as { securityCheck?: unknown }).securityCheck;
       }
-      for (const project of parsed.projects) project.archivedAt ??= null;
+      for (const project of parsed.projects) {
+        project.archivedAt ??= null;
+        project.description ??= "";
+      }
       parsed.branches ??= [];
       parsed.snapshots ??= [];
       parsed.contexts ??= [];
