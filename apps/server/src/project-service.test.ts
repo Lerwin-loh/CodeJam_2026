@@ -466,7 +466,10 @@ describe("Part 1 — agent access across the project", () => {
     ).rejects.toMatchObject({ statusCode: 403 });
 
     const decided = await projects.decideCommitRequest(request.id, "approved", owner);
-    expect(decided.status).toBe("approved");
+    expect(decided.status).toBe("merged");
+    expect(decided.decidedBy).toBe(owner.id);
+    expect(store.snapshot().projects.find((item) => item.id === project.id)?.headSnapshotId)
+      .not.toBe(project.headSnapshotId);
   });
 
   it("keeps the commit gate closed on a failing OWASP point", async () => {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "./api";
+import { ApiError, api } from "./api";
 import { MergeReview } from "./MergeReview";
 import type {
     CommitRequest,
@@ -113,7 +113,8 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
   const [securityExpanded, setSecurityExpanded] = useState(false);
   const [securityRunning, setSecurityRunning] = useState(false);
   const [submittingCommit, setSubmittingCommit] = useState(false);
-  const [mergePreview, setMergePreview] = useState<{ preview: MergePreview; memberId: string; branchId: string | null } | null>(null);
+  const [mergePreview, setMergePreview] = useState<{ preview: MergePreview; memberId: string; branchId: string | null; requestId?: string } | null>(null);
+  const [agentMergePreview, setAgentMergePreview] = useState<{ preview: MergePreview; agentId: string; branchId: string } | null>(null);
   const [mergeBusy, setMergeBusy] = useState(false);
 
   const [mUserName, setMUserName] = useState("");
@@ -401,8 +402,27 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
       await api.projects.decideCommitRequest(requestId, decision);
       await refreshCommitRequests(selectedId);
     } catch (reason) {
+      if (decision === "approved" && reason instanceof ApiError && reason.preview) {
+        const request = commitRequests.find((item) => item.id === requestId);
+        if (request) setMergePreview({ preview: reason.preview, memberId: request.memberId, branchId: null, requestId });
+      }
       fail(reason);
     }
+  };
+
+  const openAgentMerge = async (agentId: string, branchId: string) => {
+    setMergeBusy(true); setError(null);
+    try { setAgentMergePreview({ preview: await api.mergePreview(agentId, branchId), agentId, branchId }); }
+    catch (reason) { fail(reason); }
+    finally { if (mounted.current) setMergeBusy(false); }
+  };
+
+  const applyAgentMerge = async (resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => {
+    if (!agentMergePreview) return;
+    setMergeBusy(true); setError(null);
+    try { await api.merge(agentMergePreview.agentId, agentMergePreview.branchId, resolution); setAgentMergePreview(null); }
+    catch (reason) { fail(reason); }
+    finally { if (mounted.current) setMergeBusy(false); }
   };
 
   const openChildMerge = async (memberId: string, branchId: string | null = null) => {
@@ -416,7 +436,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
   const applyChildMerge = async (resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => {
     if (!selectedId || !mergePreview) return;
     setMergeBusy(true); setError(null);
-    try { await api.projects.merge(selectedId, mergePreview.memberId, mergePreview.branchId, resolution); setMergePreview(null); await loadDetail(selectedId); }
+    try { await api.projects.merge(selectedId, mergePreview.memberId, mergePreview.branchId, resolution, mergePreview.requestId); setMergePreview(null); await loadDetail(selectedId); }
     catch (reason) { fail(reason); }
     finally { if (mounted.current) setMergeBusy(false); }
   };
@@ -584,7 +604,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                       title={activeAgent.title}
                       subtitle={activeAgent.subtitle}
                       showDelete={false}
-                      sidePanel={ws.showBranchPoint ? <BranchPointPanel ws={ws} /> : undefined}
+                      sidePanel={ws.showBranchPoint ? <BranchPointPanel ws={ws} onMergeBranch={isOwner && parent ? (branchId) => void openAgentMerge(parent.agent.id, branchId) : undefined} /> : undefined}
                     />
                   </div>
                 ) : (
@@ -715,7 +735,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                         title={activeAgent.title}
                         subtitle={activeAgent.subtitle}
                         showDelete={false}
-                        sidePanel={ws.showBranchPoint ? <BranchPointPanel ws={ws} onMergeBranch={myMember ? (branchId) => void openChildMerge(myMember.id, branchId) : undefined} /> : undefined}
+                        sidePanel={ws.showBranchPoint ? <BranchPointPanel ws={ws} onMergeBranch={childId ? (branchId) => void openAgentMerge(childId, branchId) : undefined} /> : undefined}
                       />
                     </div>
                   )}
@@ -789,7 +809,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                         </div>
                       )}
                       {isOwner && cr.status === "approved" && !isArchived && (
-                        <div className="commit-actions"><button className="button button-primary" onClick={() => void openChildMerge(cr.memberId)}>Review merge into main</button></div>
+                        <div className="commit-actions"><button className="button button-primary" onClick={() => void openChildMerge(cr.memberId, null)}>Review merge into main</button></div>
                       )}
                       {isOwner && cr.status === "pending" && isArchived && (
                         <p className="muted-note">
@@ -937,8 +957,9 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
         </div>
       )}
 
-      {mergeBusy && !mergePreview && <div className="modal-backdrop merge-loading-backdrop"><section className="merge-loading-card" role="status" aria-live="polite"><span className="spinner" /><div><strong>Preparing merge review…</strong><p>Comparing outcomes, workspace files, and context prompts.</p></div></section></div>}
+      {mergeBusy && !mergePreview && !agentMergePreview && <div className="modal-backdrop merge-loading-backdrop"><section className="merge-loading-card" role="status" aria-live="polite"><span className="spinner" /><div><strong>Preparing merge review…</strong><p>Comparing outcomes, workspace files, and context prompts.</p></div></section></div>}
       {mergePreview && <MergeReview preview={mergePreview.preview} busy={mergeBusy} onCancel={() => setMergePreview(null)} onFixWithAi={() => { if (!selectedId) return Promise.reject(new Error("Project not selected")); return api.projects.mergeAi(selectedId, mergePreview.memberId, mergePreview.branchId); }} onMerge={(resolution) => void applyChildMerge(resolution)} />}
+      {agentMergePreview && <MergeReview preview={agentMergePreview.preview} busy={mergeBusy} onCancel={() => setAgentMergePreview(null)} onFixWithAi={() => api.mergeAi(agentMergePreview.agentId, agentMergePreview.branchId)} onMerge={(resolution) => void applyAgentMerge(resolution)} />}
     </div>
   );
 }

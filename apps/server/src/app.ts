@@ -66,7 +66,7 @@ const mergeResolution = z.object({
   context: z.record(z.string(), z.enum(["target", "source", "ai"])),
 });
 const agentMergeBody = z.object({ branchId: z.string().uuid(), resolution: mergeResolution.optional() });
-const projectMergeBody = z.object({ memberId: z.string().uuid(), branchId: z.string().uuid().nullable().optional(), resolution: mergeResolution.optional() });
+const projectMergeBody = z.object({ memberId: z.string().uuid(), branchId: z.string().uuid().nullable().optional(), requestId: z.string().uuid().optional(), resolution: mergeResolution.optional() });
 const commitRequestParams = z.object({ id: z.string().uuid() });
 
 const publicPaths = new Set(["/api/health", "/api/auth"]);
@@ -583,7 +583,7 @@ export async function createApp(
     await projects.assertProjectAccess(id, request.user, "commit.request.decide");
     const body = projectMergeBody.parse(request.body);
     if (!body.resolution) throw new HttpError(400, "Merge resolutions are required.");
-    return projects.mergeChild(id, body.memberId, body.branchId ?? null, body.resolution);
+    return projects.mergeChild(id, body.memberId, body.branchId ?? null, body.resolution, body.requestId, request.user.id);
   });
 
   app.post("/api/projects/:id/merge-ai", async (request) => {

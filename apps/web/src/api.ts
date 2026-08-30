@@ -24,6 +24,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly preview?: MergePreview,
   ) {
     super(message);
   }
@@ -72,13 +73,14 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const data = (await response.json().catch(() => ({}))) as T & {
     error?: string;
     message?: string;
+    preview?: MergePreview;
   };
   if (!response.ok) {
     // Our handler puts the real text in `error`; Fastify's default puts a bare
     // status phrase in `error` and the real text in `message`.
     const detail =
       typeof data.message === "string" && data.message ? data.message : data.error;
-    throw new ApiError(detail ?? "Request failed", response.status);
+    throw new ApiError(detail ?? "Request failed", response.status, data.preview);
   }
   return data;
 }
@@ -227,7 +229,7 @@ export const api = {
         body: JSON.stringify({ decision }),
       }),
     mergePreview: (id: string, memberId: string, branchId: string | null = null) => request<MergePreview>("/api/projects/" + id + "/merge-preview", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
-    merge: (id: string, memberId: string, branchId: string | null, resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[] }>("/api/projects/" + id + "/merge", { method: "POST", body: JSON.stringify({ memberId, branchId, resolution }) }),
+    merge: (id: string, memberId: string, branchId: string | null, resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }, requestId?: string) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[] }>("/api/projects/" + id + "/merge", { method: "POST", body: JSON.stringify({ memberId, branchId, requestId, resolution }) }),
     mergeAi: (id: string, memberId: string, branchId: string | null) => request<{ context: Record<string, "target" | "source">; workspace: Record<string, "target" | "source">; aiDecisions: Record<string, string> }>("/api/projects/" + id + "/merge-ai", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
   },
   restoreCheckpoint: (id: string) =>

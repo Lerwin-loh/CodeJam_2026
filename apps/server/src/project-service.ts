@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { captureSessionOffset, rebuildSessionFromTimeline } from "./codex-session-fork.js";
 import { HttpError } from "./errors.js";
-import { MergeEngine, conversationCommits, outcomeDetails, outcomeSummary } from "./merge-engine.js";
+import { MergeConflictError, MergeEngine, conversationCommits, outcomeDetails, outcomeSummary } from "./merge-engine.js";
 import { JsonStore } from "./store.js";
 import type {
     Agent,
@@ -915,7 +915,7 @@ export class ProjectService {
     return this.mergeEngine.preview(await this.projectMergeSide(parent, project.mainWorkspacePath, parent.id, "main", childBase), await this.projectMergeSide(child, branch?.workspacePath ?? child.workspacePath, branch?.id ?? child.id, branch?.name ?? child.name, childBase, branch?.id ?? null));
   }
 
-  async mergeChild(projectId: string, memberId: string, branchId: string | null, resolution: MergeResolution) {
+  async mergeChild(projectId: string, memberId: string, branchId: string | null, resolution: MergeResolution, requestId?: string, decidedBy?: string) {
     const database = this.store.snapshot();
     const project = this.getProjectOrThrow(projectId);
     const parent = database.agents.find((agent) => agent.id === project.parentAgentId);
@@ -923,6 +923,13 @@ export class ProjectService {
     const child = member && database.agents.find((agent) => agent.id === member.childAgentId);
     const branch = branchId ? database.branches.find((item) => item.id === branchId && item.agentId === child?.id) : null;
     if (!parent || !member || !child || (branchId && !branch)) throw new HttpError(404, "Project merge source not found");
+    if (requestId) {
+      const request = database.commitRequests.find((item) => item.id === requestId && item.projectId === projectId && item.memberId === memberId);
+      if (!request) throw new HttpError(404, "Commit request not found");
+      if (request.status !== "pending" && request.status !== "approved") {
+        throw new HttpError(409, "This commit request has already been merged or rejected.");
+      }
+    }
     const childBase = branch ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null : database.snapshots.filter((snapshot) => snapshot.agentId === child.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.id ?? null;
     const target = await this.projectMergeSide(parent, project.mainWorkspacePath, parent.id, "main", childBase);
     const source = await this.projectMergeSide(child, branch?.workspacePath ?? child.workspacePath, branch?.id ?? child.id, branch?.name ?? child.name, childBase, branch?.id ?? null);
@@ -945,34 +952,46 @@ export class ProjectService {
           const parentAgent = db.agents.find((item) => item.id === parent.id);
           if (parentAgent) parentAgent.codexThreadId = mergedThreadId;
         }
-        const request = db.commitRequests.find((item) => item.projectId === projectId && item.memberId === memberId && item.status === "approved");
-        if (request) { request.status = "merged"; request.decidedAt = now(); }
+        const request = requestId
+          ? db.commitRequests.find((item) => item.id === requestId && item.projectId === projectId && item.memberId === memberId)
+          : db.commitRequests.find((item) => item.projectId === projectId && item.memberId === memberId && item.status === "approved");
+        if (request) {
+          request.status = "merged";
+          request.decidedBy = request.decidedBy ?? decidedBy ?? null;
+          request.decidedAt = request.decidedAt ?? now();
+        }
       });
       return snapshot;
     });
   }
 
-  /**
-   * Owner decision on a pending commit request. Approve/reject only records the
-   * outcome: actually applying the change to main (with conflict handling) is
-   * the next iteration.
-   */
+  /** Owner decision on a pending commit request. Approval applies a clean merge. */
   async decideCommitRequest(
     requestId: string,
     decision: "approved" | "rejected",
     decidedBy: User,
   ): Promise<CommitRequest> {
-    return this.store.mutate((database) => {
-      const request = database.commitRequests.find((item) => item.id === requestId);
-      if (!request) throw new HttpError(404, "Commit request not found");
-      if (request.status !== "pending") {
-        throw new HttpError(409, "This commit request has already been decided.");
-      }
-      request.status = decision;
-      request.decidedBy = decidedBy.id;
-      request.decidedAt = now();
-      return structuredClone(request);
-    });
+    const request = this.getCommitRequest(requestId);
+    if (request.status !== "pending") {
+      throw new HttpError(409, "This commit request has already been decided.");
+    }
+    if (decision === "rejected") {
+      return this.store.mutate((database) => {
+        const row = database.commitRequests.find((item) => item.id === requestId);
+        if (!row || row.status !== "pending") throw new HttpError(409, "This commit request has already been decided.");
+        row.status = "rejected";
+        row.decidedBy = decidedBy.id;
+        row.decidedAt = now();
+        return structuredClone(row);
+      });
+    }
+
+    const preview = await this.previewChildMerge(request.projectId, request.memberId);
+    if (preview.workspaceConflicts.length > 0 || preview.contextConflicts.length > 0) {
+      throw new MergeConflictError(preview);
+    }
+    await this.mergeChild(request.projectId, request.memberId, null, { workspace: {}, context: {} }, requestId, decidedBy.id);
+    return this.getCommitRequest(requestId);
   }
 
   async resolveChildMerge(projectId: string, memberId: string, branchId: string | null) {

@@ -66,7 +66,7 @@ export function useAgentWorkspace(
   const [error, setError] = useState<string | null>(null);
 
   const [showBranchPoint, setShowBranchPoint] = useState(false);
-  const [bpView, setBpView] = useState<"history" | "branches" | "compare">("history");
+  const [bpView, setBpView] = useState<"history" | "branches">("history");
   const [bpExpanded, setBpExpanded] = useState<string | null>("history");
   const [selectedCheckpointId, setSelectedCheckpointId] = useState<string | null>(null);
   const [showBpSettings, setShowBpSettings] = useState(false);
@@ -840,7 +840,7 @@ export function AgentPlayground({
 }
 
 /* ------------------------------------------------------------------ */
-/* BranchPoint drawer: History / Branches / Compare. */
+/* BranchPoint drawer: History / Branches. */
 /* ------------------------------------------------------------------ */
 
 export function BranchPointPanel({ ws, onMergeBranch }: { ws: WorkspaceApi; onMergeBranch?: (branchId: string) => void }) {
@@ -890,7 +890,7 @@ export function BranchPointPanel({ ws, onMergeBranch }: { ws: WorkspaceApi; onMe
       </div>
 
       <nav className="branchpoint-tabs" aria-label="BranchPoint views">
-        {(["history", "branches", "compare"] as const).map((view) => (
+        {(["history", "branches"] as const).map((view) => (
           <button
             className={ws.bpView === view ? "active" : ""}
             key={view}
@@ -915,7 +915,7 @@ export function BranchPointPanel({ ws, onMergeBranch }: { ws: WorkspaceApi; onMe
               ? "Execution history"
               : ws.bpView === "branches"
                 ? "Branch workspaces"
-                : "Compare workspaces"}
+              : "Branch workspaces"}
           </span>
           <span>{ws.bpExpanded === ws.bpView ? "−" : "+"}</span>
         </button>
@@ -1128,7 +1128,7 @@ export function BranchPointPanel({ ws, onMergeBranch }: { ws: WorkspaceApi; onMe
                     <button className={"branch-card " + (branch.id === ws.activeBranchId ? "active" : "")} type="button" onClick={() => ws.selectBranch(branch.id)}>
                       <span className="branch-card-icon">⑂</span><span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span><span>›</span>
                     </button>
-                    {onMergeBranch && <button className="button button-ghost" type="button" onClick={() => onMergeBranch(branch.id)}>Merge to main</button>}
+                    {onMergeBranch && <button className="button button-ghost" type="button" onClick={() => onMergeBranch(branch.id)}>Merge</button>}
                   </div>
                 ))}
               </div>
@@ -1141,17 +1141,6 @@ export function BranchPointPanel({ ws, onMergeBranch }: { ws: WorkspaceApi; onMe
             </div>
           ))}
 
-        {ws.bpExpanded === ws.bpView && ws.bpView === "compare" && (
-          <div className="branchpoint-empty-state">
-            <span className="branchpoint-empty-icon">⇄</span>
-            <strong>{ws.branches.length > 1 ? "Comparison is ready for the next step" : "No workspaces to compare yet"}</strong>
-            <p>
-              {ws.branches.length > 1
-                ? "Select branch snapshots to compare their files and outcomes."
-                : "Create two independent branches from Checkpoint events to compare their files and outcomes."}
-            </p>
-          </div>
-        )}
       </div>
     </aside>
     )}

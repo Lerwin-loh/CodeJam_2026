@@ -78,7 +78,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
   const [showBranchPointSettings, setShowBranchPointSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<BranchPointSettingsTabKey>("trace");
   const [howItWorksOpen, setHowItWorksOpen] = useState(false);
-  const [activeBranchPointView, setActiveBranchPointView] = useState<"history" | "branches" | "compare">("history");
+  const [activeBranchPointView, setActiveBranchPointView] = useState<"history" | "branches">("history");
   const [expandedBranchPointView, setExpandedBranchPointView] = useState<string | null>("history");
   const [checkpointOverlay, setCheckpointOverlay] = useState<{
     kind: "diff" | "details" | "unavailable";
@@ -864,7 +864,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
           </div>
 
           <nav className="branchpoint-tabs" aria-label="BranchPoint views">
-            {(["history", "branches", "compare"] as const).map((view) => (
+            {(["history", "branches"] as const).map((view) => (
               <button
                 className={activeBranchPointView === view ? "active" : ""}
                 key={view}
@@ -885,7 +885,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
               onClick={() => setExpandedBranchPointView((current) => current === activeBranchPointView ? null : activeBranchPointView)}
               aria-expanded={expandedBranchPointView === activeBranchPointView}
             >
-              <span>{activeBranchPointView === "history" ? "Execution history" : activeBranchPointView === "branches" ? "Branch workspaces" : "Compare workspaces"}</span>
+              <span>{activeBranchPointView === "history" ? "Execution history" : "Branch workspaces"}</span>
               <span>{expandedBranchPointView === activeBranchPointView ? "−" : "+"}</span>
             </button>
             {expandedBranchPointView === activeBranchPointView && activeBranchPointView === "history" && (
@@ -1002,18 +1002,11 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
                     ))}
                   </div>
                 </div>
-                <div className="branch-list">{branches.map((branch) => <div className="branch-card-row" key={branch.id}><button className={"branch-card " + (branch.id === activeBranchId ? "active" : "")} type="button" onClick={() => { setActiveBranchId(branch.id); setActiveBranchPointView("history"); }}><span className="branch-card-icon">⑂</span><span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span><span>›</span></button><button className="button button-ghost" type="button" onClick={() => void openBranchMerge(branch)}>Merge to main</button></div>)}</div>
+                <div className="branch-list">{branches.map((branch) => <div className="branch-card-row" key={branch.id}><button className={"branch-card " + (branch.id === activeBranchId ? "active" : "")} type="button" onClick={() => { setActiveBranchId(branch.id); setActiveBranchPointView("history"); }}><span className="branch-card-icon">⑂</span><span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span><span>›</span></button><button className="button button-ghost" type="button" onClick={() => void openBranchMerge(branch)}>Merge</button></div>)}</div>
               </> : <div className="branchpoint-empty-state">
                 <span className="branchpoint-empty-icon">⑂</span>
                 <strong>No branch workspaces yet</strong>
                 <p>Choose “Branch from here” on a Checkpoint event to create an independent workspace.</p>
-              </div>
-            )}
-            {expandedBranchPointView === activeBranchPointView && activeBranchPointView === "compare" && (
-              <div className="branchpoint-empty-state">
-                <span className="branchpoint-empty-icon">⇄</span>
-                <strong>{branches.length > 1 ? "Comparison is ready for the next step" : "No workspaces to compare yet"}</strong>
-                <p>{branches.length > 1 ? "Select branch snapshots to compare their files and outcomes." : "Create two independent branches from Checkpoint events to compare their files and outcomes."}</p>
               </div>
             )}
           </div>
