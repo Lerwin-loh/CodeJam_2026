@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -81,6 +81,55 @@ describe("Part 1 — projects & membership", () => {
 
     expect(await readFile(path.join(member.workspacePath, "README.md"), "utf8")).toContain("App");
     expect(await readFile(path.join(member.workspacePath, "AGENTS.md"), "utf8")).toContain("Frontend");
+  });
+
+  it("stores parent and member branches inside their respective project workspaces", async () => {
+    const { projects, agents, store, workspaces } = await makeStack({
+      run: async (request) => {
+        await writeFile(path.join(request.workspacePath, "branch-source.txt"), request.prompt + "\n");
+        return { output: "ok", threadId: "t", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const owner = await agents.createUser("Owner");
+    await agents.createUser("Dana");
+    const project = await projects.createProject("App", owner.id);
+    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const parent = agents.getAgent(project.parentAgentId);
+    const child = agents.getAgent(member.childAgentId);
+
+    const parentRun = await agents.sendMessage(parent.id, "parent checkpoint");
+    const childRun = await agents.sendMessage(child.id, "child checkpoint");
+    await expect.poll(() => agents.getRun(parentRun.run.id).status).toBe("completed");
+    await expect.poll(() => agents.getRun(childRun.run.id).status).toBe("completed");
+
+    const parentCheckpoint = agents.getCheckpoints(parent.id)[0];
+    const childCheckpoint = agents.getCheckpoints(child.id)[0];
+    expect(parentCheckpoint).toBeDefined();
+    expect(childCheckpoint).toBeDefined();
+    if (!parentCheckpoint || !childCheckpoint) return;
+
+    const parentBranch = await agents.createBranchFromCheckpoint(parent.id, parentCheckpoint.id, "parent branch");
+    const childBranch = await agents.createBranchFromCheckpoint(child.id, childCheckpoint.id, "child branch");
+
+    expect(parentBranch.workspacePath).toBe(path.join(project.mainWorkspacePath, "branches", parentBranch.id));
+    expect(childBranch.workspacePath).toBe(path.join(member.workspacePath, "branches", childBranch.id));
+    expect(store.snapshot().branches.map((branch) => branch.workspacePath)).toEqual(
+      expect.arrayContaining([parentBranch.workspacePath, childBranch.workspacePath]),
+    );
+
+    // Older production builds used workspaces/<agent-id>/branches. Startup migrates those records and files.
+    const legacyParentPath = path.join(workspaces.workspacePath(parent.id), "branches", parentBranch.id);
+    await mkdir(path.dirname(legacyParentPath), { recursive: true });
+    await rename(parentBranch.workspacePath, legacyParentPath);
+    await store.mutate((database) => {
+      const branch = database.branches.find((item) => item.id === parentBranch.id);
+      if (branch) branch.workspacePath = legacyParentPath;
+    });
+    await agents.initialize();
+    expect(agents.getBranch(parentBranch.id).workspacePath).toBe(parentBranch.workspacePath);
+    expect(await readFile(path.join(parentBranch.workspacePath, "branch-source.txt"), "utf8")).toBe("parent checkpoint\n");
   });
 
   it("rejects adding an unknown user, the owner, or a duplicate member", async () => {

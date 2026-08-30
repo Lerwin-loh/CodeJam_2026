@@ -8,7 +8,9 @@ import type {
   WorkspaceSnapshot,
 } from "./types.js";
 
-const ignoredNames = new Set([".codex", ".git", "node_modules", "dist"]);
+// Branch workspaces live beside their source workspace, but are platform state:
+// never include them recursively in source manifests, snapshots, or restores.
+const ignoredNames = new Set([".codex", ".git", "node_modules", "dist", "branches"]);
 
 export class WorkspaceHistory {
   constructor(private readonly root: string) {}

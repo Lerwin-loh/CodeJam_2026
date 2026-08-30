@@ -259,6 +259,7 @@ describe("Agent lifecycle", () => {
     if (!checkpoint) return;
 
     const branch = await service.createBranchFromCheckpoint(agent.id, checkpoint.id, "try-alternative");
+    expect(branch.workspacePath).toBe(path.join(agent.workspacePath, "branches", branch.id));
     expect(service.getMessages(agent.id, branch.id).map((message) => message.content)).toContain("main change");
     expect(service.getRuns(agent.id, branch.id).map((run) => run.id)).toContain(mainRun.run.id);
     const branchRun = await service.sendMessage(agent.id, "branch change", branch.id);

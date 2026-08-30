@@ -9,8 +9,8 @@ export class WorkspaceManager {
     return path.join(this.root, agentId);
   }
 
-  branchWorkspacePath(agentId: string, branchId: string): string {
-    return path.join(this.root, agentId, "branches", branchId);
+  branchWorkspacePath(agentWorkspacePath: string, branchId: string): string {
+    return path.join(agentWorkspacePath, "branches", branchId);
   }
 
   projectMainPath(projectId: string): string {

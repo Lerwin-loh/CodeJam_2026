@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename } from "node:fs/promises";
 import path from "node:path";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
@@ -92,6 +92,7 @@ export class AgentService {
     await this.store.initialize();
     await this.workspaces.initialize();
     await this.history.initialize();
+    await this.migrateProjectBranchWorkspaces();
     await this.store.mutate((database) => {
       for (const run of database.runs) {
         if (run.status === "queued" || run.status === "running") {
@@ -121,6 +122,39 @@ export class AgentService {
           database.users.push(demo);
         }
         for (const agent of orphans) agent.ownerId = demo.id;
+      }
+    });
+  }
+
+  /** Move branches created by older builds from workspaces/<agent>/branches into the agent's project workspace. */
+  private async migrateProjectBranchWorkspaces(): Promise<void> {
+    const database = this.store.snapshot();
+    const moves: Array<{ branchId: string; from: string; to: string }> = [];
+    for (const branch of database.branches) {
+      const agent = database.agents.find((item) => item.id === branch.agentId);
+      if (!agent?.projectId) continue;
+      const target = this.workspaces.branchWorkspacePath(agent.workspacePath, branch.id);
+      if (path.resolve(branch.workspacePath) === path.resolve(target)) continue;
+      moves.push({ branchId: branch.id, from: branch.workspacePath, to: target });
+    }
+    if (moves.length === 0) return;
+
+    const completed: typeof moves = [];
+    for (const move of moves) {
+      await mkdir(path.dirname(move.to), { recursive: true });
+      try {
+        await rename(move.from, move.to);
+        completed.push(move);
+      } catch (error) {
+        // Keep the recorded path unchanged if its workspace no longer exists.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    if (completed.length === 0) return;
+    await this.store.mutate((next) => {
+      for (const move of completed) {
+        const branch = next.branches.find((item) => item.id === move.branchId);
+        if (branch) branch.workspacePath = move.to;
       }
     });
   }
@@ -595,7 +629,7 @@ export class AgentService {
       name: name.trim(),
       parentBranchId: checkpoint.branchId,
       parentCheckpointId: checkpointId,
-      workspacePath: this.workspaces.branchWorkspacePath(agentId, branchId),
+      workspacePath: this.workspaces.branchWorkspacePath(agent.workspacePath, branchId),
       codexThreadId: forkedThreadId,
       status: "ready",
       createdAt: now(),
