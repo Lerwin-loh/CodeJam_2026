@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -232,6 +232,136 @@ describe("Project access enforcement (end to end)", () => {
       headers: asAlice,
     });
     expect(projectsAfterDelete.json().projects).toEqual([]);
+
+    await app.close();
+  });
+});
+
+describe("BranchPoint API authorization (end to end)", () => {
+  it("protects branch, run, trace, and restore resources and resumes a branch thread", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-branch-api-test-"));
+    temporaryDirectories.push(root);
+    const config = loadConfig({
+      NODE_ENV: "test",
+      APP_DATA_DIR: path.join(root, "data"),
+      AGENT_WORKSPACE_ROOT: path.join(root, "workspaces"),
+      CODEX_HOME: path.join(root, "codex"),
+      ARK_API_KEY: "test-key",
+      ARK_MODEL: "ep-test",
+    });
+    const observedThreads: Array<{ prompt: string; threadId: string | null }> = [];
+    const runner: AgentRunner = {
+      run: async (request) => {
+        observedThreads.push({ prompt: request.prompt, threadId: request.threadId });
+        await writeFile(
+          path.join(request.workspacePath, request.prompt.replaceAll(" ", "-") + ".txt"),
+          request.prompt + "\n",
+        );
+        return {
+          output: "ok",
+          threadId: request.threadId ?? (request.prompt === "seed main" ? "main-thread" : "branch-thread"),
+          usage: null,
+        };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    const store = new JsonStore(path.join(root, "data", "db.json"));
+    const workspaces = new WorkspaceManager(path.join(root, "workspaces"));
+    const history = new WorkspaceHistory(path.join(root, "data", "branchpoint"));
+    const projects = new ProjectService(store, workspaces, history);
+    const branchService = new AgentService(config, store, workspaces, runner, history);
+    await branchService.initialize();
+    const app = await createApp(config, branchService, projects);
+
+    const createUser = async (name: string): Promise<string> => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        payload: { name },
+      });
+      expect(response.statusCode).toBe(201);
+      return response.json().user.token as string;
+    };
+    const aliceToken = await createUser("Branch Alice");
+    const bobToken = await createUser("Branch Bob");
+    const alice = { authorization: "Bearer " + aliceToken };
+    const bob = { authorization: "Bearer " + bobToken };
+
+    const createdAgent = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: alice,
+      payload: { name: "Branch API Agent" },
+    });
+    expect(createdAgent.statusCode).toBe(201);
+    const agentId = createdAgent.json().agent.id as string;
+
+    const seeded = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + agentId + "/messages",
+      headers: alice,
+      payload: { content: "seed main" },
+    });
+    expect(seeded.statusCode).toBe(202);
+    const mainRunId = seeded.json().run.id as string;
+    await expect.poll(() => branchService.getRun(mainRunId).status).toBe("completed");
+    const checkpoint = branchService.getCheckpoints(agentId)[0];
+    expect(checkpoint).toBeDefined();
+    if (!checkpoint) return;
+
+    const bobCreatesBranch = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + agentId + "/branches",
+      headers: bob,
+      payload: { checkpointId: checkpoint.id, name: "stolen branch" },
+    });
+    expect(bobCreatesBranch.statusCode).toBe(403);
+
+    const createdBranch = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + agentId + "/branches",
+      headers: alice,
+      payload: { checkpointId: checkpoint.id, name: "experiment" },
+    });
+    expect(createdBranch.statusCode).toBe(201);
+    const branchId = createdBranch.json().branch.id as string;
+
+    const firstBranchTurn = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + agentId + "/messages",
+      headers: alice,
+      payload: { content: "branch turn one", branchId },
+    });
+    expect(firstBranchTurn.statusCode).toBe(202);
+    await expect.poll(() => branchService.getRun(firstBranchTurn.json().run.id).status).toBe("completed");
+
+    const secondBranchTurn = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + agentId + "/messages",
+      headers: alice,
+      payload: { content: "branch turn two", branchId },
+    });
+    expect(secondBranchTurn.statusCode).toBe(202);
+    await expect.poll(() => branchService.getRun(secondBranchTurn.json().run.id).status).toBe("completed");
+    expect(observedThreads.find((item) => item.prompt === "branch turn two")?.threadId).toBe("branch-thread");
+
+    const ownerDetails = await app.inject({ method: "GET", url: "/api/runs/" + mainRunId + "/details", headers: alice });
+    expect(ownerDetails.statusCode).toBe(200);
+    const deniedDetails = await app.inject({ method: "GET", url: "/api/runs/" + mainRunId + "/details", headers: bob });
+    expect(deniedDetails.statusCode).toBe(403);
+
+    const ownerTrace = await app.inject({ method: "GET", url: "/api/runs/" + mainRunId + "/trace/stream", headers: alice });
+    expect(ownerTrace.statusCode).toBe(200);
+    expect(ownerTrace.body).toContain("run.completed");
+    const deniedTrace = await app.inject({ method: "GET", url: "/api/runs/" + mainRunId + "/trace/stream", headers: bob });
+    expect(deniedTrace.statusCode).toBe(403);
+
+    const deniedRestore = await app.inject({ method: "POST", url: "/api/checkpoints/" + checkpoint.id + "/restore", headers: bob });
+    expect(deniedRestore.statusCode).toBe(403);
+    const ownerRestore = await app.inject({ method: "POST", url: "/api/checkpoints/" + checkpoint.id + "/restore", headers: alice });
+    expect(ownerRestore.statusCode).toBe(200);
+    expect(ownerRestore.json().workspaceHash).toBe(checkpoint.workspaceHash);
 
     await app.close();
   });

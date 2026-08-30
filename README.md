@@ -8,9 +8,11 @@ Run it locally with Docker, Colima, or rootless Podman, or deploy it to
 Volcengine ECS.
 
 > [!WARNING]
-> This is a single-user proof of concept. It intentionally has no identity,
-> tracing, audit, or hardened sandbox middleware. Do not use production data or
-> credentials. See [SECURITY.md](SECURITY.md).
+> This is a multi-user hackathon proof of concept with demo-grade identity,
+> server-side authorization, audit records, and observable execution tracing.
+> A name is not a secure login and Runtime containers are not hardened tenant
+> isolation. Do not use production data or credentials. See
+> [SECURITY.md](SECURITY.md).
 
 ## Screenshots
 
@@ -26,6 +28,10 @@ Volcengine ECS.
 
 - React and TypeScript Web UI
 - Agent create, edit, start, stop, delete, and multi-turn chat
+- Individual and collaboration-project modes with owner/member authorization
+- Parent and per-member child Agents with isolated project workspaces
+- BranchPoint traces, named and automatic checkpoints, diffs, restoration, and branches
+- Advisory member-workspace security scans and owner-reviewed commit requests
 - Fastify control plane with asynchronous Run state
 - Persistent Agent workspaces and Codex sessions
 - Disposable Docker, Colima, or Podman container for each local turn
@@ -87,9 +93,9 @@ xdg-open http://localhost:3000   # Linux desktop
 
 In the Web UI:
 
-1. Select **Create Agent**.
-2. Enter a name, description, and workspace instructions.
-3. Select **Create Agent** again.
+1. Enter a demo user name and select **Continue**.
+2. In Individual mode, select **Create Agent**.
+3. Enter a name, description, and workspace instructions.
 4. Enter a task in the Playground, for example:
 
    ```text
@@ -202,7 +208,7 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `ARK_API_KEY` | Required | Ark model API key. |
 | `ARK_MODEL` | Required | Responses-capable endpoint or model ID. |
 | `ARK_BASE_URL` | Beijing v3 endpoint | Ark OpenAI-compatible API URL. |
-| `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
+| `APP_AUTH_TOKEN` | Empty on loopback | Legacy deployment guard required by non-loopback production configuration. It is not a user login token and is not accepted by the current API authorization hook. |
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
@@ -224,7 +230,16 @@ flowchart LR
 ```
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
+The browser stores the current demo user's generated bearer token locally and
+sends it to the API. The API resolves that user, then `AgentService` and
+`ProjectService` enforce ownership and project-role decisions. BranchPoint
+records observable Runtime events and filesystem-derived checkpoints without
+capturing hidden chain-of-thought.
+
 Deleting an Agent archives its workspace under `workspaces/.deleted/`.
+Project workspaces are stored under `workspaces/projects/<project-id>/`, with
+parent branches under `main/branches/` and member branches under the relevant
+member workspace's `branches/` directory.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component and extension
 boundaries.
@@ -240,6 +255,7 @@ docker compose config
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Testing and automated verification](docs/TESTING.md)
 - [Local POC](docs/LOCAL_POC.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Hackathon extension guide](docs/HACKATHON_EXTENSION_GUIDE.md)

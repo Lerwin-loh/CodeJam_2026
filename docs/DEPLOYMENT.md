@@ -100,6 +100,10 @@ ARK_MODEL=ep-your-endpoint-id
 APP_AUTH_TOKEN=the-random-token-generated-above
 ```
 
+`APP_AUTH_TOKEN` currently satisfies the non-loopback production startup guard;
+it is not the bearer credential used by API routes. The API uses generated demo
+user tokens.
+
 Deploy:
 
 ```bash
@@ -111,8 +115,11 @@ Verify:
 
 ```bash
 curl http://127.0.0.1/api/health
-export APP_AUTH_TOKEN=your-shared-demo-token
-curl -H "Authorization: Bearer $APP_AUTH_TOKEN" \
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"name":"Deployment operator"}' \
+  http://127.0.0.1/api/users
+export USER_TOKEN=the-token-returned-by-the-previous-command
+curl -H "Authorization: Bearer $USER_TOKEN" \
   http://127.0.0.1/api/system
 docker compose --env-file .env.production ps
 ```
@@ -124,7 +131,8 @@ Deploy updates with `git pull --ff-only`, then rerun the deployment script.
 - Allow TCP 80 only from the event network.
 - Allow TCP 22 only from administrator IP addresses.
 - Allow outbound HTTPS to Ark and package registries.
-- Add HTTPS before using `APP_AUTH_TOKEN` across an untrusted network.
+- Add HTTPS before sending generated user tokens or any configured secret
+  across an untrusted network.
 
 Stop the application without deleting Agent data:
 

@@ -2,6 +2,18 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "./types.js";
 
+interface AtomicFileOperations {
+  rename: typeof fs.rename;
+  copyFile: typeof fs.copyFile;
+  unlink: typeof fs.unlink;
+}
+
+const defaultAtomicFileOperations: AtomicFileOperations = {
+  rename: fs.rename,
+  copyFile: fs.copyFile,
+  unlink: fs.unlink,
+};
+
 const emptyDatabase = (): Database => ({
   version: 1,
   users: [],
@@ -17,14 +29,16 @@ const emptyDatabase = (): Database => ({
   snapshots: [],
   contexts: [],
   checkpoints: [],
-  mergeProposals: [],
 });
 
 export class JsonStore {
   private data: Database = emptyDatabase();
   private queue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly filePath: string,
+    private readonly atomicFiles: AtomicFileOperations = defaultAtomicFileOperations,
+  ) {}
 
   async initialize(): Promise<void> {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
@@ -46,7 +60,6 @@ export class JsonStore {
       parsed.snapshots ??= [];
       parsed.contexts ??= [];
       parsed.checkpoints ??= [];
-      parsed.mergeProposals ??= [];
       for (const run of parsed.runs) {
         run.branchId ??= null;
         run.beforeWorkspaceHash ??= null;
@@ -84,7 +97,7 @@ export class JsonStore {
 
   private async persistAtomically(sourcePath: string, destinationPath: string): Promise<void> {
     try {
-      await fs.rename(sourcePath, destinationPath);
+      await this.atomicFiles.rename(sourcePath, destinationPath);
       return;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -92,8 +105,8 @@ export class JsonStore {
         throw error;
       }
     }
-    await fs.copyFile(sourcePath, destinationPath);
-    await fs.unlink(sourcePath);
+    await this.atomicFiles.copyFile(sourcePath, destinationPath);
+    await this.atomicFiles.unlink(sourcePath);
   }
 
   async mutate<T>(mutation: (database: Database) => T | Promise<T>): Promise<T> {

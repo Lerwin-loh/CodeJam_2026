@@ -296,6 +296,8 @@ export async function createApp(
 
   app.get("/api/runs/:id/trace/stream", async (request, reply) => {
     const { id } = runIdParams.parse(request.params);
+    const run = service.getRun(id);
+    await service.assertAgentAccess(run.agentId, request.user, "run.trace.read");
     reply.hijack();
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -332,6 +334,8 @@ export async function createApp(
 
   app.get("/api/runs/:id/details", async (request) => {
     const { id } = runIdParams.parse(request.params);
+    const run = service.getRun(id);
+    await service.assertAgentAccess(run.agentId, request.user, "run.details.read");
     return service.getRunDetails(id);
   });
 
@@ -370,6 +374,12 @@ export async function createApp(
 
   app.post("/api/checkpoints/:id/restore", async (request) => {
     const { id } = checkpointIdParams.parse(request.params);
+    const checkpoint = service.getCheckpoint(id);
+    await service.assertAgentAccess(
+      checkpoint.agentId,
+      request.user,
+      "checkpoint.restore",
+    );
     return await service.restoreCheckpoint(id);
   });
 

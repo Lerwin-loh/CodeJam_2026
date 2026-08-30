@@ -22,6 +22,10 @@ shell take precedence. This is important when using a BytePlus/Southeast Asia
 key: set `ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3` rather
 than allowing the Beijing default.
 
+`APP_AUTH_TOKEN` is legacy deployment configuration, not the per-user bearer
+token used by API requests. The browser obtains and stores a generated demo-user
+token after a name is entered.
+
 Open <http://localhost:3000>. Press `Ctrl+C` to stop the server and remove this
 instance's remaining Runtime containers.
 

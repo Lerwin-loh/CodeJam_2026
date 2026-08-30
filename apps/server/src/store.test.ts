@@ -55,14 +55,21 @@ describe("JsonStore", () => {
     ]);
   });
 
-  it("falls back when rename is blocked by the OS or cloud sync layer", async () => {
+  it("falls back when atomic database replacement is blocked", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-rename-test-"));
     temporaryDirectories.push(root);
     const originalPath = path.join(root, "db.json");
-    const store = new JsonStore(originalPath);
+    const rename = vi.fn<typeof fs.rename>(fs.rename);
+    const store = new JsonStore(originalPath, {
+      rename,
+      copyFile: fs.copyFile,
+      unlink: fs.unlink,
+    });
     await store.initialize();
 
-    const renameSpy = vi.spyOn(fs, "rename").mockRejectedValueOnce(Object.assign(new Error("EPERM"), { code: "EPERM" }));
+    rename.mockRejectedValueOnce(
+      Object.assign(new Error("EPERM"), { code: "EPERM" }),
+    );
     await store.mutate((database) => {
       database.messages.push({
         id: "message-3",
@@ -75,6 +82,8 @@ describe("JsonStore", () => {
     });
 
     expect(store.snapshot().messages.map((message) => message.content)).toContain("fallback persisted");
-    renameSpy.mockRestore();
+    expect(rename).toHaveBeenCalledWith(originalPath + ".tmp", originalPath);
+    await expect(fs.readFile(originalPath, "utf8")).resolves.toContain("fallback persisted");
+    await expect(fs.readFile(originalPath + ".tmp", "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
