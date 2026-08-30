@@ -30,7 +30,7 @@ npm test -- --run src/app.test.ts
 ```
 
 Vitest automatically discovers every `*.test.ts` file under
-`apps/server/src`. The current suite contains **58 tests in 8 files**.
+`apps/server/src`. The current suite contains **60 tests in 8 files**.
 
 ## Classification
 
@@ -107,12 +107,16 @@ tests exercise the same domain services without rendering the React UI.
 34. **Keeps the commit gate closed when an OWASP category fails.**
 35. **Invalidates a passing security result after the member workspace changes.**
 36. **Rejects a commit request when the member workspace matches main.**
-37. **Freezes writes while a project is archived and restores them after
+37. **Chooses the cheapest security-analysis path** — verifies no-change and
+    static-finding paths use zero model calls while a clean diff uses one scoped
+    request containing only changed files.
+38. **Auto-fixes a flagged file with one direct model call and no Agent Run.**
+39. **Freezes writes while a project is archived and restores them after
     unarchive.**
-38. **Runs a member's child Agent in that member's workspace.**
-39. **Merges selected sub-branches into their trunk workspace and removes the
+40. **Runs a member's child Agent in that member's workspace.**
+41. **Merges selected sub-branches into their trunk workspace and removes the
     merged branch records and folders.**
-40. **Completes a branch merge when an old branch folder is already missing.**
+42. **Completes a branch merge when an old branch folder is already missing.**
 
 ### System tests
 
@@ -123,52 +127,52 @@ Docker, or network access.
 
 #### Agent execution internals — `agent-service.test.ts`
 
-41. **Streams Runtime events to live trace subscribers** — verifies the
+43. **Streams Runtime events to live trace subscribers** — verifies the
     in-process trace subscription boundary.
-42. **Migrates owner-less Agents to a demo user during initialization** —
+44. **Migrates owner-less Agents to a demo user during initialization** —
     verifies backward-compatible persisted-data startup behavior.
-43. **Keeps a standalone Agent usable when upgrade persistence fails** — injects
+45. **Keeps a standalone Agent usable when upgrade persistence fails** — injects
     a database-write failure after workspace staging and verifies that project
     metadata is not published and the original files remain available.
-44. **Leaves the active workspace unchanged when checkpoint materialization
+46. **Leaves the active workspace unchanged when checkpoint materialization
     fails** — verifies restore locking is released and newer files survive.
 
 #### Workspace history — `workspace-history.test.ts`
 
-45. **Hashes files, classifies changes, and materializes an immutable snapshot.**
-46. **Ignores generated dependency and output directories.**
-47. **Restores a snapshot into a workspace.**
-48. **Rolls back the original workspace when active-restore verification fails.**
+47. **Hashes files, classifies changes, and materializes an immutable snapshot.**
+48. **Ignores generated dependency and output directories.**
+49. **Restores a snapshot into a workspace.**
+50. **Rolls back the original workspace when active-restore verification fails.**
 
 #### JSON persistence — `store.test.ts`
 
-49. **Does not publish a mutation in memory when persistence fails** — verifies
+51. **Does not publish a mutation in memory when persistence fails** — verifies
     failed disk writes do not become committed application state and the write
     queue remains usable.
-50. **Falls back when atomic database replacement is blocked** — injects a
+52. **Falls back when atomic database replacement is blocked** — injects a
     deterministic `EPERM` rename failure, then verifies real copy/unlink fallback
     persistence and temporary-file cleanup.
 
 #### Codex process adapter — `codex-runner.test.ts`
 
-51. **Builds a new-session Codex invocation.**
-52. **Builds an invocation that resumes a stored Codex thread.**
-53. **Extracts the session ID, final message, and token usage.**
-54. **Captures bounded observable activity and error details without exposing
+53. **Builds a new-session Codex invocation.**
+54. **Builds an invocation that resumes a stored Codex thread.**
+55. **Extracts the session ID, final message, and token usage.**
+56. **Captures bounded observable activity and error details without exposing
     unbounded output or private reasoning.**
 #### Native Codex session forking — `codex-session-fork.test.ts`
 
-55. **Captures a thread's current rollout offset and forks a truncated copy** —
+57. **Captures a thread's current rollout offset and forks a truncated copy** —
     uses a real temporary SQLite index and JSONL rollout to prove later parent turns do not leak into a branch.
-56. **Returns no fork source when a thread has no recorded session** — verifies
+58. **Returns no fork source when a thread has no recorded session** — verifies
     the controlled fresh-thread fallback.
 
 #### Container Runtime adapter — `container-codex-runner.test.ts`
 
-57. **Builds an isolated Docker/Podman-compatible invocation** — checks the
+59. **Builds an isolated Docker/Podman-compatible invocation** — checks the
     workspace mount, Codex-home mount, dropped capabilities, resource limits,
     user, network, and Runtime labels.
-58. **Resumes a thread inside the mounted Runtime workspace.**
+60. **Resumes a thread inside the mounted Runtime workspace.**
 
 ## How this meets automated-verification requirements
 

@@ -1042,7 +1042,7 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
                 <div>
                   <span className="eyebrow">BranchPoint · Beta</span>
                   <h2>BranchPoint</h2>
-                  <p>Understand how execution is tracked, versioned, and recovered across runs, checkpoints, and branches.</p>
+                  <p>Understand how execution is tracked, versioned, recovered, and security-checked across runs, checkpoints, and branches.</p>
                 </div>
                 <button className="panel-close" type="button" onClick={() => setShowBranchPointSettings(false)} aria-label="Close BranchPoint settings">×</button>
               </div>

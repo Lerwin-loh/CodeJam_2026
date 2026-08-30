@@ -1193,7 +1193,7 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
               <div>
                 <span className="eyebrow">BranchPoint · Beta</span>
                 <h2>BranchPoint</h2>
-                <p>Understand how execution is tracked, versioned, and recovered across runs, checkpoints, and branches.</p>
+                <p>Understand how execution is tracked, versioned, recovered, and security-checked across runs, checkpoints, and branches.</p>
               </div>
               <button className="panel-close" type="button" onClick={() => ws.setShowBpSettings(false)} aria-label="Close BranchPoint settings">×</button>
             </div>
