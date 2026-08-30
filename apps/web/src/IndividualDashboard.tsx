@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { branchPointSettingsTabs, type BranchPointSettingsTabKey } from "./branchPointSettingsContent";
+import { traceEventDescription, traceEventLabel } from "./tracePresentation";
 import type {
   Agent,
   AgentBranch,
@@ -49,12 +50,13 @@ function Spinner() {
 
 interface Props {
   currentUser: User;
+  onProjectUpgraded: (projectId: string) => void;
   onSignOut: () => void;
   onToggleMode: () => void;
 }
 
 /** Flat, single-Agent-list dashboard — the default "individual" mode of the app. */
-export default function IndividualDashboard({ currentUser, onSignOut, onToggleMode }: Props) {
+export default function IndividualDashboard({ currentUser, onProjectUpgraded, onSignOut, onToggleMode }: Props) {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -66,6 +68,8 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
   const [system, setSystem] = useState<SystemInfo | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showUpgrade, setShowUpgrade] = useState(false);
+  const [upgradeProjectName, setUpgradeProjectName] = useState("");
   const [form, setForm] = useState(emptyForm);
   const [prompt, setPrompt] = useState("");
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
@@ -269,6 +273,22 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
       await api.updateAgent(selected.id, form);
       await refreshAgents();
       setShowSettings(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const upgradeAgentToProject = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selected || !upgradeProjectName.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { project } = await api.upgradeAgentToProject(selected.id, upgradeProjectName.trim());
+      setShowUpgrade(false);
+      onProjectUpgraded(project.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -601,6 +621,16 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
                   {selected.status === "stopped" ? "Start" : "Stop"}
                 </button>
                 <button
+                  className="button button-ghost"
+                  onClick={() => {
+                    setUpgradeProjectName(selected.name);
+                    setShowUpgrade(true);
+                  }}
+                  disabled={busy || selected.status === "busy"}
+                >
+                  Upgrade to project
+                </button>
+                <button
                   className="button button-danger"
                   onClick={deleteAgent}
                   disabled={busy || selected.status === "busy"}
@@ -732,13 +762,10 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
                     </div>
                     <div className="live-trace-list">
                       {traceEvents.filter((event) => event.runId === activeRun.id).slice(-8).map((event) => {
-                        const label = event.type === "codex.event" && typeof event.metadata.eventType === "string"
-                          ? event.metadata.eventType === "error" ? "Codex error" : event.metadata.eventType
-                          : event.type;
                         return <div className="live-trace-event" key={event.id}>
                           <span className="trace-event-dot" />
-                          <div><strong>{label}</strong><small>{formatTime(event.timestamp)}</small></div>
-                          <p>{typeof event.metadata.explanation === "string" ? event.metadata.explanation : typeof event.metadata.output === "string" ? event.metadata.output : "Observable execution activity recorded."}</p>
+                          <div><strong>{traceEventLabel(event)}</strong><small>{formatTime(event.timestamp)}</small></div>
+                          <p>{traceEventDescription(event)}</p>
                         </div>;
                       })}
                     </div>
@@ -1153,7 +1180,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
                 <h3>Conversation snapshot</h3>
                 <div className="inspection-conversation">{checkpointOverlay.details.context.messages.map((message) => <div key={message.id}><strong>{message.role}</strong><p>{message.content}</p></div>)}</div>
                 <h3>Trace events</h3>
-                <div className="inspection-trace">{checkpointOverlay.details.trace.map((event) => <div key={event.id}><header><strong>{event.type}</strong><span>{formatTime(event.timestamp)}</span></header><p>{typeof event.metadata.explanation === "string" ? event.metadata.explanation : event.type === "codex.event" ? "Codex reported observable execution activity." : "Recorded BranchPoint activity."}</p>{event.type === "codex.event" && <small>{typeof event.metadata.eventType === "string" ? event.metadata.eventType : "Codex event"}{typeof event.metadata.output === "string" ? " · " + event.metadata.output : ""}</small>}</div>)}</div>
+                <div className="inspection-trace">{checkpointOverlay.details.trace.map((event) => <div key={event.id}><header><strong>{traceEventLabel(event)}</strong><span>{formatTime(event.timestamp)}</span></header><p>{traceEventDescription(event)}</p></div>)}</div>
                 <h3>Verification</h3>
                 <p className="inspection-muted">Workspace hash: {checkpointOverlay.details.checkpoint.workspaceHash}</p>
               </div>
@@ -1173,7 +1200,7 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
               <p className="inspection-message">Run {runOverlay.run.id.slice(0, 8)} · {runOverlay.run.status} · This event cannot be reverted.</p>
               <h3>Prompt</h3><p className="inspection-copy">{runOverlay.run.prompt}</p>
               <h3>Trace events</h3>
-              <div className="inspection-trace">{runOverlay.trace.map((event) => <div key={event.id}><header><strong>{event.type}</strong><span>{formatTime(event.timestamp)}</span></header><p>{typeof event.metadata.explanation === "string" ? event.metadata.explanation : event.type === "codex.event" ? "Codex reported observable execution activity." : "Recorded BranchPoint activity."}</p>{event.type === "codex.event" && <small>{typeof event.metadata.eventType === "string" ? event.metadata.eventType : "Codex event"}{typeof event.metadata.output === "string" ? " · " + event.metadata.output : ""}</small>}</div>)}</div>
+              <div className="inspection-trace">{runOverlay.trace.map((event) => <div key={event.id}><header><strong>{traceEventLabel(event)}</strong><span>{formatTime(event.timestamp)}</span></header><p>{traceEventDescription(event)}</p></div>)}</div>
               {runOverlay.run.output && <><h3>Agent result</h3><p className="inspection-copy">{runOverlay.run.output}</p></>}
             </div>
           </section>
@@ -1249,6 +1276,58 @@ export default function IndividualDashboard({ currentUser, onSignOut, onToggleMo
               </button>
               <button className="button button-primary" disabled={busy}>
                 {busy ? <Spinner /> : "Create Agent"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showUpgrade && selected && (
+        <div className="modal-backdrop" onMouseDown={() => !busy && setShowUpgrade(false)}>
+          <form
+            className="modal"
+            onSubmit={upgradeAgentToProject}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">Agent promotion</span>
+                <h2>Upgrade to a project</h2>
+                <p>
+                  {selected.name} will become the project's parent Agent. Its files,
+                  conversation, Codex session, checkpoints, and branches will be preserved.
+                </p>
+              </div>
+              <button type="button" onClick={() => setShowUpgrade(false)} disabled={busy}>×</button>
+            </div>
+            <label>
+              Project name
+              <input
+                autoFocus
+                value={upgradeProjectName}
+                onChange={(event) => setUpgradeProjectName(event.target.value)}
+                required
+                maxLength={120}
+              />
+            </label>
+            <p className="inspection-muted">
+              The Agent will move from Individual mode into Project mode. This upgrade cannot
+              currently be reversed.
+            </p>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="button button-ghost"
+                onClick={() => setShowUpgrade(false)}
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-primary"
+                disabled={busy || !upgradeProjectName.trim()}
+              >
+                {busy ? <Spinner /> : "Upgrade Agent"}
               </button>
             </div>
           </form>

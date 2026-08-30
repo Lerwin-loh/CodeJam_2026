@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -104,6 +104,187 @@ describe("Part 1 — projects & membership", () => {
     expect(parent?.ownerId).toBe(owner.id);
     expect(db.snapshots.some((s) => s.id === project.headSnapshotId)).toBe(true);
     expect(projects.listProjects(owner.id).map((p) => p.id)).toEqual([project.id]);
+  });
+
+  it("upgrades a standalone Agent into a project without losing its workspace, history, branches, or threads", async () => {
+    const { projects, agents, store } = await makeStack({
+      run: async (request) => {
+        if (request.prompt === "build main") {
+          await writeFile(path.join(request.workspacePath, "main-feature.txt"), "main\n");
+        }
+        if (request.prompt === "build branch") {
+          await writeFile(path.join(request.workspacePath, "branch-feature.txt"), "branch\n");
+        }
+        return {
+          output: "completed " + request.prompt,
+          threadId:
+            request.threadId ??
+            (request.prompt === "build branch" ? "branch-thread" : "main-thread"),
+          usage: null,
+        };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const owner = await agents.createUser("Owner");
+    const standalone = await agents.createAgent(
+      {
+        name: "Prototype",
+        description: "Existing prototype",
+        instructions: "Keep the existing architecture.",
+      },
+      owner.id,
+    );
+    const sourcePath = standalone.workspacePath;
+    const mainRun = await agents.sendMessage(standalone.id, "build main");
+    await expect.poll(() => agents.getRun(mainRun.run.id).status).toBe("completed");
+    const checkpoint = agents.getCheckpoints(standalone.id)[0];
+    expect(checkpoint).toBeDefined();
+    if (!checkpoint) return;
+
+    const branch = await agents.createBranchFromCheckpoint(
+      standalone.id,
+      checkpoint.id,
+      "experiment",
+    );
+    const branchRun = await agents.sendMessage(standalone.id, "build branch", branch.id);
+    await expect.poll(() => agents.getRun(branchRun.run.id).status).toBe("completed");
+    const before = store.snapshot();
+
+    const result = await projects.upgradeStandaloneAgent(
+      standalone.id,
+      "Prototype Team",
+      owner,
+    );
+
+    expect(result.parentAgent.id).toBe(standalone.id);
+    expect(result.parentAgent).toMatchObject({
+      kind: "parent",
+      projectId: result.project.id,
+      workspacePath: result.project.mainWorkspacePath,
+      codexThreadId: "main-thread",
+      instructions: "Keep the existing architecture.",
+    });
+    expect(result.project.parentAgentId).toBe(standalone.id);
+    expect(agents.listAgents(owner.id)).toEqual([]);
+    expect(projects.listProjects(owner.id).map((item) => item.id)).toEqual([result.project.id]);
+    expect(await readFile(path.join(result.project.mainWorkspacePath, "main-feature.txt"), "utf8")).toBe("main\n");
+    expect(await readFile(path.join(result.project.mainWorkspacePath, "AGENTS.md"), "utf8"))
+      .toContain("You are the parent Agent for this project");
+
+    const upgradedBranch = agents.getBranch(branch.id);
+    expect(upgradedBranch.workspacePath).toBe(
+      path.join(result.project.mainWorkspacePath, "branches", branch.id),
+    );
+    expect(upgradedBranch.codexThreadId).toBe("branch-thread");
+    expect(await readFile(path.join(upgradedBranch.workspacePath, "branch-feature.txt"), "utf8")).toBe("branch\n");
+    expect(agents.getMessages(standalone.id, branch.id).map((item) => item.content))
+      .toEqual(expect.arrayContaining(["build main", "build branch"]));
+
+    const after = store.snapshot();
+    expect(after.messages.filter((item) => item.agentId === standalone.id)).toHaveLength(
+      before.messages.filter((item) => item.agentId === standalone.id).length,
+    );
+    expect(after.runs.filter((item) => item.agentId === standalone.id)).toHaveLength(
+      before.runs.filter((item) => item.agentId === standalone.id).length,
+    );
+    expect(after.checkpoints.filter((item) => item.agentId === standalone.id)).toHaveLength(
+      before.checkpoints.filter((item) => item.agentId === standalone.id).length,
+    );
+    expect(after.snapshots.some((item) => item.id === result.project.headSnapshotId)).toBe(true);
+    expect(after.audit.some((item) => item.action === "agent.upgrade-to-project" && item.agentId === standalone.id)).toBe(true);
+    expect(result.archivedWorkspace).not.toBeNull();
+    expect(await readFile(path.join(result.archivedWorkspace!, "main-feature.txt"), "utf8")).toBe("main\n");
+    await expect(readFile(path.join(sourcePath, "main-feature.txt"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects unauthorized, busy, and repeated standalone-Agent upgrades", async () => {
+    const { projects, agents, store } = await makeStack();
+    const owner = await agents.createUser("Owner");
+    const other = await agents.createUser("Other");
+    const standalone = await agents.createAgent({ name: "Prototype" }, owner.id);
+
+    await expect(projects.upgradeStandaloneAgent(standalone.id, "Stolen", other))
+      .rejects.toMatchObject({ statusCode: 403 });
+    await store.mutate((database) => {
+      const agent = database.agents.find((item) => item.id === standalone.id);
+      if (agent) agent.status = "busy";
+    });
+    await expect(projects.upgradeStandaloneAgent(standalone.id, "Busy", owner))
+      .rejects.toMatchObject({ statusCode: 409 });
+    await store.mutate((database) => {
+      const agent = database.agents.find((item) => item.id === standalone.id);
+      if (agent) agent.status = "ready";
+      database.branches.push({
+        id: "11111111-1111-4111-8111-111111111111",
+        agentId: standalone.id,
+        name: "busy branch",
+        parentBranchId: null,
+        parentCheckpointId: null,
+        workspacePath: path.join(standalone.workspacePath, "branches", "busy"),
+        codexThreadId: null,
+        status: "busy",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    });
+    await expect(projects.upgradeStandaloneAgent(standalone.id, "Busy Branch", owner))
+      .rejects.toMatchObject({ statusCode: 409 });
+    await store.mutate((database) => {
+      database.branches = database.branches.filter((item) => item.agentId !== standalone.id);
+    });
+
+    await projects.upgradeStandaloneAgent(standalone.id, "Upgraded", owner);
+    await expect(projects.upgradeStandaloneAgent(standalone.id, "Again", owner))
+      .rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("keeps the standalone Agent usable when upgrade persistence fails", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-upgrade-failure-test-"));
+    temporaryDirectories.push(root);
+    let failPersistence = false;
+    const store = new JsonStore(path.join(root, "data", "db.json"), {
+      rename: async (source, destination) => {
+        if (failPersistence) {
+          const error = new Error("injected upgrade persistence failure") as NodeJS.ErrnoException;
+          error.code = "EIO";
+          throw error;
+        }
+        await rename(source, destination);
+      },
+      copyFile,
+      unlink,
+    });
+    const workspaces = new WorkspaceManager(path.join(root, "workspaces"));
+    const history = new WorkspaceHistory(path.join(root, "data", "branchpoint"));
+    const config = loadConfig({
+      NODE_ENV: "test",
+      APP_DATA_DIR: path.join(root, "data"),
+      AGENT_WORKSPACE_ROOT: path.join(root, "workspaces"),
+      CODEX_HOME: path.join(root, "codex"),
+      ARK_API_KEY: "test-key",
+      ARK_MODEL: "ep-test",
+    });
+    const agents = new AgentService(config, store, workspaces, noopRunner, history);
+    const projects = new ProjectService(store, workspaces, history);
+    await agents.initialize();
+    const owner = await agents.createUser("Owner");
+    const standalone = await agents.createAgent({ name: "Recoverable" }, owner.id);
+    await writeFile(path.join(standalone.workspacePath, "keep-me.txt"), "safe\n");
+
+    failPersistence = true;
+    await expect(projects.upgradeStandaloneAgent(standalone.id, "Failed Upgrade", owner))
+      .rejects.toThrow("injected upgrade persistence failure");
+
+    expect(agents.getAgent(standalone.id)).toMatchObject({
+      kind: "standalone",
+      projectId: null,
+      workspacePath: standalone.workspacePath,
+    });
+    expect(projects.listProjects(owner.id)).toEqual([]);
+    expect(await readFile(path.join(standalone.workspacePath, "keep-me.txt"), "utf8"))
+      .toBe("safe\n");
   });
 
   it("adds a member with their own full-copy workspace and child agent", async () => {

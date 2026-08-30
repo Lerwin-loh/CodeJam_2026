@@ -102,6 +102,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  upgradeAgentToProject: (id: string, projectName: string) =>
+    request<{ project: Project; parentAgent: Agent; archivedWorkspace: string | null }>(
+      "/api/agents/" + id + "/upgrade-to-project",
+      {
+        method: "POST",
+        body: JSON.stringify({ projectName }),
+      },
+    ),
   updateAgent: (
     id: string,
     body: { name: string; description: string; instructions: string },

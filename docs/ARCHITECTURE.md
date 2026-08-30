@@ -64,7 +64,11 @@ time. A stopped Agent rejects prompts. On restart, interrupted Runs become
 matrix. It creates the canonical `main` workspace and member copies, filters
 roster data by role, protects main-tree reads from path traversal, freezes
 project writes while archived, runs advisory security scans, calculates member
-changes against main, and persists commit-request decisions.
+changes against main, persists commit-request decisions, and promotes a
+standalone Agent into a new project's parent without changing that Agent's
+identity, execution history, checkpoints, branches, or Codex threads. The
+upgrade stages and verifies a project workspace copy before atomically
+publishing the new project metadata.
 
 Security checks report findings but do not currently block a commit request.
 Approving a commit request records the decision; it does not yet apply or merge

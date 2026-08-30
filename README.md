@@ -29,6 +29,7 @@ Volcengine ECS.
 - React and TypeScript Web UI
 - Agent create, edit, start, stop, delete, and multi-turn chat
 - Individual and collaboration-project modes with owner/member authorization
+- One-way standalone-Agent upgrade into a project parent, preserving files, history, branches, and Codex threads
 - Parent and per-member child Agents with isolated project workspaces
 - BranchPoint traces, named and automatic checkpoints, diffs, restoration, and branches
 - Advisory member-workspace security scans and owner-reviewed commit requests

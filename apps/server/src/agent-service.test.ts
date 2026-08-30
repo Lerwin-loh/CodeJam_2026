@@ -114,6 +114,8 @@ describe("Agent lifecycle", () => {
 
     await expect.poll(() => service.getTrace(agent.id).filter((event) => event.runId === run.id).length).toBe(2);
     await expect.poll(() => received).toContain("codex.event");
+    expect(service.getTrace(agent.id).find((event) => event.type === "codex.event")?.metadata.explanation)
+      .toBe("Codex started running: npm test");
     release();
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
     subscription.unsubscribe();

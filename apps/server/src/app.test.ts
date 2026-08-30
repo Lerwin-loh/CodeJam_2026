@@ -182,6 +182,7 @@ describe("Project access enforcement (end to end)", () => {
       payload: JSON.stringify({ name: "loose agent" }),
     });
     expect(standalone.statusCode).toBe(201);
+    const standaloneId = standalone.json().agent.id as string;
 
     const aliceAgents = await app.inject({
       method: "GET",
@@ -200,6 +201,29 @@ describe("Project access enforcement (end to end)", () => {
     });
     expect(bobAgents.statusCode).toBe(200);
     expect(bobAgents.json().agents).toEqual([]);
+
+    const bobUpgradesAgent = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + standaloneId + "/upgrade-to-project",
+      headers: { authorization: "Bearer " + bob, "content-type": "application/json" },
+      payload: JSON.stringify({ projectName: "Stolen Project" }),
+    });
+    expect(bobUpgradesAgent.statusCode).toBe(403);
+
+    const aliceUpgradesAgent = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + standaloneId + "/upgrade-to-project",
+      headers: asAlice,
+      payload: JSON.stringify({ projectName: "Upgraded Project" }),
+    });
+    expect(aliceUpgradesAgent.statusCode).toBe(201);
+    expect(aliceUpgradesAgent.json()).toMatchObject({
+      project: { name: "Upgraded Project", parentAgentId: standaloneId },
+      parentAgent: { id: standaloneId, kind: "parent" },
+    });
+    const upgradedProjectId = aliceUpgradesAgent.json().project.id as string;
+    const agentsAfterUpgrade = await app.inject({ method: "GET", url: "/api/agents", headers: asAlice });
+    expect(agentsAfterUpgrade.json().agents).toEqual([]);
 
     const auditAsAlice = await app.inject({ method: "GET", url: "/api/audit", headers: asAlice });
     const entries = auditAsAlice.json().entries as Array<{
@@ -231,7 +255,15 @@ describe("Project access enforcement (end to end)", () => {
       url: "/api/projects",
       headers: asAlice,
     });
-    expect(projectsAfterDelete.json().projects).toEqual([]);
+    expect(projectsAfterDelete.json().projects.map((item: { id: string }) => item.id)).toEqual([
+      upgradedProjectId,
+    ]);
+    const deletesUpgradedProject = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/" + upgradedProjectId,
+      headers: { authorization: "Bearer " + alice },
+    });
+    expect(deletesUpgradedProject.statusCode).toBe(200);
 
     await app.close();
   });

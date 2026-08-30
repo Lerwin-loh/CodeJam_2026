@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { branchPointSettingsTabs, type BranchPointSettingsTabKey } from "./branchPointSettingsContent";
+import { traceEventDescription, traceEventLabel } from "./tracePresentation";
 import type {
   AgentBranch,
   AgentCheckpoint,
@@ -778,25 +779,15 @@ export function AgentPlayground({
                     .filter((event) => event.runId === ws.activeRun!.id)
                     .slice(-8)
                     .map((event) => {
-                      const label =
-                        event.type === "codex.event" && typeof event.metadata.eventType === "string"
-                          ? event.metadata.eventType === "error"
-                            ? "Codex error"
-                            : event.metadata.eventType
-                          : event.type;
                       return (
                         <div className="live-trace-event" key={event.id}>
                           <span className="trace-event-dot" />
                           <div>
-                            <strong>{label}</strong>
+                            <strong>{traceEventLabel(event)}</strong>
                             <small>{fmt(event.timestamp)}</small>
                           </div>
                           <p>
-                            {typeof event.metadata.explanation === "string"
-                              ? event.metadata.explanation
-                              : typeof event.metadata.output === "string"
-                                ? event.metadata.output
-                                : "Observable execution activity recorded."}
+                            {traceEventDescription(event)}
                           </p>
                         </div>
                       );
@@ -1456,15 +1447,11 @@ export function WorkspaceOverlays({ ws }: { ws: WorkspaceApi }) {
                 {ws.runOverlay.trace.map((event) => (
                   <div key={event.id}>
                     <header>
-                      <strong>{event.type}</strong>
+                      <strong>{traceEventLabel(event)}</strong>
                       <span>{fmt(event.timestamp)}</span>
                     </header>
                     <p>
-                      {typeof event.metadata.explanation === "string"
-                        ? event.metadata.explanation
-                        : event.type === "codex.event"
-                          ? "Codex reported observable execution activity."
-                          : "Recorded BranchPoint activity."}
+                      {traceEventDescription(event)}
                     </p>
                   </div>
                 ))}

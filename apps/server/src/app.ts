@@ -52,6 +52,7 @@ const memberParams = z.object({
   memberId: z.string().uuid(),
 });
 const createProjectBody = z.object({ name: z.string().trim().min(1).max(120) });
+const upgradeAgentBody = z.object({ projectName: z.string().trim().min(1).max(120) });
 const addMemberBody = z.object({
   userName: z.string().trim().min(1).max(60),
   role: z.string().trim().min(1).max(60),
@@ -144,6 +145,14 @@ export async function createApp(
       reason: "Owner created the Agent",
     });
     return reply.code(201).send({ agent });
+  });
+
+  app.post("/api/agents/:id/upgrade-to-project", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "agent.upgrade-to-project");
+    const body = upgradeAgentBody.parse(request.body);
+    const result = await projects.upgradeStandaloneAgent(id, body.projectName, request.user);
+    return reply.code(201).send(result);
   });
 
   // Standalone Agents use the collection routes above. Project parent and child

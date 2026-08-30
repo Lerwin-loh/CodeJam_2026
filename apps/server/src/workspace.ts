@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { cp, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Agent } from "./types.js";
 
@@ -23,6 +23,38 @@ export class WorkspaceManager {
 
   projectMemberPath(projectId: string, memberId: string): string {
     return path.join(this.root, "projects", projectId, "members", memberId);
+  }
+
+  /**
+   * Stage an existing standalone workspace as a project's canonical main tree.
+   * The source stays untouched until the caller has committed its metadata, so
+   * a failed upgrade never leaves the standalone Agent without a workspace.
+   */
+  async copyStandaloneToProject(sourcePath: string, projectId: string): Promise<string> {
+    const source = path.resolve(sourcePath);
+    const workspaceRoot = path.resolve(this.root) + path.sep;
+    if (!source.startsWith(workspaceRoot) || source === path.resolve(this.root)) {
+      throw new Error("Standalone workspace is outside the managed workspace root");
+    }
+    const target = this.projectMainPath(projectId);
+    await mkdir(path.dirname(target), { recursive: true });
+    try {
+      await cp(source, target, {
+        recursive: true,
+        force: false,
+        errorOnExist: true,
+        preserveTimestamps: true,
+      });
+      return target;
+    } catch (error) {
+      await rm(this.projectPath(projectId), { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  /** Remove only a not-yet-committed project copy after a failed upgrade. */
+  async discardProjectCopy(projectId: string): Promise<void> {
+    await rm(this.projectPath(projectId), { recursive: true, force: true });
   }
 
   async initialize(): Promise<void> {
@@ -52,6 +84,17 @@ export class WorkspaceManager {
   }
 
   async writeInstructions(agent: Agent): Promise<void> {
+    const projectRole =
+      agent.kind === "parent"
+        ? [
+            "## Project role",
+            "",
+            "- You are the parent Agent for this project.",
+            "- This workspace is the project's canonical main workspace.",
+            "- Preserve reviewed team changes and keep project-level work coherent.",
+            "",
+          ]
+        : [];
     const content = [
       "# Platform-managed Agent instructions",
       "",
@@ -63,6 +106,7 @@ export class WorkspaceManager {
       agent.instructions ||
         "Help the user complete coding tasks in this workspace. Explain material results concisely.",
       "",
+      ...projectRole,
       "## Workspace rules",
       "",
       "- Work only inside this workspace unless the user explicitly requests otherwise.",

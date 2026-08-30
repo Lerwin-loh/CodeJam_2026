@@ -21,6 +21,13 @@ import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
+function projectName(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new HttpError(400, "Enter a project name.");
+  if (trimmed.length > 120) throw new HttpError(400, "Project name is too long.");
+  return trimmed;
+}
+
 /** Minimum capability each project action needs. Unlisted -> owner only. */
 const PROJECT_ACTIONS: Record<string, "owner" | "member" | "member-own"> = {
   "project.read": "member",
@@ -325,9 +332,7 @@ export class ProjectService {
   // --------------------------------------------------------------------------
 
   async createProject(name: string, ownerId: string): Promise<Project> {
-    const trimmed = name.trim();
-    if (!trimmed) throw new HttpError(400, "Enter a project name.");
-    if (trimmed.length > 120) throw new HttpError(400, "Project name is too long.");
+    const trimmed = projectName(name);
 
     const projectId = randomUUID();
     const parentAgentId = randomUUID();
@@ -387,6 +392,135 @@ export class ProjectService {
       database.projects.push(project);
     });
     return project;
+  }
+
+  /**
+   * Promote one standalone Agent into a new project's parent Agent without
+   * changing its identity, Codex threads, execution history, or checkpoints.
+   */
+  async upgradeStandaloneAgent(
+    agentId: string,
+    name: string,
+    actor: User,
+  ): Promise<{ project: Project; parentAgent: Agent; archivedWorkspace: string | null }> {
+    const trimmed = projectName(name);
+    const initial = this.store.snapshot();
+    const sourceAgent = initial.agents.find((item) => item.id === agentId);
+    if (!sourceAgent) throw new HttpError(404, "Agent not found");
+    if (sourceAgent.ownerId !== actor.id) {
+      throw new HttpError(403, "Only the Agent owner can upgrade it to a project");
+    }
+    if (sourceAgent.kind !== "standalone" || sourceAgent.projectId !== null) {
+      throw new HttpError(409, "Only a standalone Agent can be upgraded to a project");
+    }
+    if (sourceAgent.status === "busy") {
+      throw new HttpError(409, "Wait for the Agent run to finish before upgrading it");
+    }
+    const sourceBranches = initial.branches.filter((item) => item.agentId === agentId);
+    if (sourceBranches.some((branch) => branch.status === "busy")) {
+      throw new HttpError(409, "Wait for every branch run to finish before upgrading the Agent");
+    }
+
+    const projectId = randomUUID();
+    const timestamp = now();
+    const sourceManifest = await this.history.manifest(sourceAgent.workspacePath);
+    let mainPath: string;
+    try {
+      mainPath = await this.workspaces.copyStandaloneToProject(sourceAgent.workspacePath, projectId);
+    } catch (error) {
+      throw new HttpError(
+        500,
+        "Could not copy the Agent workspace into the new project: " +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    }
+
+    let headSnapshot: import("./types.js").WorkspaceSnapshot | null = null;
+    try {
+      const copiedManifest = await this.history.manifest(mainPath);
+      if (copiedManifest.workspaceHash !== sourceManifest.workspaceHash) {
+        throw new Error("The copied main workspace did not match the standalone workspace");
+      }
+
+      const parentAgent: Agent = {
+        ...sourceAgent,
+        projectId,
+        kind: "parent",
+        memberId: null,
+        workspacePath: mainPath,
+        updatedAt: timestamp,
+      };
+      await this.workspaces.writeInstructions(parentAgent);
+      const promotedManifest = await this.history.manifest(mainPath);
+      headSnapshot = await this.history.createSnapshot(
+        parentAgent.id,
+        projectId,
+        mainPath,
+        promotedManifest,
+      );
+      const project: Project = {
+        id: projectId,
+        name: trimmed,
+        ownerId: actor.id,
+        mainWorkspacePath: mainPath,
+        parentAgentId: parentAgent.id,
+        headSnapshotId: headSnapshot.id,
+        archivedAt: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+
+      await this.store.mutate((database) => {
+        const storedAgent = database.agents.find((item) => item.id === agentId);
+        if (!storedAgent || storedAgent.ownerId !== actor.id) {
+          throw new HttpError(404, "Agent not found");
+        }
+        if (storedAgent.kind !== "standalone" || storedAgent.projectId !== null) {
+          throw new HttpError(409, "The Agent was already upgraded");
+        }
+        if (storedAgent.status === "busy") {
+          throw new HttpError(409, "The Agent started a run while the upgrade was being prepared");
+        }
+        const branches = database.branches.filter((item) => item.agentId === agentId);
+        if (branches.some((branch) => branch.status === "busy")) {
+          throw new HttpError(409, "A branch started a run while the upgrade was being prepared");
+        }
+
+        Object.assign(storedAgent, parentAgent);
+        for (const branch of branches) {
+          branch.workspacePath = this.workspaces.branchWorkspacePath(mainPath, branch.id);
+        }
+        database.snapshots.push(headSnapshot!);
+        database.projects.push(project);
+        database.audit.push({
+          id: randomUUID(),
+          userId: actor.id,
+          userName: actor.name,
+          agentId,
+          action: "agent.upgrade-to-project",
+          resource: "project:" + projectId,
+          decision: "allow",
+          reason: "Owner upgraded standalone Agent " + sourceAgent.name + " into project " + trimmed,
+          timestamp,
+        });
+      });
+
+      // The committed project copy is authoritative. Archiving the old path is
+      // recoverable cleanup; a failure here leaves only a harmless duplicate.
+      let archivedWorkspace: string | null = null;
+      try {
+        archivedWorkspace = await this.workspaces.archive(sourceAgent);
+      } catch {
+        archivedWorkspace = null;
+      }
+      return { project, parentAgent, archivedWorkspace };
+    } catch (error) {
+      if (headSnapshot) {
+        await this.history.archiveSnapshots(projectId, [headSnapshot]).catch(() => undefined);
+      }
+      await this.workspaces.discardProjectCopy(projectId).catch(() => undefined);
+      throw error;
+    }
   }
 
   listProjects(userId: string): Project[] {

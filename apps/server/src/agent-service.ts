@@ -447,7 +447,7 @@ export class AgentService {
         type,
         timestamp: now(),
         metadata: {
-          explanation: this.traceExplanation(type),
+          explanation: this.traceExplanation(type, metadata),
           ...metadata,
         },
       };
@@ -457,21 +457,83 @@ export class AgentService {
     for (const listener of this.traceListeners.get(run.id) ?? []) listener(event);
   }
 
-  private traceExplanation(type: TraceEventType): string {
+  private traceExplanation(type: TraceEventType, metadata: Record<string, unknown>): string {
     switch (type) {
       case "run.started":
         return "The Agent began processing the user instruction.";
       case "codex.event":
-        return "Codex reported an observable tool or model activity.";
+        return this.codexEventExplanation(metadata);
       case "workspace.changed":
-        return "The Agent changed files in its workspace.";
+        return this.workspaceChangeExplanation(metadata);
       case "checkpoint.created":
-        return "A recoverable snapshot was created from the workspace mutation.";
+        return metadata.status === "partial"
+          ? "A partial recoverable checkpoint was created after the workspace change."
+          : "A complete recoverable checkpoint was created after the workspace change.";
       case "run.completed":
-        return "The Agent finished successfully.";
+        return metadata.workspaceChanged === true
+          ? "The Agent finished successfully and saved its workspace changes."
+          : "The Agent finished successfully without workspace changes.";
       case "run.error":
-        return "The Run ended with an error or cancellation.";
+        return typeof metadata.error === "string" && metadata.error.trim()
+          ? `The Run ended with an error or cancellation: ${metadata.error.trim().slice(0, 500)}`
+          : "The Run ended with an error or cancellation.";
     }
+  }
+
+  private codexEventExplanation(metadata: Record<string, unknown>): string {
+    const eventType = typeof metadata.eventType === "string" ? metadata.eventType : "activity";
+    const codexType = typeof metadata.codexType === "string" ? metadata.codexType : "";
+    const command = typeof metadata.command === "string" ? metadata.command.trim().slice(0, 240) : "";
+    const message = typeof metadata.message === "string" ? metadata.message.trim().slice(0, 500) : "";
+    const output = typeof metadata.output === "string" ? metadata.output.trim().slice(0, 500) : "";
+    const completed = codexType === "item.completed";
+
+    switch (eventType) {
+      case "command_execution": {
+        if (!completed || metadata.status === "in_progress") {
+          return command ? `Codex started running: ${command}` : "Codex started running a command.";
+        }
+        const exitCode = metadata.exit_code;
+        if (typeof exitCode === "number") {
+          return command
+            ? `Command finished with exit code ${exitCode}: ${command}`
+            : `A command finished with exit code ${exitCode}.`;
+        }
+        return command ? `Codex finished running: ${command}` : "Codex finished running a command.";
+      }
+      case "reasoning":
+        return completed
+          ? "Codex completed a reasoning step; private reasoning content is not included in the trace."
+          : "Codex started a reasoning step; private reasoning content is not included in the trace.";
+      case "agent_message":
+        return "Codex prepared an Agent response.";
+      case "file_change":
+        return completed ? "Codex completed a workspace file change." : "Codex started a workspace file change.";
+      case "error":
+        return message || output
+          ? `Codex reported an activity-level issue: ${message || output}`
+          : "Codex reported an activity-level issue. The Run is marked failed separately if it cannot recover.";
+      default: {
+        const readable = eventType.replace(/[._-]+/g, " ");
+        return `Codex reported observable ${readable} activity.`;
+      }
+    }
+  }
+
+  private workspaceChangeExplanation(metadata: Record<string, unknown>): string {
+    const count = (key: "created" | "modified" | "deleted") =>
+      Array.isArray(metadata[key]) ? metadata[key].length : 0;
+    const created = count("created");
+    const modified = count("modified");
+    const deleted = count("deleted");
+    const changes = [
+      created ? `${created} created` : "",
+      modified ? `${modified} modified` : "",
+      deleted ? `${deleted} deleted` : "",
+    ].filter(Boolean);
+    return changes.length
+      ? `The Agent changed workspace files: ${changes.join(", ")}.`
+      : "The Agent changed files in its workspace.";
   }
 
   async updateAgent(id: string, input: UpdateAgentInput): Promise<Agent> {

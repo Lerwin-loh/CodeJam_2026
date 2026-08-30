@@ -15,6 +15,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<"individual" | "collaboration">("individual");
+  const [projectToOpen, setProjectToOpen] = useState<string | null>(null);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -71,6 +72,11 @@ export default function App() {
     setMode((current) => (current === "individual" ? "collaboration" : "individual"));
   };
 
+  const openUpgradedProject = (projectId: string) => {
+    setProjectToOpen(projectId);
+    setMode("collaboration");
+  };
+
   if (!authChecked) {
     return (
       <main className="auth-screen">
@@ -112,9 +118,18 @@ export default function App() {
   }
 
   return mode === "collaboration" ? (
-    <ProjectsView currentUser={currentUser} onSignOut={signOut} onToggleMode={toggleMode} />
+    <ProjectsView
+      currentUser={currentUser}
+      initialProjectId={projectToOpen}
+      onSignOut={signOut}
+      onToggleMode={toggleMode}
+    />
   ) : (
-    <IndividualDashboard currentUser={currentUser} onSignOut={signOut} onToggleMode={toggleMode} />
+    <IndividualDashboard
+      currentUser={currentUser}
+      onProjectUpgraded={openUpgradedProject}
+      onSignOut={signOut}
+      onToggleMode={toggleMode}
+    />
   );
 }
-

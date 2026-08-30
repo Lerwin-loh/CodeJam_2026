@@ -88,13 +88,14 @@ type ProjectTab = "parent" | "mine" | "commits" | "team";
 
 interface Props {
   currentUser: User;
+  initialProjectId: string | null;
   onSignOut: () => void;
   onToggleMode: () => void;
 }
 
-export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: Props) {
+export default function ProjectsView({ currentUser, initialProjectId, onSignOut, onToggleMode }: Props) {
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialProjectId);
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [tab, setTab] = useState<ProjectTab>("mine");
   const [error, setError] = useState<string | null>(null);
