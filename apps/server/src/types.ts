@@ -54,6 +54,8 @@ export interface Project {
   parentAgentId: string;
   /** Snapshot id of the current canonical `main` tree. */
   headSnapshotId: string;
+  /** ISO timestamp when the owner archived the project; null while active. */
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

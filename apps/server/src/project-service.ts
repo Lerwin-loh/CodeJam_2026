@@ -23,6 +23,8 @@ const now = () => new Date().toISOString();
 const PROJECT_ACTIONS: Record<string, "owner" | "member" | "member-own"> = {
   "project.read": "member",
   "project.delete": "owner",
+  "project.archive": "owner",
+  "project.unarchive": "owner",
   "project.tree.read": "member",
   "file.read": "member",
   "members.read": "member",
@@ -36,6 +38,27 @@ const PROJECT_ACTIONS: Record<string, "owner" | "member" | "member-own"> = {
   "commit.request.read": "member",
   "commit.request.decide": "owner",
 };
+
+/**
+ * Actions that stay allowed while a project is archived. Everything else is
+ * frozen for everyone (owner included) until the project is unarchived.
+ * `project.archive` / `project.unarchive` / `project.delete` are lifecycle
+ * actions and are always allowed for the owner.
+ */
+const ARCHIVED_READ_ACTIONS = new Set([
+  "project.read",
+  "project.tree.read",
+  "file.read",
+  "members.read",
+  "parent.read",
+  "child.read",
+  "commit.request.read",
+]);
+const PROJECT_LIFECYCLE_ACTIONS = new Set([
+  "project.archive",
+  "project.unarchive",
+  "project.delete",
+]);
 
 /** Cheap static checks run against a member's workspace before a commit request. */
 const SCAN_RULES: Array<{ rule: string; re: RegExp }> = [
@@ -122,7 +145,50 @@ export class ProjectService {
         throw new HttpError(403, "You can only act on your own agent");
       }
     }
+    if (
+      project.archivedAt &&
+      !ARCHIVED_READ_ACTIONS.has(action) &&
+      !PROJECT_LIFECYCLE_ACTIONS.has(action)
+    ) {
+      await this.recordAudit(user, projectId, null, action, "deny", "Project is archived");
+      throw new HttpError(409, "This project is archived. Unarchive it to make changes.");
+    }
     return { project, role: isOwner ? "owner" : "member", member };
+  }
+
+  /** Archive (freeze) or unarchive a project. Owner only. */
+  async setProjectArchived(projectId: string, actor: User, archived: boolean): Promise<Project> {
+    const project = this.getProjectOrThrow(projectId);
+    if (project.ownerId !== actor.id) {
+      await this.recordAudit(
+        actor,
+        projectId,
+        null,
+        archived ? "project.archive" : "project.unarchive",
+        "deny",
+        "Requires the project owner",
+      );
+      throw new HttpError(403, "Only the project owner can archive this project");
+    }
+    const timestamp = now();
+    return this.store.mutate((database) => {
+      const row = database.projects.find((item) => item.id === projectId);
+      if (!row) throw new HttpError(404, "Project not found");
+      row.archivedAt = archived ? row.archivedAt ?? timestamp : null;
+      row.updatedAt = timestamp;
+      database.audit.push({
+        id: randomUUID(),
+        userId: actor.id,
+        userName: actor.name,
+        agentId: null,
+        action: archived ? "project.archive" : "project.unarchive",
+        resource: "project:" + projectId,
+        decision: "allow",
+        reason: (archived ? "Owner archived project " : "Owner unarchived project ") + row.name,
+        timestamp,
+      });
+      return structuredClone(row);
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -181,6 +247,7 @@ export class ProjectService {
       mainWorkspacePath: mainPath,
       parentAgentId,
       headSnapshotId: headSnapshot.id,
+      archivedAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };

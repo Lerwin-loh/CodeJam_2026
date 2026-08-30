@@ -2540,6 +2540,7 @@ textarea:focus {
 }
 .role-owner { color: var(--purple-dark); background: var(--purple-soft); border-color: #d9d2f7; }
 .role-member { color: #2f6d7d; background: #e3f0f4; border-color: #c6dde6; }
+.role-archived { color: #8a6d1f; background: #f6efdb; border-color: #e6d7a8; }
 
 .project-tabs {
   display: flex;
@@ -2568,33 +2569,43 @@ textarea:focus {
 
 .project-agent-layout {
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
 }
 
-.project-agent-layout.branchpoint-open {
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
-}
-
-.project-agent-layout > .agent-workspace,
-.project-agent-layout > .branchpoint-panel {
+.project-agent-layout > .agent-workspace {
   min-width: 0;
 }
 
-.project-agent-layout > .agent-workspace .playground,
-.project-agent-layout > .agent-workspace .settings-panel {
+.project-agent-layout .playground,
+.project-agent-layout .settings-panel {
   width: 100%;
   max-width: none;
   margin-left: 0;
   margin-right: 0;
 }
 
-.project-agent-layout > .branchpoint-panel {
+/* Only the playground row splits when BranchPoint opens; the agent header
+   above it keeps its full width and does not move. */
+.playground-row {
+  min-width: 0;
+}
+
+.playground-row.has-side-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+  gap: 16px;
+  align-items: start;
+}
+
+.playground-row.has-side-panel > .playground {
+  min-width: 0;
+}
+
+.playground-row > .branchpoint-panel {
   width: 100%;
-  height: min(calc(100vh - 215px), 720px);
+  height: min(calc(100vh - 260px), 640px);
+  min-width: 0;
   margin: 0;
+  box-shadow: 0 12px 32px rgba(43, 42, 38, 0.12);
 }
 
 /* agent chat */
@@ -2801,8 +2812,8 @@ textarea:focus {
 @media (max-width: 940px) {
   .agent-chat-body { grid-template-columns: 1fr; }
   .chat-side { max-height: none; }
-  .project-agent-layout.branchpoint-open { grid-template-columns: minmax(0, 1fr); }
-  .project-agent-layout > .branchpoint-panel { height: auto; max-height: 640px; }
+  .playground-row.has-side-panel { grid-template-columns: minmax(0, 1fr); }
+  .playground-row > .branchpoint-panel { height: auto; max-height: 640px; }
 }
 
 .chat-run-error {

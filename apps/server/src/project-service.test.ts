@@ -381,6 +381,54 @@ describe("Part 1 — agent access across the project", () => {
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
+  it("freezes every write once the project is archived and thaws on unarchive", async () => {
+    const { projects, agents } = await makeStack();
+    const owner = await agents.createUser("Owner");
+    const dana = await agents.createUser("Dana");
+    const project = await projects.createProject("App", owner.id);
+    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+
+    // only the owner may archive
+    await expect(projects.setProjectArchived(project.id, dana, true)).rejects.toMatchObject({
+      statusCode: 403,
+    });
+
+    const archived = await projects.setProjectArchived(project.id, owner, true);
+    expect(archived.archivedAt).not.toBeNull();
+
+    // reads still work for owner and member
+    await expect(projects.assertProjectAccess(project.id, dana, "project.read")).resolves.toBeTruthy();
+    await expect(projects.assertProjectAccess(project.id, owner, "parent.read")).resolves.toBeTruthy();
+
+    // writes are frozen for everyone, including the owner
+    await expect(
+      projects.assertProjectAccess(project.id, owner, "member.manage"),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    await expect(
+      projects.assertProjectAccess(project.id, dana, "commit.request.create", { memberId: member.id }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    await expect(
+      agents.assertAgentAccess(project.parentAgentId, owner, "agent.run"),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    await expect(
+      agents.assertAgentAccess(member.childAgentId, dana, "agent.run"),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    // lifecycle actions stay open while archived
+    await expect(
+      projects.assertProjectAccess(project.id, owner, "project.delete"),
+    ).resolves.toMatchObject({ role: "owner" });
+
+    const restored = await projects.setProjectArchived(project.id, owner, false);
+    expect(restored.archivedAt).toBeNull();
+    await expect(
+      projects.assertProjectAccess(project.id, owner, "member.manage"),
+    ).resolves.toMatchObject({ role: "owner" });
+    await expect(
+      agents.assertAgentAccess(member.childAgentId, dana, "agent.run"),
+    ).resolves.toBeTruthy();
+  });
+
   it("runs a member's child agent in its own workspace without fencing changes", async () => {
     const { projects, agents } = await makeStack({
       run: async (request) => {

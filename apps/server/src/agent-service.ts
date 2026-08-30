@@ -64,6 +64,17 @@ function buildDiffHunks(
   return [{ oldStart: start + 1, newStart: start + 1, lines }];
 }
 
+/** Agent actions that mutate state and must be frozen inside an archived project. */
+const ARCHIVE_FROZEN_AGENT_ACTIONS = new Set([
+  "agent.update",
+  "agent.delete",
+  "agent.start",
+  "agent.stop",
+  "agent.run",
+  "branch.create",
+  "checkpoint.create",
+]);
+
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
@@ -205,6 +216,20 @@ export class AgentService {
     const agent = database.agents.find((item) => item.id === agentId);
     if (!agent) {
       throw new HttpError(404, "Agent not found");
+    }
+    if (agent.projectId && ARCHIVE_FROZEN_AGENT_ACTIONS.has(action)) {
+      const project = database.projects.find((item) => item.id === agent.projectId);
+      if (project?.archivedAt) {
+        await this.recordAudit({
+          user,
+          agentId: agent.id,
+          action,
+          resource: "agent:" + agent.id,
+          decision: "deny",
+          reason: "Project is archived",
+        });
+        throw new HttpError(409, "This project is archived. Unarchive it to make changes.");
+      }
     }
     if (agent.ownerId === user.id) {
       return agent;

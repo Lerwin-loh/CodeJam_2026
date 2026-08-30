@@ -163,6 +163,10 @@ export const api = {
         "/api/projects/" + id,
         { method: "DELETE" },
       ),
+    archive: (id: string) =>
+      request<{ project: Project }>("/api/projects/" + id + "/archive", { method: "POST" }),
+    unarchive: (id: string) =>
+      request<{ project: Project }>("/api/projects/" + id + "/unarchive", { method: "POST" }),
     tree: (id: string) => request<{ files: string[] }>("/api/projects/" + id + "/tree"),
     file: (id: string, path: string) =>
       request<{ path: string; content: string }>(

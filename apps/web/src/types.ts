@@ -44,6 +44,7 @@ export interface Project {
   mainWorkspacePath: string;
   parentAgentId: string;
   headSnapshotId: string;
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

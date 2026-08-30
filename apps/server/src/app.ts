@@ -399,6 +399,23 @@ export async function createApp(
     return projects.deleteProject(id, request.user);
   });
 
+  app.post("/api/projects/:id/archive", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.archive");
+    for (const agentId of projects.projectAgentIds(id)) {
+      await service.stopAgent(agentId);
+    }
+    const project = await projects.setProjectArchived(id, request.user, true);
+    return { project };
+  });
+
+  app.post("/api/projects/:id/unarchive", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.unarchive");
+    const project = await projects.setProjectArchived(id, request.user, false);
+    return { project };
+  });
+
   app.get("/api/projects/:id/tree", async (request) => {
     const { id } = projectIdParams.parse(request.params);
     await projects.assertProjectAccess(id, request.user, "project.tree.read");

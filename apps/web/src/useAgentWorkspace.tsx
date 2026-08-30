@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { branchPointSettingsTabs, type BranchPointSettingsTabKey } from "./branchPointSettingsContent";
 import type {
@@ -551,11 +551,14 @@ export function AgentPlayground({
   title,
   subtitle,
   showDelete = true,
+  sidePanel,
 }: {
   ws: WorkspaceApi;
   title: string;
   subtitle: string;
   showDelete?: boolean;
+  /** Rendered beside the playground; the agent header above stays full width. */
+  sidePanel?: ReactNode;
 }) {
   const canManage = ws.canManage;
   const messageEnd = useRef<HTMLDivElement>(null);
@@ -667,6 +670,12 @@ export function AgentPlayground({
         </form>
       )}
 
+      <div
+        className={
+          "playground-row" +
+          (sidePanel && ws.showBranchPoint && !ws.showBpSettings ? " has-side-panel" : "")
+        }
+      >
       <section className="playground">
         <div className="playground-topbar">
           <div>
@@ -814,6 +823,8 @@ export function AgentPlayground({
           </div>
         )}
       </section>
+      {sidePanel}
+      </div>
     </div>
   );
 }

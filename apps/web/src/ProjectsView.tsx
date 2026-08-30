@@ -87,6 +87,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
 
   const myMember = detail?.myMembership ?? null;
   const isOwner = detail?.role === "owner";
+  const isArchived = !!detail?.project.archivedAt;
   const childId = myMember?.childAgentId ?? null;
 
   const loadChild = useCallback(async (projectId: string) => {
@@ -137,25 +138,29 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
     if (tab === "parent" && parent) {
       return {
         id: parent.agent.id,
-        canManage: isOwner,
+        canManage: isOwner && !isArchived,
         seed: parent,
         title: "Parent agent",
-        subtitle: isOwner
-          ? "You control the parent agent and the canonical main workspace."
-          : "Read-only. Only the project owner can instruct the parent agent.",
+        subtitle: isArchived
+          ? "This project is archived — the parent agent is read-only."
+          : isOwner
+            ? "You control the parent agent and the canonical main workspace."
+            : "Read-only. Only the project owner can instruct the parent agent.",
       };
     }
     if (tab === "mine" && myMember && childId) {
       return {
         id: childId,
-        canManage: true,
+        canManage: !isArchived,
         seed: child,
         title: "Your agent",
-        subtitle: "Your own copy of the project. You are the " + myMember.role + " engineer.",
+        subtitle: isArchived
+          ? "This project is archived — your agent is frozen and read-only."
+          : "Your own copy of the project. You are the " + myMember.role + " engineer.",
       };
     }
     return null;
-  }, [tab, parent, child, isOwner, myMember, childId]);
+  }, [tab, parent, child, isOwner, isArchived, myMember, childId]);
 
   const ws = useAgentWorkspace(
     activeAgent?.id ?? null,
@@ -198,6 +203,31 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
       setParent(null);
       setChild(null);
       setCommitRequests([]);
+      await refreshProjects();
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
+
+  const setArchived = async (archived: boolean) => {
+    if (!selectedId || !detail || detail.role !== "owner") return;
+    if (
+      archived &&
+      !window.confirm(
+        "Archive " + detail.project.name +
+          "? All members become read-only and every child agent is frozen until you unarchive it.",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      if (archived) await api.projects.archive(selectedId);
+      else await api.projects.unarchive(selectedId);
+      await loadDetail(selectedId);
       await refreshProjects();
     } catch (reason) {
       fail(reason);
@@ -339,7 +369,10 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
               <div className="agent-avatar">{project.name.slice(0, 1).toUpperCase()}</div>
               <div className="agent-card-copy">
                 <strong>{project.name}</strong>
-                <span>{project.ownerId === currentUser.id ? "Owner" : "Member"}</span>
+                <span>
+                  {project.ownerId === currentUser.id ? "Owner" : "Member"}
+                  {project.archivedAt ? " · Archived" : ""}
+                </span>
               </div>
             </button>
           ))}
@@ -392,21 +425,35 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                 <div className="header-title-row">
                   <h1>{detail.project.name}</h1>
                   <span className={"role-badge role-" + detail.role}>{detail.role}</span>
+                  {isArchived && <span className="role-badge role-archived">archived</span>}
                 </div>
                 <p>
-                  {isOwner
-                    ? "You own this project. You control the parent agent, the team, and commit approvals."
-                    : "You are the " + (myMember?.role ?? "member") + " on this project."}
+                  {isArchived
+                    ? isOwner
+                      ? "This project is archived and read-only. Unarchive it to bring back editing, agents, and commit approvals."
+                      : "This project is archived by the owner. Everything is read-only until they unarchive it."
+                    : isOwner
+                      ? "You own this project. You control the parent agent, the team, and commit approvals."
+                      : "You are the " + (myMember?.role ?? "member") + " on this project."}
                 </p>
               </div>
               {isOwner && (
-                <button
-                  className="button button-danger"
-                  onClick={() => void deleteProject()}
-                  disabled={busy}
-                >
-                  {busy ? <Spinner /> : "Delete project"}
-                </button>
+                <div className="header-actions">
+                  <button
+                    className="button button-ghost"
+                    onClick={() => void setArchived(!isArchived)}
+                    disabled={busy}
+                  >
+                    {busy ? <Spinner /> : isArchived ? "Unarchive" : "Archive"}
+                  </button>
+                  <button
+                    className="button button-danger"
+                    onClick={() => void deleteProject()}
+                    disabled={busy}
+                  >
+                    {busy ? <Spinner /> : "Delete project"}
+                  </button>
+                </div>
               )}
             </header>
 
@@ -427,14 +474,14 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
             <section className="project-panel">
               {tab === "parent" &&
                 (activeAgent ? (
-                  <div
-                    className={
-                      "project-agent-layout " +
-                      (ws.showBranchPoint && !ws.showBpSettings ? "branchpoint-open" : "")
-                    }
-                  >
-                    <AgentPlayground ws={ws} title={activeAgent.title} subtitle={activeAgent.subtitle} showDelete={false} />
-                    {ws.showBranchPoint && <BranchPointPanel ws={ws} />}
+                  <div className="project-agent-layout">
+                    <AgentPlayground
+                      ws={ws}
+                      title={activeAgent.title}
+                      subtitle={activeAgent.subtitle}
+                      showDelete={false}
+                      sidePanel={ws.showBranchPoint ? <BranchPointPanel ws={ws} /> : undefined}
+                    />
                   </div>
                 ) : (
                   <p className="muted-note">The parent agent is not available for this project.</p>
@@ -442,18 +489,24 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
 
               {tab === "mine" && myMember && childId && (
                 <div className="mine-panel">
+                  {isArchived && (
+                    <p className="muted-note">
+                      This project is archived. Your agent is frozen — security checks and commit
+                      requests are unavailable until the owner unarchives it.
+                    </p>
+                  )}
                   <div className="mine-toolbar">
                     <button
                       className="button button-ghost"
                       onClick={() => void startSecurityCheck()}
-                      disabled={securityRunning || busy}
+                      disabled={securityRunning || busy || isArchived}
                     >
                       {securityRunning ? <Spinner /> : "Start security checks"}
                     </button>
                     <button
                       className="button button-primary"
                       onClick={() => void submitCommitRequest()}
-                      disabled={submittingCommit || busy}
+                      disabled={submittingCommit || busy || isArchived}
                     >
                       {submittingCommit ? <Spinner /> : "Submit commit request"}
                     </button>
@@ -486,14 +539,14 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                   )}
 
                   {activeAgent && activeAgent.id === childId && (
-                    <div
-                      className={
-                        "project-agent-layout " +
-                        (ws.showBranchPoint && !ws.showBpSettings ? "branchpoint-open" : "")
-                      }
-                    >
-                      <AgentPlayground ws={ws} title={activeAgent.title} subtitle={activeAgent.subtitle} showDelete={false} />
-                      {ws.showBranchPoint && <BranchPointPanel ws={ws} />}
+                    <div className="project-agent-layout">
+                      <AgentPlayground
+                        ws={ws}
+                        title={activeAgent.title}
+                        subtitle={activeAgent.subtitle}
+                        showDelete={false}
+                        sidePanel={ws.showBranchPoint ? <BranchPointPanel ws={ws} /> : undefined}
+                      />
                     </div>
                   )}
                 </div>
@@ -551,7 +604,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                         )}
                       </div>
 
-                      {isOwner && cr.status === "pending" && (
+                      {isOwner && cr.status === "pending" && !isArchived && (
                         <div className="commit-actions">
                           <button className="button button-primary" onClick={() => void decideCommit(cr.id, "approved")}>
                             Approve
@@ -561,6 +614,11 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                           </button>
                         </div>
                       )}
+                      {isOwner && cr.status === "pending" && isArchived && (
+                        <p className="muted-note">
+                          Unarchive the project to approve or reject this request.
+                        </p>
+                      )}
                     </article>
                   ))}
                 </div>
@@ -568,6 +626,11 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
 
               {tab === "team" && isOwner && (
                 <div className="team-panel">
+                  {isArchived && (
+                    <p className="muted-note">
+                      This project is archived. Team changes are disabled until you unarchive it.
+                    </p>
+                  )}
                   <form className="member-add" onSubmit={addMember}>
                     <div className="member-add-row">
                       <input
@@ -575,15 +638,20 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                         value={mUserName}
                         onChange={(e) => setMUserName(e.target.value)}
                         maxLength={60}
+                        disabled={isArchived}
                       />
                       <input
                         placeholder="Role — e.g. Frontend"
                         value={mRole}
                         onChange={(e) => setMRole(e.target.value)}
                         maxLength={60}
+                        disabled={isArchived}
                       />
                     </div>
-                    <button className="button button-primary" disabled={busy || !mUserName.trim() || !mRole.trim()}>
+                    <button
+                      className="button button-primary"
+                      disabled={busy || isArchived || !mUserName.trim() || !mRole.trim()}
+                    >
                       {busy ? <Spinner /> : "Add member"}
                     </button>
                   </form>
@@ -593,6 +661,7 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
                       <MemberCard
                         key={member.id}
                         member={member}
+                        readOnly={isArchived}
                         onSaveRole={(role) => void saveMemberRole(member.id, role)}
                         onRemove={() => void removeMember(member.id, member.name)}
                       />
@@ -642,10 +711,12 @@ export default function ProjectsView({ currentUser, onSignOut, onToggleMode }: P
 
 function MemberCard({
   member,
+  readOnly = false,
   onSaveRole,
   onRemove,
 }: {
   member: ProjectMemberView;
+  readOnly?: boolean;
   onSaveRole: (role: string) => void;
   onRemove: () => void;
 }) {
@@ -657,16 +728,27 @@ function MemberCard({
       <div className="member-copy">
         <strong>{member.name}</strong>
         <div className="member-role-edit">
-          <input value={role} onChange={(e) => setRole(e.target.value)} maxLength={60} placeholder="Role" />
+          <input
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            maxLength={60}
+            placeholder="Role"
+            disabled={readOnly}
+          />
           <button
             type="button"
             className="button button-primary"
-            disabled={!role.trim() || role.trim() === member.role}
+            disabled={readOnly || !role.trim() || role.trim() === member.role}
             onClick={() => onSaveRole(role)}
           >
             Save role
           </button>
-          <button type="button" className="button button-ghost" onClick={onRemove}>
+          <button
+            type="button"
+            className="button button-ghost"
+            onClick={onRemove}
+            disabled={readOnly}
+          >
             Remove
           </button>
         </div>
