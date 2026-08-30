@@ -366,7 +366,8 @@ describe("BranchPoint API authorization (end to end)", () => {
       payload: { content: "branch turn one", branchId },
     });
     expect(firstBranchTurn.statusCode).toBe(202);
-    await expect.poll(() => branchService.getRun(firstBranchTurn.json().run.id).status).toBe("completed");
+    const firstBranchRunId = firstBranchTurn.json().run.id as string;
+    await expect.poll(() => branchService.getRun(firstBranchRunId).status).toBe("completed");
 
     const secondBranchTurn = await app.inject({
       method: "POST",
@@ -397,6 +398,30 @@ describe("BranchPoint API authorization (end to end)", () => {
     expect(ownerRestore.json().activeWorkspacePath).toBe(
       branchService.getAgent(agentId).workspacePath,
     );
+
+    const deniedDelete = await app.inject({
+      method: "DELETE",
+      url: "/api/agents/" + agentId + "/branches/" + branchId,
+      headers: bob,
+    });
+    expect(deniedDelete.statusCode).toBe(403);
+    expect(branchService.getBranch(branchId).id).toBe(branchId);
+
+    const ownerDelete = await app.inject({
+      method: "DELETE",
+      url: "/api/agents/" + agentId + "/branches/" + branchId,
+      headers: alice,
+    });
+    expect(ownerDelete.statusCode).toBe(200);
+    expect(ownerDelete.json().branchId).toBe(branchId);
+    expect(ownerDelete.json().archivedWorkspace).toContain(".deleted");
+    expect(branchService.getBranches(agentId)).toEqual([]);
+    const deletedRunDetails = await app.inject({
+      method: "GET",
+      url: "/api/runs/" + firstBranchRunId + "/details",
+      headers: alice,
+    });
+    expect(deletedRunDetails.statusCode).toBe(404);
 
     await app.close();
   });

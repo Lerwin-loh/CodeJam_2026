@@ -162,6 +162,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ checkpointId, name }),
     }),
+  deleteBranch: (id: string, branchId: string) =>
+    request<{ branchId: string; archivedWorkspace: string | null }>(
+      "/api/agents/" + id + "/branches/" + branchId,
+      { method: "DELETE" },
+    ),
   mergeBranches: (id: string, branchIds: string[]) =>
     request<{ mergedBranchIds: string[]; changedFiles: string[] }>(
       "/api/agents/" + id + "/branches/merge",

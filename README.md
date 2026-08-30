@@ -219,16 +219,10 @@ See [.env.example](.env.example) for all Runtime and resource-limit options.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    UI["React Web UI"] --> API["Fastify control plane"]
-    API --> Store["JSON metadata and Agent workspaces"]
-    API --> Runtime{"Runtime provider"}
-    Runtime -->|Local POC| Container["Disposable Docker / Colima / Podman container"]
-    Runtime -->|ECS profile| Codex["Codex CLI in application container"]
-    Container --> Ark["Volcengine Ark Responses API"]
-    Codex --> Ark
-```
+![Current implementation architecture](docs/assets/current-architecture.svg)
+
+The editable diagram source is
+[docs/current-architecture.mmd](docs/current-architecture.mmd).
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
 The browser stores the current demo user's generated bearer token locally and

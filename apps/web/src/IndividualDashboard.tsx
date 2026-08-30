@@ -476,6 +476,25 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
     }
   };
 
+  const deleteBranch = async (branch: AgentBranch) => {
+    if (!selected) return;
+    const confirmed = window.confirm(
+      `Delete branch "${branch.name}"? Its workspace will be archived for recovery, but its branch history will be removed.`,
+    );
+    if (!confirmed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteBranch(selected.id, branch.id);
+      setBranches((current) => current.filter((item) => item.id !== branch.id));
+      setActiveBranchId((current) => (current === branch.id ? null : current));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleSignOut = () => {
     setAgents([]);
     setSelectedId(null);
@@ -1014,7 +1033,26 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
                     ))}
                   </div>
                 </div>
-                <div className="branch-list">{branches.map((branch) => <button className={"branch-card " + (branch.id === activeBranchId ? "active" : "")} type="button" key={branch.id} onClick={() => { setActiveBranchId(branch.id); setActiveBranchPointView("history"); }}><span className="branch-card-icon">⑂</span><span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span><span>›</span></button>)}</div>
+                <div className="branch-list">
+                  {branches.map((branch) => (
+                    <div className={"branch-card " + (branch.id === activeBranchId ? "active" : "")} key={branch.id}>
+                      <button className="branch-card-select" type="button" onClick={() => { setActiveBranchId(branch.id); setActiveBranchPointView("history"); }}>
+                        <span className="branch-card-icon">⑂</span>
+                        <span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span>
+                      </button>
+                      <button
+                        className="branch-delete-button"
+                        type="button"
+                        disabled={busy || branch.status === "busy"}
+                        title={branch.status === "busy" ? "Stop the branch run before deleting it" : "Delete branch"}
+                        aria-label={`Delete branch ${branch.name}`}
+                        onClick={() => void deleteBranch(branch)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </> : <div className="branchpoint-empty-state">
                 <span className="branchpoint-empty-icon">⑂</span>
                 <strong>No branch workspaces yet</strong>

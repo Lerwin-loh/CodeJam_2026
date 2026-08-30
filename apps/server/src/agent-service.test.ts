@@ -300,6 +300,56 @@ describe("Agent lifecycle", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("recoverably deletes leaf branches without orphaning branch lineage", async () => {
+    const service = await makeService({
+      run: async (request) => {
+        await writeFile(
+          path.join(request.workspacePath, request.prompt.replaceAll(" ", "-") + ".txt"),
+          request.prompt + "\n",
+        );
+        return { output: "done", threadId: request.threadId ?? "delete-thread", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Delete branches" });
+    const mainRun = await service.sendMessage(agent.id, "main seed");
+    await expect.poll(() => service.getRun(mainRun.run.id).status).toBe("completed");
+    const mainCheckpoint = service.getCheckpoints(agent.id)[0];
+    expect(mainCheckpoint).toBeDefined();
+    if (!mainCheckpoint) return;
+
+    const parent = await service.createBranchFromCheckpoint(agent.id, mainCheckpoint.id, "parent");
+    const branchRun = await service.sendMessage(agent.id, "branch change", parent.id);
+    await expect.poll(() => service.getRun(branchRun.run.id).status).toBe("completed");
+    const branchCheckpoint = service
+      .getCheckpoints(agent.id, parent.id)
+      .find((item) => item.branchId === parent.id);
+    expect(branchCheckpoint).toBeDefined();
+    if (!branchCheckpoint) return;
+    const child = await service.createBranchFromCheckpoint(agent.id, branchCheckpoint.id, "child");
+
+    await expect(service.deleteBranch(agent.id, parent.id)).rejects.toMatchObject({
+      statusCode: 409,
+      message: "Delete this branch's child branches first",
+    });
+
+    const deletedChild = await service.deleteBranch(agent.id, child.id);
+    expect(deletedChild.archivedWorkspace).toBeTruthy();
+    expect(await readFile(path.join(deletedChild.archivedWorkspace!, "branch-change.txt"), "utf8"))
+      .toBe("branch change\n");
+    await expect(readFile(child.workspacePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    const deletedParent = await service.deleteBranch(agent.id, parent.id);
+    expect(deletedParent.archivedWorkspace).toBeTruthy();
+    expect(await readFile(path.join(deletedParent.archivedWorkspace!, "branch-change.txt"), "utf8"))
+      .toBe("branch change\n");
+    expect(service.getBranches(agent.id)).toEqual([]);
+    expect(() => service.getBranch(parent.id)).toThrow("Branch not found");
+    expect(() => service.getRun(branchRun.run.id)).toThrow("Run not found");
+    expect(service.getRun(mainRun.run.id).status).toBe("completed");
+  });
+
   it("rejects an active-workspace restore while the Agent is running", async () => {
     let finish!: (result: RunnerResult) => void;
     const pending = new Promise<RunnerResult>((resolve) => {

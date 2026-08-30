@@ -148,6 +148,12 @@ export class WorkspaceManager {
     }
   }
 
+  /** Put an archived branch workspace back if its metadata transaction fails. */
+  async restoreArchivedBranch(archivedPath: string, workspacePath: string): Promise<void> {
+    await mkdir(path.dirname(workspacePath), { recursive: true });
+    await rename(archivedPath, workspacePath);
+  }
+
   async archiveProject(projectId: string): Promise<string | null> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const archiveRoot = path.join(this.root, ".deleted", "projects");

@@ -441,6 +441,30 @@ export function useAgentWorkspace(
     [agentId, fail],
   );
 
+  const deleteBranch = useCallback(
+    async (branch: AgentBranch): Promise<boolean> => {
+      if (!agentId || !canManage) return false;
+      const confirmed = window.confirm(
+        `Delete branch "${branch.name}"? Its workspace will be archived for recovery, but its branch history will be removed.`,
+      );
+      if (!confirmed) return false;
+      setBusy(true);
+      setError(null);
+      try {
+        await api.deleteBranch(agentId, branch.id);
+        setBranches((current) => current.filter((item) => item.id !== branch.id));
+        setActiveBranchId((current) => (current === branch.id ? null : current));
+        return true;
+      } catch (reason) {
+        fail(reason);
+        return false;
+      } finally {
+        if (mounted.current) setBusy(false);
+      }
+    },
+    [agentId, canManage, fail],
+  );
+
   const toggleAgent = useCallback(async () => {
     if (!agentId) return;
     setBusy(true);
@@ -564,6 +588,7 @@ export function useAgentWorkspace(
     historyItems,
     branchGraphRows,
     selectBranch,
+    deleteBranch,
     mergeBranches,
     send,
     sendText,
@@ -1143,21 +1168,36 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
               </div>
               <div className="branch-list">
                 {ws.branches.map((branch) => (
-                  <button
+                  <div
                     className={"branch-card " + (branch.id === ws.activeBranchId ? "active" : "")}
-                    type="button"
                     key={branch.id}
-                    onClick={() => ws.selectBranch(branch.id)}
                   >
-                    <span className="branch-card-icon">⑂</span>
-                    <span>
-                      <strong>{branch.name}</strong>
-                      <small>
-                        {branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}
-                      </small>
-                    </span>
-                    <span>›</span>
-                  </button>
+                    <button
+                      className="branch-card-select"
+                      type="button"
+                      onClick={() => ws.selectBranch(branch.id)}
+                    >
+                      <span className="branch-card-icon">⑂</span>
+                      <span>
+                        <strong>{branch.name}</strong>
+                        <small>
+                          {branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}
+                        </small>
+                      </span>
+                    </button>
+                    {ws.canManage && (
+                      <button
+                        className="branch-delete-button"
+                        type="button"
+                        disabled={ws.busy || branch.status === "busy"}
+                        title={branch.status === "busy" ? "Stop the branch run before deleting it" : "Delete branch"}
+                        aria-label={`Delete branch ${branch.name}`}
+                        onClick={() => void ws.deleteBranch(branch)}
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             </>

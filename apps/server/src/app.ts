@@ -16,6 +16,10 @@ declare module "fastify" {
 }
 
 const agentIdParams = z.object({ id: z.string().uuid() });
+const agentBranchParams = z.object({
+  id: z.string().uuid(),
+  branchId: z.string().uuid(),
+});
 const runIdParams = z.object({ id: z.string().uuid() });
 const checkpointIdParams = z.object({ id: z.string().uuid() });
 const createUserBody = z.object({
@@ -268,6 +272,21 @@ export async function createApp(
     await service.assertAgentAccess(id, request.user, "branch.merge");
     const { branchIds } = mergeBranchesBody.parse(request.body);
     return service.mergeBranches(id, branchIds);
+  });
+
+  app.delete("/api/agents/:id/branches/:branchId", async (request) => {
+    const { id, branchId } = agentBranchParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "branch.delete");
+    const result = await service.deleteBranch(id, branchId);
+    await service.recordAudit({
+      user: request.user,
+      agentId: id,
+      action: "branch.delete",
+      resource: "branch:" + branchId,
+      decision: "allow",
+      reason: "Owner deleted an idle leaf branch",
+    });
+    return result;
   });
 
   app.post("/api/agents/:id/checkpoints", async (request, reply) => {

@@ -72,6 +72,7 @@ const ARCHIVE_FROZEN_AGENT_ACTIONS = new Set([
   "agent.stop",
   "agent.run",
   "branch.create",
+  "branch.delete",
   "branch.merge",
   "checkpoint.create",
   "checkpoint.restore",
@@ -703,6 +704,71 @@ export class AgentService {
     await this.history.restoreSnapshot(snapshot, branch.workspacePath);
     await this.store.mutate((next) => next.branches.push(branch));
     return branch;
+  }
+
+  /**
+   * Recoverably delete one idle leaf branch and all metadata created on it.
+   * Parent branches must be deleted from the leaves upward so lineage is never
+   * left pointing at a branch that no longer exists.
+   */
+  async deleteBranch(
+    agentId: string,
+    branchId: string,
+  ): Promise<{ branchId: string; archivedWorkspace: string | null }> {
+    const agent = this.getAgent(agentId);
+    const database = this.store.snapshot();
+    const branch = database.branches.find(
+      (item) => item.id === branchId && item.agentId === agentId,
+    );
+    if (!branch) throw new HttpError(404, "Branch not found");
+    if (agent.status === "busy" || branch.status === "busy") {
+      throw new HttpError(409, "Stop the active run before deleting this branch");
+    }
+    if (database.branches.some((item) => item.parentBranchId === branchId)) {
+      throw new HttpError(409, "Delete this branch's child branches first");
+    }
+
+    const archivedWorkspace = await this.workspaces.archiveBranch(
+      branch.id,
+      branch.workspacePath,
+    );
+    try {
+      await this.store.mutate((next) => {
+        const storedBranch = next.branches.find(
+          (item) => item.id === branchId && item.agentId === agentId,
+        );
+        if (!storedBranch) throw new HttpError(404, "Branch not found");
+        if (storedBranch.status === "busy") {
+          throw new HttpError(409, "Stop the active run before deleting this branch");
+        }
+        if (next.branches.some((item) => item.parentBranchId === branchId)) {
+          throw new HttpError(409, "Delete this branch's child branches first");
+        }
+        next.branches = next.branches.filter((item) => item.id !== branchId);
+        next.checkpoints = next.checkpoints.filter((item) => item.branchId !== branchId);
+        next.runs = next.runs.filter((item) => item.branchId !== branchId);
+        next.messages = next.messages.filter((item) => item.branchId !== branchId);
+        next.traces = next.traces.filter((item) => item.branchId !== branchId);
+        const storedAgent = next.agents.find((item) => item.id === agentId);
+        if (storedAgent) storedAgent.updatedAt = now();
+      });
+    } catch (error) {
+      if (archivedWorkspace) {
+        try {
+          await this.workspaces.restoreArchivedBranch(
+            archivedWorkspace,
+            branch.workspacePath,
+          );
+        } catch {
+          throw new HttpError(
+            500,
+            "Branch deletion failed and its workspace could not be restored",
+          );
+        }
+      }
+      throw error;
+    }
+    return { branchId, archivedWorkspace };
   }
 
   /**

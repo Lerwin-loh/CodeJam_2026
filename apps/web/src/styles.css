@@ -1808,22 +1808,56 @@ textarea:focus {
 
 .branch-card {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
   width: 100%;
-  padding: 11px;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: 10px;
   color: inherit;
   background: var(--paper);
-  text-align: left;
-  cursor: pointer;
+  overflow: hidden;
 }
 
 .branch-card:hover, .branch-card.active {
   border-color: #aa9eea;
   background: var(--purple-soft);
+}
+
+.branch-card-select {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.branch-delete-button {
+  margin-right: 10px;
+  padding: 6px 8px;
+  border: 1px solid #efc4c4;
+  border-radius: 7px;
+  color: #a33a3a;
+  background: #fff7f7;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.branch-delete-button:hover:not(:disabled) {
+  border-color: #d88888;
+  background: #fdeaea;
+}
+
+.branch-delete-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .branch-card-icon {

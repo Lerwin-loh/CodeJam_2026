@@ -4,21 +4,12 @@ Volc Agent Launchpad is a single-node control plane with two product modes:
 standalone Agents for individual work and collaboration projects containing one
 owner-controlled parent Agent plus one child Agent per member.
 
-```mermaid
-flowchart LR
-    UI["React Web UI"] -->|user bearer token + JSON/SSE| API["Fastify API"]
-    API --> Agent["AgentService"]
-    API --> Project["ProjectService"]
-    Agent --> Store["JsonStore"]
-    Project --> Store
-    Agent --> History["WorkspaceHistory"]
-    Project --> History
-    Agent --> Runner{"AgentRunner"}
-    Runner -->|Local POC| Container["Disposable Runtime container"]
-    Runner -->|ECS/development| Process["Codex process"]
-    Container --> Ark["Volcengine Ark"]
-    Process --> Ark
-```
+![Current implementation architecture](assets/current-architecture.svg)
+
+The presentation-ready SVG above has an editable Mermaid source at
+[current-architecture.mmd](current-architecture.mmd). The solid path is normal
+Agent execution through Codex. The dashed purple path is security analysis: it
+deliberately bypasses the Agent Runtime, tools, and Codex conversation history.
 
 ## Responsibility boundaries
 
@@ -44,8 +35,9 @@ accepted by this hook. API requests use the generated `User.token` value.
 
 `AgentService` owns Agent lifecycle, Agent ownership decisions, asynchronous Run
 state, messages, Codex thread IDs, trace subscriptions, checkpoints, branches,
-restoration, and audit entries for Agent decisions. Project owners may access
-Agents in their project; members may access only their own child Agent.
+verified restoration, branch-to-trunk file merges, and audit entries for Agent
+decisions. Project owners may access Agents in their project; members may access
+only their own child Agent.
 
 ```text
 ready -> busy -> ready
@@ -63,16 +55,31 @@ time. A stopped Agent rejects prompts. On restart, interrupted Runs become
 `ProjectService` owns project membership and the owner/member/member-own policy
 matrix. It creates the canonical `main` workspace and member copies, filters
 roster data by role, protects main-tree reads from path traversal, freezes
-project writes while archived, runs advisory security scans, calculates member
-changes against main, persists commit-request decisions, and promotes a
+project writes while archived, runs the pre-commit security gate, calculates
+member changes against main, persists commit-request decisions, and promotes a
 standalone Agent into a new project's parent without changing that Agent's
 identity, execution history, checkpoints, branches, or Codex threads. The
 upgrade stages and verifies a project workspace copy before atomically
 publishing the new project metadata.
 
-Security checks report findings but do not currently block a commit request.
-Approving a commit request records the decision; it does not yet apply or merge
-the member workspace into `main`.
+A commit request requires a passing OWASP verdict bound to the member
+workspace's current hash. Owner approval records the decision but does not yet
+apply or merge the member workspace into canonical project `main`.
+
+### Security analysis gate
+
+The security gate compares a member workspace with project `main` and reviews
+only created or modified files. It takes the cheapest valid path:
+
+1. no changes pass without a model request;
+2. obvious lexical findings fail locally with zero tokens;
+3. otherwise one bounded direct Ark request returns the ten OWASP category
+   verdicts as JSON, without an Agent loop, tools, or conversation history.
+
+Source supplied to the classifier is capped at 12,000 characters per file and
+48,000 characters in total. Auto-fix makes one direct model request per affected
+file, writes only accepted full-file rewrites, and then re-runs the gate. Any
+workspace change invalidates a previous pass through its stored workspace hash.
 
 ### WorkspaceHistory and BranchPoint
 
@@ -108,6 +115,10 @@ thread IDs, cancellation, and termination escalation. The local container path
 adds resource limits, drops capabilities, enables `no-new-privileges`, and bind
 mounts only the selected workspace and Codex home.
 
+Security classification is a separate server-side `arkClassify` path. It uses a
+single non-streaming Responses request and does not pass through either Runtime
+provider.
+
 ## Data crossing each boundary
 
 | Boundary | Data crossing it | Failure behavior |
@@ -115,6 +126,7 @@ mounts only the selected workspace and Codex home.
 | Browser → API | User token, validated JSON, resource IDs | `401` for missing/invalid token; `400`/`413` for invalid or oversized input |
 | API → authorization services | Resolved user, action, Agent/project/member ID | `403` denial with an audit record; `409` when archived or otherwise conflicting |
 | AgentService → Runtime | Workspace path, prompt, sandbox mode, resumable thread ID | Run becomes failed/cancelled; partial workspace mutation can produce a partial checkpoint |
+| ProjectService → security classifier | Changed source only, bounded OWASP prompt, no thread or tools | Static findings fail locally; model/parse failures close the commit gate |
 | Services → JsonStore | Structured metadata and audit records | Failed persistence is not published as committed in-memory state |
 | Services → workspace/history | Files, manifests, hashes, snapshots | Missing resources return controlled errors; staging snapshots are removed on failure |
 | Runtime → Ark | Model request and Ark credential through the server/Runtime environment | Configuration failure returns `503`; timeout/output/cancellation limits terminate the Run |
