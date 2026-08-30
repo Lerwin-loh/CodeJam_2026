@@ -49,17 +49,34 @@ export interface Project {
   updatedAt: string;
 }
 
-export interface SecurityFinding {
-  file: string;
-  line: number;
-  rule: string;
-  excerpt: string;
+export type OwaspStatus = "pass" | "fail" | "na";
+
+export interface SecurityAnalysisPoint {
+  id: string;
+  name: string;
+  status: OwaspStatus;
+  detail: string;
+  file?: string;
+  evidence?: string;
+  remediation?: string;
 }
 
-export interface SecurityCheckResult {
+export interface SecurityAnalysis {
   ranAt: string;
-  filesScanned: number;
-  findings: SecurityFinding[];
+  runId: string;
+  workspaceHash: string;
+  passed: boolean;
+  points: SecurityAnalysisPoint[];
+  summary: string;
+  modifiedWorkspace: boolean;
+}
+
+/** Commit-gate state for the current member's branch. */
+export interface MemberSecurityView {
+  analysis: SecurityAnalysis | null;
+  currentWorkspaceHash: string;
+  canCommit: boolean;
+  reason: "ok" | "never-run" | "failed" | "incomplete" | "branch-changed";
 }
 
 export type CommitRequestStatus = "pending" | "approved" | "rejected" | "merged";
@@ -75,7 +92,7 @@ export interface CommitRequest {
   note: string;
   status: CommitRequestStatus;
   changedFiles: ChangedFiles;
-  securityCheck: SecurityCheckResult | null;
+  securityAnalysis: SecurityAnalysis | null;
   decidedBy: string | null;
   decidedAt: string | null;
   createdAt: string;
@@ -88,7 +105,7 @@ export interface ProjectMember {
   role: string;
   childAgentId: string;
   workspacePath: string;
-  lastSecurityCheck: SecurityCheckResult | null;
+  securityAnalysis: SecurityAnalysis | null;
   invitedBy: string;
   createdAt: string;
   updatedAt: string;
@@ -101,7 +118,7 @@ export interface ProjectMemberView {
   name: string;
   role: string;
   childAgentId: string;
-  lastSecurityCheck: SecurityCheckResult | null;
+  securityAnalysis: SecurityAnalysis | null;
   createdAt: string;
 }
 
@@ -116,6 +133,8 @@ export interface ParentAgentView {
   messages: Message[];
   trace: TraceEvent[];
   checkpoints: AgentCheckpoint[];
+  /** Only present on the member's own child-agent view (`/my-agent`). */
+  security?: MemberSecurityView;
 }
 
 export interface ProjectDetail {

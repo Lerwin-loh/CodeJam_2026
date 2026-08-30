@@ -89,6 +89,21 @@ export class WorkspaceManager {
     return destination;
   }
 
+  /** Move a branch workspace under `.deleted/` (used when a branch is merged away). */
+  async archiveBranch(branchId: string, workspacePath: string): Promise<string | null> {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const archiveRoot = path.join(this.root, ".deleted", "branches");
+    const destination = path.join(archiveRoot, branchId + "-" + timestamp);
+    await mkdir(archiveRoot, { recursive: true });
+    try {
+      await rename(workspacePath, destination);
+      return destination;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
   async archiveProject(projectId: string): Promise<string | null> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const archiveRoot = path.join(this.root, ".deleted", "projects");

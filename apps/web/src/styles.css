@@ -2728,8 +2728,22 @@ textarea:focus {
 }
 .security-result.is-clean { border-color: #c6dfce; background: #f1f8f4; }
 .security-result.has-findings { border-color: #e7c3c3; background: #fbf1f0; }
-.security-result > strong { font-size: 13px; }
-.security-result > span { font-size: 11px; color: var(--muted); }
+.security-result-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.security-result-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.security-result-copy strong { font-size: 13px; }
+.security-result-copy span { font-size: 11px; color: var(--muted); }
+.security-result-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.security-result-actions .button { min-height: 30px; font-size: 12px; }
 .security-finding {
   border-top: 1px solid var(--line);
   padding-top: 8px;
@@ -2757,6 +2771,91 @@ textarea:focus {
   border-radius: 6px;
   overflow-x: auto;
 }
+
+/* OWASP Top 10 checklist (Part 1B commit gate) */
+.owasp-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.owasp-row {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px 10px;
+  font-size: 12px;
+  padding: 5px 0;
+  border-top: 1px solid rgba(43, 42, 38, 0.08);
+}
+.owasp-status {
+  text-transform: uppercase;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-align: center;
+  border-radius: 4px;
+  padding: 2px 0;
+}
+.owasp-pass .owasp-status { color: #2f7d5b; background: #e4f2ea; }
+.owasp-fail .owasp-status { color: #b03e3e; background: #fbe4e2; }
+.owasp-na .owasp-status { color: var(--muted); background: var(--line); }
+.owasp-name code { font-size: 11px; color: var(--ink); }
+.owasp-detail { grid-column: 2; color: var(--muted); font-size: 11px; }
+.owasp-fail .owasp-name { font-weight: 700; }
+.owasp-fix-btn {
+  grid-column: 2;
+  justify-self: start;
+  min-height: 26px;
+  font-size: 11px;
+  padding: 0 10px;
+  margin-top: 2px;
+}
+
+.owasp-fix-modal { max-width: 640px; width: min(640px, 92vw); }
+.owasp-fix-file { margin: 0; font-size: 12px; color: var(--muted); }
+.owasp-fix-file code { color: var(--ink); }
+.owasp-fix-code {
+  margin: 4px 0 8px;
+  padding: 10px 12px;
+  background: #23221f;
+  color: #f3f1ea;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.owasp-fix-remediation { margin: 4px 0 6px; font-size: 13px; line-height: 1.5; }
+
+.merge-modal { max-width: 520px; width: min(520px, 92vw); }
+.merge-select-all { font-size: 12px; margin: 2px 0 6px; }
+.merge-select-all label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.merge-branch-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.merge-branch-list li { border-top: 1px solid var(--line); }
+.merge-branch-list li:first-child { border-top: none; }
+.merge-branch-list label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.merge-branch-name { font-weight: 600; }
+.merge-branch-meta { margin-left: auto; font-size: 11px; color: var(--muted); }
 
 /* commit requests */
 .commit-panel { display: flex; flex-direction: column; gap: 12px; }

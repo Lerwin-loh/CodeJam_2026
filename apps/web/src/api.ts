@@ -11,9 +11,9 @@ import type {
   Project,
   ProjectDetail,
   ProjectMemberView,
+  MemberSecurityView,
   RosterEntry,
   RunDetails,
-  SecurityCheckResult,
   SystemInfo,
   TraceEvent,
   User,
@@ -68,9 +68,16 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     ...options,
     headers,
   });
-  const data = (await response.json().catch(() => ({}))) as T & { error?: string };
+  const data = (await response.json().catch(() => ({}))) as T & {
+    error?: string;
+    message?: string;
+  };
   if (!response.ok) {
-    throw new ApiError(data.error ?? "Request failed", response.status);
+    // Our handler puts the real text in `error`; Fastify's default puts a bare
+    // status phrase in `error` and the real text in `message`.
+    const detail =
+      typeof data.message === "string" && data.message ? data.message : data.error;
+    throw new ApiError(detail ?? "Request failed", response.status);
   }
   return data;
 }
@@ -147,6 +154,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ checkpointId, name }),
     }),
+  mergeBranches: (id: string, branchIds: string[]) =>
+    request<{ mergedBranchIds: string[]; changedFiles: string[] }>(
+      "/api/agents/" + id + "/branches/merge",
+      { method: "POST", body: JSON.stringify({ branchIds }) },
+    ),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
   runDetails: (id: string) => request<RunDetails>("/api/runs/" + id + "/details"),
 
@@ -194,9 +206,9 @@ export const api = {
       request<ParentAgentView>("/api/projects/" + id + "/parent-agent"),
     myAgent: (id: string) =>
       request<ParentAgentView>("/api/projects/" + id + "/my-agent"),
-    securityCheck: (id: string, memberId: string) =>
-      request<{ result: SecurityCheckResult }>(
-        "/api/projects/" + id + "/members/" + memberId + "/security-check",
+    securityAnalysis: (id: string, memberId: string) =>
+      request<{ security: MemberSecurityView }>(
+        "/api/projects/" + id + "/members/" + memberId + "/security-analysis",
         { method: "POST" },
       ),
     submitCommitRequest: (

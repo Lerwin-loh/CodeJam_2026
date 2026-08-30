@@ -40,7 +40,14 @@ export class JsonStore {
       parsed.projectMembers ??= [];
       parsed.commitRequests ??= [];
       parsed.traces ??= [];
-      for (const member of parsed.projectMembers) member.lastSecurityCheck ??= null;
+      for (const member of parsed.projectMembers) {
+        member.securityAnalysis ??= null;
+        delete (member as { lastSecurityCheck?: unknown }).lastSecurityCheck;
+      }
+      for (const request of parsed.commitRequests) {
+        request.securityAnalysis ??= null;
+        delete (request as { securityCheck?: unknown }).securityCheck;
+      }
       for (const project of parsed.projects) project.archivedAt ??= null;
       parsed.branches ??= [];
       parsed.snapshots ??= [];

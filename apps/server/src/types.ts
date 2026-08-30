@@ -69,23 +69,49 @@ export interface ProjectMember {
   role: string;
   childAgentId: string;
   workspacePath: string;
-  lastSecurityCheck: SecurityCheckResult | null;
+  /** Latest OWASP analysis the member's child agent ran against this branch. */
+  securityAnalysis: SecurityAnalysis | null;
   invitedBy: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface SecurityFinding {
-  file: string;
-  line: number;
-  rule: string;
-  excerpt: string;
+export type OwaspStatus = "pass" | "fail" | "na";
+
+/** One OWASP Top 10 (2021) category verdict from the child agent. */
+export interface SecurityAnalysisPoint {
+  /** e.g. "A01:2021". */
+  id: string;
+  /** e.g. "Broken Access Control". */
+  name: string;
+  status: OwaspStatus;
+  detail: string;
+  /** For `fail`: the file the issue was found in, relative to the branch. */
+  file?: string;
+  /** For `fail`: the flagged code, verbatim. */
+  evidence?: string;
+  /** For `fail`: how to fix it. */
+  remediation?: string;
 }
 
-export interface SecurityCheckResult {
+/**
+ * Result of a child-agent OWASP Top 10 review of a member's branch. The commit
+ * gate opens only while `passed` is true AND `workspaceHash` still equals the
+ * branch's current hash (any file change since makes it stale).
+ */
+export interface SecurityAnalysis {
   ranAt: string;
-  filesScanned: number;
-  findings: SecurityFinding[];
+  /** The child-agent run that produced this verdict. */
+  runId: string;
+  /** Branch workspace hash the verdict reflects. */
+  workspaceHash: string;
+  /** All ten points parsed and none is "fail". */
+  passed: boolean;
+  points: SecurityAnalysisPoint[];
+  /** Short human summary, or the reason the verdict could not be trusted. */
+  summary: string;
+  /** True if the analysis run itself changed files in the branch. */
+  modifiedWorkspace: boolean;
 }
 
 export type CommitRequestStatus = "pending" | "approved" | "rejected" | "merged";
@@ -102,7 +128,7 @@ export interface CommitRequest {
   note: string;
   status: CommitRequestStatus;
   changedFiles: ChangedFiles;
-  securityCheck: SecurityCheckResult | null;
+  securityAnalysis: SecurityAnalysis | null;
   decidedBy: string | null;
   decidedAt: string | null;
   createdAt: string;
