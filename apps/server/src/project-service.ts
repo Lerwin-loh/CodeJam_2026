@@ -11,6 +11,7 @@ import type {
   OwaspStatus,
   Project,
   ProjectMember,
+  ProjectMemberStatus,
   SecurityAnalysis,
   SecurityAnalysisPoint,
   User,
@@ -33,12 +34,17 @@ function projectName(value: string): string {
 /** Minimum capability each project action needs. Unlisted -> owner only. */
 const PROJECT_ACTIONS: Record<string, "owner" | "member" | "member-own"> = {
   "project.read": "member",
+  "project.update": "owner",
   "project.delete": "owner",
+  "project.transfer": "owner",
   "project.archive": "owner",
   "project.unarchive": "owner",
+  "project.leave": "member",
   "project.tree.read": "member",
   "file.read": "member",
   "members.read": "member",
+  "activity.read": "member",
+  "invitation.respond": "member",
   "parent.read": "member",
   "parent.query": "owner",
   "child.read": "member-own",
@@ -61,9 +67,12 @@ const ARCHIVED_READ_ACTIONS = new Set([
   "project.tree.read",
   "file.read",
   "members.read",
+  "activity.read",
   "parent.read",
   "child.read",
   "commit.request.read",
+  "project.leave",
+  "invitation.respond",
 ]);
 const PROJECT_LIFECYCLE_ACTIONS = new Set([
   "project.archive",
@@ -336,16 +345,29 @@ export interface ProjectMemberView {
   id: string;
   userId: string;
   name: string;
+  status: ProjectMemberStatus;
   role: string;
   childAgentId: string;
   securityAnalysis: SecurityAnalysis | null;
+  invitedByName: string;
+  pendingCommits: number;
   createdAt: string;
 }
 
 export interface RosterEntry {
   userId: string;
   name: string;
+  status: ProjectMemberStatus;
   role: string;
+}
+
+export interface ActivityEntry {
+  id: string;
+  userName: string;
+  action: string;
+  decision: AuditDecision;
+  reason: string;
+  timestamp: string;
 }
 
 export interface MemberSecurityView {
@@ -405,11 +427,16 @@ export class ProjectService {
     const project = database.projects.find((item) => item.id === projectId);
     if (!project) throw new HttpError(404, "Project not found");
     const isOwner = project.ownerId === user.id;
-    const member =
+    const row =
       database.projectMembers.find(
         (item) => item.projectId === projectId && item.userId === user.id,
       ) ?? null;
+    // An "invited" row is not membership yet — it only unlocks the invite response.
+    const member = row && row.status === "active" ? row : null;
     if (!isOwner && !member) {
+      if (row && (action === "invitation.respond" || action === "project.read")) {
+        return { project, role: "member", member: row };
+      }
       await this.recordAudit(user, projectId, null, action, "deny", "Not a member of this project");
       throw new HttpError(403, "You are not on this project");
     }
@@ -520,6 +547,7 @@ export class ProjectService {
     const project: Project = {
       id: projectId,
       name: trimmed,
+      description: "",
       ownerId,
       mainWorkspacePath: mainPath,
       parentAgentId,
@@ -604,6 +632,7 @@ export class ProjectService {
       const project: Project = {
         id: projectId,
         name: trimmed,
+        description: "",
         ownerId: actor.id,
         mainWorkspacePath: mainPath,
         parentAgentId: parentAgent.id,
@@ -670,12 +699,38 @@ export class ProjectService {
     const database = this.store.snapshot();
     const memberProjectIds = new Set(
       database.projectMembers
-        .filter((item) => item.userId === userId)
+        .filter((item) => item.userId === userId && item.status === "active")
         .map((item) => item.projectId),
     );
     return database.projects
       .filter((item) => item.ownerId === userId || memberProjectIds.has(item.id))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  /** Pending invitations addressed to a user, for the projects sidebar. */
+  listPendingInvitations(userId: string): Array<{
+    projectId: string;
+    projectName: string;
+    role: string;
+    invitedByName: string;
+    invitedAt: string;
+  }> {
+    const database = this.store.snapshot();
+    const nameOf = (id: string) =>
+      database.users.find((user) => user.id === id)?.name ?? "Someone";
+    return database.projectMembers
+      .filter((item) => item.userId === userId && item.status === "invited")
+      .map((item) => {
+        const project = database.projects.find((p) => p.id === item.projectId);
+        return {
+          projectId: item.projectId,
+          projectName: project?.name ?? "Unknown project",
+          role: item.role,
+          invitedByName: nameOf(item.invitedBy),
+          invitedAt: item.createdAt,
+        };
+      })
+      .sort((left, right) => right.invitedAt.localeCompare(left.invitedAt));
   }
 
   projectAgentIds(projectId: string): string[] {
@@ -749,6 +804,7 @@ export class ProjectService {
   getProject(projectId: string, user: User): {
     project: Project;
     role: "owner" | "member";
+    owner: { id: string; name: string };
     myMembership: ProjectMember | null;
     members: ProjectMemberView[] | RosterEntry[];
   } {
@@ -758,14 +814,18 @@ export class ProjectService {
     const isOwner = project.ownerId === user.id;
     const myMembership =
       database.projectMembers.find(
-        (item) => item.projectId === projectId && item.userId === user.id,
+        (item) =>
+          item.projectId === projectId && item.userId === user.id && item.status === "active",
       ) ?? null;
     if (!isOwner && !myMembership) {
       throw new HttpError(403, "You are not on this project");
     }
+    const ownerName =
+      database.users.find((item) => item.id === project.ownerId)?.name ?? "Unknown user";
     return {
       project,
       role: isOwner ? "owner" : "member",
+      owner: { id: project.ownerId, name: ownerName },
       myMembership,
       members: this.listMembers(projectId, isOwner),
     };
@@ -807,24 +867,83 @@ export class ProjectService {
     const database = this.store.snapshot();
     const rows = database.projectMembers
       .filter((item) => item.projectId === projectId)
-      .sort((left, right) => left.role.localeCompare(right.role));
+      .sort((left, right) => {
+        if (left.status !== right.status) return left.status === "active" ? -1 : 1;
+        return left.role.localeCompare(right.role);
+      });
     const nameOf = (userId: string) =>
       database.users.find((user) => user.id === userId)?.name ?? "Unknown user";
     if (!forOwner) {
-      return rows.map((item) => ({ userId: item.userId, name: nameOf(item.userId), role: item.role }));
+      return rows
+        .filter((item) => item.status === "active")
+        .map((item) => ({
+          userId: item.userId,
+          name: nameOf(item.userId),
+          status: item.status,
+          role: item.role,
+        }));
     }
     return rows.map((item) => ({
       id: item.id,
       userId: item.userId,
       name: nameOf(item.userId),
+      status: item.status,
       role: item.role,
       childAgentId: item.childAgentId,
       securityAnalysis: item.securityAnalysis,
+      invitedByName: nameOf(item.invitedBy),
+      pendingCommits: database.commitRequests.filter(
+        (cr) => cr.memberId === item.id && cr.status === "pending",
+      ).length,
       createdAt: item.createdAt,
     }));
   }
 
-  async addMember(
+  /** Snapshot main and materialise a fresh child-agent workspace for a member. */
+  private async provisionMemberAgent(
+    project: Project,
+    memberId: string,
+    userId: string,
+    userName: string,
+    role: string,
+  ): Promise<{
+    childAgent: Agent;
+    baseSnapshot: import("./types.js").WorkspaceSnapshot;
+    workspacePath: string;
+  }> {
+    const childAgentId = randomUUID();
+    const workspacePath = this.workspaces.projectMemberPath(project.id, memberId);
+    const timestamp = now();
+    const mainManifest = await this.history.manifest(project.mainWorkspacePath);
+    const baseSnapshot = await this.history.createSnapshot(
+      childAgentId,
+      project.id,
+      project.mainWorkspacePath,
+      mainManifest,
+    );
+    await this.history.restoreSnapshot(baseSnapshot, workspacePath);
+    const childAgent: Agent = {
+      id: childAgentId,
+      name: project.name + " - " + role + " (" + userName + ")",
+      description: role + " workspace for " + userName + ".",
+      instructions: childInstructions(project.name, role),
+      ownerId: userId,
+      projectId: project.id,
+      kind: "child",
+      memberId,
+      status: "ready",
+      workspacePath,
+      codexThreadId: null,
+      lastError: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    await this.workspaces.writeInstructions(childAgent);
+    return { childAgent, baseSnapshot, workspacePath };
+  }
+
+  /** Owner invites a signed-in user. The child agent is created only on accept. */
+  async inviteMember(
     projectId: string,
     actor: User,
     input: { userName: string; role: string },
@@ -844,94 +963,129 @@ export class ProjectService {
     if (!target) {
       throw new HttpError(
         404,
-        "No user named \"" + name + "\" has signed in yet. They must sign in once before you can add them.",
+        'No user named "' + name + '" has signed in yet. They must sign in once first.',
       );
     }
     if (target.id === project.ownerId) {
-      throw new HttpError(409, "The owner is already on this project.");
+      throw new HttpError(409, "That user already owns this project.");
     }
     if (
       database.projectMembers.some(
         (item) => item.projectId === projectId && item.userId === target.id,
       )
     ) {
-      throw new HttpError(409, target.name + " is already a member.");
+      throw new HttpError(409, target.name + " is already invited or a member.");
     }
 
-    const memberId = randomUUID();
-    const childAgentId = randomUUID();
-    const workspacePath = this.workspaces.projectMemberPath(projectId, memberId);
     const timestamp = now();
-
-    // Snapshot main as it stands now and materialise the member's own copy.
-    const mainManifest = await this.history.manifest(project.mainWorkspacePath);
-    const baseSnapshot = await this.history.createSnapshot(
-      childAgentId,
-      projectId,
-      project.mainWorkspacePath,
-      mainManifest,
-    );
-    await this.history.restoreSnapshot(baseSnapshot, workspacePath);
-
-    const childAgent: Agent = {
-      id: childAgentId,
-      name: project.name + " - " + role + " (" + target.name + ")",
-      description: role + " workspace for " + target.name + ".",
-      instructions: childInstructions(project.name, role),
-      ownerId: target.id,
-      projectId,
-      kind: "child",
-      memberId,
-      status: "ready",
-      workspacePath,
-      codexThreadId: null,
-      lastError: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    await this.workspaces.writeInstructions(childAgent);
-
     const member: ProjectMember = {
-      id: memberId,
+      id: randomUUID(),
       projectId,
       userId: target.id,
+      status: "invited",
       role,
-      childAgentId,
-      workspacePath,
+      childAgentId: "",
+      workspacePath: "",
       securityAnalysis: null,
       invitedBy: actor.id,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
-
     await this.store.mutate((next) => {
       if (
         next.projectMembers.some(
           (item) => item.projectId === projectId && item.userId === target.id,
         )
       ) {
-        throw new HttpError(409, target.name + " is already a member.");
+        throw new HttpError(409, target.name + " is already invited or a member.");
       }
-      next.snapshots.push(baseSnapshot);
-      next.agents.push(childAgent);
       next.projectMembers.push(member);
     });
     await this.recordAudit(
       actor,
       projectId,
-      childAgentId,
-      "project.member.add",
+      null,
+      "project.member.invite",
       "allow",
-      "Added " + target.name + " as " + role,
+      "Invited " + target.name + " as " + role,
     );
     return member;
+  }
+
+  /** Invitee accepts — provisions their child agent + forked workspace. */
+  async acceptInvitation(projectId: string, user: User): Promise<ProjectMember> {
+    const database = this.store.snapshot();
+    const project = database.projects.find((item) => item.id === projectId);
+    if (!project) throw new HttpError(404, "Project not found");
+    const invite = database.projectMembers.find(
+      (item) =>
+        item.projectId === projectId &&
+        item.userId === user.id &&
+        item.status === "invited",
+    );
+    if (!invite) throw new HttpError(404, "No pending invitation for you on this project.");
+
+    const provisioned = await this.provisionMemberAgent(
+      project,
+      invite.id,
+      user.id,
+      user.name,
+      invite.role,
+    );
+    const updated = await this.store.mutate((next) => {
+      const row = next.projectMembers.find((item) => item.id === invite.id);
+      if (!row) throw new HttpError(404, "Invitation not found");
+      if (row.status === "active") return structuredClone(row);
+      row.status = "active";
+      row.childAgentId = provisioned.childAgent.id;
+      row.workspacePath = provisioned.workspacePath;
+      row.updatedAt = now();
+      next.snapshots.push(provisioned.baseSnapshot);
+      next.agents.push(provisioned.childAgent);
+      return structuredClone(row);
+    });
+    await this.recordAudit(
+      user,
+      projectId,
+      provisioned.childAgent.id,
+      "project.invitation.accept",
+      "allow",
+      user.name + " joined as " + invite.role,
+    );
+    return updated;
+  }
+
+  async declineInvitation(projectId: string, user: User): Promise<void> {
+    const database = this.store.snapshot();
+    const invite = database.projectMembers.find(
+      (item) =>
+        item.projectId === projectId &&
+        item.userId === user.id &&
+        item.status === "invited",
+    );
+    if (!invite) throw new HttpError(404, "No pending invitation for you on this project.");
+    await this.store.mutate((next) => {
+      next.projectMembers = next.projectMembers.filter((item) => item.id !== invite.id);
+    });
+    await this.recordAudit(
+      user,
+      projectId,
+      null,
+      "project.invitation.decline",
+      "allow",
+      user.name + " declined the invitation",
+    );
   }
 
   async updateMember(
     projectId: string,
     memberId: string,
+    actor: User,
     input: { role: string },
   ): Promise<ProjectMember> {
+    const role = input.role.trim();
+    if (!role) throw new HttpError(400, "Give the member a role label.");
+    if (role.length > 60) throw new HttpError(400, "Role label is too long.");
     const updated = await this.store.mutate((database) => {
       const project = database.projects.find((item) => item.id === projectId);
       if (!project) throw new HttpError(404, "Project not found");
@@ -939,8 +1093,6 @@ export class ProjectService {
         (item) => item.id === memberId && item.projectId === projectId,
       );
       if (!member) throw new HttpError(404, "Member not found");
-      const role = input.role.trim();
-      if (!role) throw new HttpError(400, "Give the member a role label.");
       member.role = role;
       member.updatedAt = now();
       const agent = database.agents.find((item) => item.id === member.childAgentId);
@@ -950,24 +1102,229 @@ export class ProjectService {
       }
       return structuredClone(member);
     });
+    await this.recordAudit(
+      actor,
+      projectId,
+      updated.childAgentId || null,
+      "project.member.role",
+      "allow",
+      "Set role to " + role,
+    );
     return updated;
   }
 
-  async removeMember(projectId: string, memberId: string): Promise<void> {
+  async removeMember(projectId: string, memberId: string, actor: User): Promise<void> {
+    await this.dropMember(projectId, memberId, actor, "project.member.remove");
+  }
+
+  /** A member removes themselves; an invitee this way declines. Owner cannot. */
+  async leaveProject(projectId: string, user: User): Promise<void> {
+    const database = this.store.snapshot();
+    const project = database.projects.find((item) => item.id === projectId);
+    if (!project) throw new HttpError(404, "Project not found");
+    if (project.ownerId === user.id) {
+      throw new HttpError(
+        409,
+        "The owner can't leave — transfer ownership or delete the project first.",
+      );
+    }
+    const member = database.projectMembers.find(
+      (item) => item.projectId === projectId && item.userId === user.id,
+    );
+    if (!member) throw new HttpError(404, "You are not on this project.");
+    await this.dropMember(projectId, member.id, user, "project.member.leave");
+  }
+
+  private async dropMember(
+    projectId: string,
+    memberId: string,
+    actor: User,
+    action: string,
+  ): Promise<void> {
     const database = this.store.snapshot();
     const member = database.projectMembers.find(
       (item) => item.id === memberId && item.projectId === projectId,
     );
     if (!member) throw new HttpError(404, "Member not found");
-    const agent = database.agents.find((item) => item.id === member.childAgentId);
-    if (agent) {
-      await this.workspaces.archive(agent);
-    }
+    const memberName =
+      database.users.find((user) => user.id === member.userId)?.name ?? "Member";
+    const agent = member.childAgentId
+      ? database.agents.find((item) => item.id === member.childAgentId)
+      : undefined;
+    if (agent) await this.workspaces.archive(agent);
+    const agentIds = agent
+      ? new Set(
+          database.branches
+            .filter((b) => b.agentId === agent.id)
+            .map((b) => b.id)
+            .concat(agent.id),
+        )
+      : new Set<string>();
     await this.store.mutate((next) => {
       next.projectMembers = next.projectMembers.filter((item) => item.id !== memberId);
-      next.agents = next.agents.filter((item) => item.id !== member.childAgentId);
       next.commitRequests = next.commitRequests.filter((item) => item.memberId !== memberId);
+      if (member.childAgentId) {
+        next.agents = next.agents.filter((item) => item.id !== member.childAgentId);
+        next.branches = next.branches.filter((item) => item.agentId !== member.childAgentId);
+        next.messages = next.messages.filter((item) => !agentIds.has(item.agentId));
+        next.runs = next.runs.filter((item) => !agentIds.has(item.agentId));
+        next.traces = next.traces.filter((item) => !agentIds.has(item.agentId));
+        next.checkpoints = next.checkpoints.filter((item) => !agentIds.has(item.agentId));
+        next.snapshots = next.snapshots.filter((item) => item.agentId !== member.childAgentId);
+        next.contexts = next.contexts.filter((item) => item.agentId !== member.childAgentId);
+      }
     });
+    await this.recordAudit(
+      actor,
+      projectId,
+      null,
+      action,
+      "allow",
+      action === "project.member.leave"
+        ? memberName + " left the project"
+        : "Removed " + memberName,
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // project settings: rename, transfer, activity
+  // --------------------------------------------------------------------------
+
+  async updateProject(
+    projectId: string,
+    actor: User,
+    input: { name?: string | undefined; description?: string | undefined },
+  ): Promise<Project> {
+    const nextName = input.name === undefined ? undefined : projectName(input.name);
+    const nextDescription =
+      input.description === undefined ? undefined : input.description.trim().slice(0, 500);
+    return this.store.mutate((database) => {
+      const project = database.projects.find((item) => item.id === projectId);
+      if (!project) throw new HttpError(404, "Project not found");
+      if (nextName !== undefined) project.name = nextName;
+      if (nextDescription !== undefined) project.description = nextDescription;
+      project.updatedAt = now();
+      database.audit.push({
+        id: randomUUID(),
+        userId: actor.id,
+        userName: actor.name,
+        agentId: null,
+        action: "project.update",
+        resource: "project:" + projectId,
+        decision: "allow",
+        reason: "Updated project settings",
+        timestamp: now(),
+      });
+      return structuredClone(project);
+    });
+  }
+
+  /**
+   * Hand the project to an existing active member. The new owner's member row +
+   * child agent are removed (they run the parent agent now); the previous owner
+   * becomes an active member with a fresh child-agent workspace.
+   */
+  async transferOwnership(
+    projectId: string,
+    actor: User,
+    toUserId: string,
+  ): Promise<Project> {
+    const database = this.store.snapshot();
+    const project = database.projects.find((item) => item.id === projectId);
+    if (!project) throw new HttpError(404, "Project not found");
+    if (project.ownerId !== actor.id) {
+      throw new HttpError(403, "Only the project owner can transfer ownership.");
+    }
+    if (toUserId === actor.id) throw new HttpError(409, "You already own this project.");
+    const target = database.users.find((user) => user.id === toUserId);
+    if (!target) throw new HttpError(404, "User not found.");
+    const targetMember = database.projectMembers.find(
+      (item) =>
+        item.projectId === projectId &&
+        item.userId === toUserId &&
+        item.status === "active",
+    );
+    if (!targetMember) {
+      throw new HttpError(409, "You can only transfer ownership to an active member.");
+    }
+
+    // Drop the incoming owner's member record + child agent.
+    await this.dropMember(projectId, targetMember.id, actor, "project.member.remove");
+
+    // The outgoing owner joins as a member with a fresh workspace.
+    const memberId = randomUUID();
+    const provisioned = await this.provisionMemberAgent(
+      project,
+      memberId,
+      actor.id,
+      actor.name,
+      "Maintainer",
+    );
+    const timestamp = now();
+    const exOwnerMember: ProjectMember = {
+      id: memberId,
+      projectId,
+      userId: actor.id,
+      status: "active",
+      role: "Maintainer",
+      childAgentId: provisioned.childAgent.id,
+      workspacePath: provisioned.workspacePath,
+      securityAnalysis: null,
+      invitedBy: toUserId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+
+    return this.store.mutate((next) => {
+      const row = next.projects.find((item) => item.id === projectId);
+      if (!row) throw new HttpError(404, "Project not found");
+      row.ownerId = toUserId;
+      row.updatedAt = timestamp;
+      const parentAgent = next.agents.find((item) => item.id === row.parentAgentId);
+      if (parentAgent) {
+        parentAgent.ownerId = toUserId;
+        parentAgent.updatedAt = timestamp;
+      }
+      next.snapshots.push(provisioned.baseSnapshot);
+      next.agents.push(provisioned.childAgent);
+      next.projectMembers.push(exOwnerMember);
+      next.audit.push({
+        id: randomUUID(),
+        userId: actor.id,
+        userName: actor.name,
+        agentId: null,
+        action: "project.transfer",
+        resource: "project:" + projectId,
+        decision: "allow",
+        reason: actor.name + " transferred ownership to " + target.name,
+        timestamp,
+      });
+      return structuredClone(row);
+    });
+  }
+
+  /** Project-scoped slice of the audit log for the Activity view. */
+  getActivity(projectId: string): ActivityEntry[] {
+    const database = this.store.snapshot();
+    const projectAgentIds = new Set(
+      database.agents.filter((a) => a.projectId === projectId).map((a) => a.id),
+    );
+    return database.audit
+      .filter(
+        (entry) =>
+          entry.resource === "project:" + projectId ||
+          (entry.agentId !== null && projectAgentIds.has(entry.agentId)),
+      )
+      .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
+      .slice(0, 200)
+      .map((entry) => ({
+        id: entry.id,
+        userName: entry.userName,
+        action: entry.action,
+        decision: entry.decision,
+        reason: entry.reason,
+        timestamp: entry.timestamp,
+      }));
   }
 
   // --------------------------------------------------------------------------

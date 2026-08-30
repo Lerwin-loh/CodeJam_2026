@@ -6,7 +6,7 @@ import { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
 import { ProjectService } from "./project-service.js";
 import { JsonStore } from "./store.js";
-import type { AgentRunner, OwaspStatus } from "./types.js";
+import type { AgentRunner, OwaspStatus, User } from "./types.js";
 import { WorkspaceHistory } from "./workspace-history.js";
 import { WorkspaceManager } from "./workspace.js";
 
@@ -67,6 +67,19 @@ afterEach(async () => {
     ),
   );
 });
+
+/** Invite + accept in one step, returning the now-active member. */
+async function addActiveMember(
+  projects: ProjectService,
+  agents: AgentService,
+  projectId: string,
+  owner: User,
+  input: { userName: string; role: string },
+) {
+  const invitee = await agents.createUser(input.userName);
+  await projects.inviteMember(projectId, owner, input);
+  return projects.acceptInvitation(projectId, invitee);
+}
 
 async function makeStack(
   runner: AgentRunner = noopRunner,
@@ -296,7 +309,7 @@ describe("Part 1 — projects & membership", () => {
     const dana = await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
 
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
     expect(member.role).toBe("Frontend");
 
     const db = store.snapshot();
@@ -322,7 +335,7 @@ describe("Part 1 — projects & membership", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
     const parent = agents.getAgent(project.parentAgentId);
     const child = agents.getAgent(member.childAgentId);
 
@@ -365,10 +378,10 @@ describe("Part 1 — projects & membership", () => {
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
 
-    await expect(projects.addMember(project.id, owner, { userName: "Ghost", role: "QA" })).rejects.toMatchObject({ statusCode: 404 });
-    await expect(projects.addMember(project.id, owner, { userName: "Owner", role: "QA" })).rejects.toMatchObject({ statusCode: 409 });
-    await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
-    await expect(projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" })).rejects.toMatchObject({ statusCode: 409 });
+    await expect(projects.inviteMember(project.id, owner, { userName: "Ghost", role: "QA" })).rejects.toMatchObject({ statusCode: 404 });
+    await expect(projects.inviteMember(project.id, owner, { userName: "Owner", role: "QA" })).rejects.toMatchObject({ statusCode: 409 });
+    await projects.inviteMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    await expect(projects.inviteMember(project.id, owner, { userName: "Dana", role: "Frontend" })).rejects.toMatchObject({ statusCode: 409 });
   });
 
   it("updates a member's role and keeps the child agent instructions in sync", async () => {
@@ -376,9 +389,9 @@ describe("Part 1 — projects & membership", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
-    const updated = await projects.updateMember(project.id, member.id, { role: "Full-stack" });
+    const updated = await projects.updateMember(project.id, member.id, owner, { role: "Full-stack" });
     expect(updated.role).toBe("Full-stack");
     const child = store.snapshot().agents.find((a) => a.id === member.childAgentId);
     expect(child?.instructions).toContain("Full-stack");
@@ -389,12 +402,113 @@ describe("Part 1 — projects & membership", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
-    await projects.removeMember(project.id, member.id);
+    await projects.removeMember(project.id, member.id, owner);
     const db = store.snapshot();
     expect(db.projectMembers).toHaveLength(0);
     expect(db.agents.some((a) => a.id === member.childAgentId)).toBe(false);
+  });
+
+  it("invitations: a child agent is created only on accept; decline drops the row", async () => {
+    const { projects, agents, store } = await makeStack();
+    const owner = await agents.createUser("Owner");
+    const dana = await agents.createUser("Dana");
+    const sam = await agents.createUser("Sam");
+    const project = await projects.createProject("App", owner.id);
+
+    const invite = await projects.inviteMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    expect(invite.status).toBe("invited");
+    expect(invite.childAgentId).toBe("");
+    expect(store.snapshot().agents.some((a) => a.memberId === invite.id)).toBe(false);
+    // invited user doesn't see the project in their list, but sees the invitation
+    expect(projects.listProjects(dana.id)).toEqual([]);
+    expect(projects.listPendingInvitations(dana.id)).toMatchObject([
+      { projectId: project.id, role: "Frontend", invitedByName: "Owner" },
+    ]);
+    // an invited user cannot read project internals yet
+    await expect(
+      projects.assertProjectAccess(project.id, dana, "parent.read"),
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    const active = await projects.acceptInvitation(project.id, dana);
+    expect(active.status).toBe("active");
+    expect(active.childAgentId).not.toBe("");
+    expect(store.snapshot().agents.some((a) => a.id === active.childAgentId)).toBe(true);
+    expect(projects.listProjects(dana.id).map((p) => p.id)).toEqual([project.id]);
+
+    await projects.inviteMember(project.id, owner, { userName: "Sam", role: "Backend" });
+    await projects.declineInvitation(project.id, sam);
+    expect(
+      store.snapshot().projectMembers.filter((m) => m.projectId === project.id),
+    ).toHaveLength(1);
+  });
+
+  it("transfers ownership: new owner leaves the roster, old owner joins it", async () => {
+    const { projects, agents, store } = await makeStack();
+    const owner = await agents.createUser("Owner");
+    const dana = await agents.createUser("Dana");
+    const project = await projects.createProject("App", owner.id);
+    const danaMember = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
+
+    // can only transfer to an active member
+    await expect(
+      projects.transferOwnership(project.id, owner, "00000000-0000-4000-8000-000000000000"),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    const updated = await projects.transferOwnership(project.id, owner, dana.id);
+    expect(updated.ownerId).toBe(dana.id);
+
+    const db = store.snapshot();
+    // parent agent moved with ownership
+    expect(db.agents.find((a) => a.id === project.parentAgentId)?.ownerId).toBe(dana.id);
+    // Dana no longer has a member row / child agent; Owner now does
+    expect(db.projectMembers.some((m) => m.id === danaMember.id)).toBe(false);
+    expect(db.agents.some((a) => a.id === danaMember.childAgentId)).toBe(false);
+    const exOwnerRow = db.projectMembers.find((m) => m.userId === owner.id);
+    expect(exOwnerRow?.status).toBe("active");
+    expect(exOwnerRow?.childAgentId).not.toBe("");
+
+    // roles are enforced against the new owner
+    expect(projects.getProject(project.id, dana).role).toBe("owner");
+    expect(projects.getProject(project.id, owner).role).toBe("member");
+    await expect(
+      projects.assertProjectAccess(project.id, owner, "member.manage"),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    await expect(
+      projects.assertProjectAccess(project.id, dana, "member.manage"),
+    ).resolves.toMatchObject({ role: "owner" });
+  });
+
+  it("leave: a member removes themselves; the owner cannot leave", async () => {
+    const { projects, agents, store } = await makeStack();
+    const owner = await agents.createUser("Owner");
+    const dana = await agents.createUser("Dana");
+    const project = await projects.createProject("App", owner.id);
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
+
+    await expect(projects.leaveProject(project.id, owner)).rejects.toMatchObject({ statusCode: 409 });
+
+    await projects.leaveProject(project.id, dana);
+    const db = store.snapshot();
+    expect(db.projectMembers.some((m) => m.id === member.id)).toBe(false);
+    expect(db.agents.some((a) => a.id === member.childAgentId)).toBe(false);
+  });
+
+  it("updateProject renames + sets a description; activity records the change", async () => {
+    const { projects, agents } = await makeStack();
+    const owner = await agents.createUser("Owner");
+    const project = await projects.createProject("App", owner.id);
+
+    const updated = await projects.updateProject(project.id, owner, {
+      name: "Ticketing",
+      description: "Internal ticketing tool",
+    });
+    expect(updated.name).toBe("Ticketing");
+    expect(updated.description).toBe("Internal ticketing tool");
+
+    const activity = projects.getActivity(project.id);
+    expect(activity.some((e) => e.action === "project.update")).toBe(true);
   });
 
   it("deletes a project, archives its workspaces, and removes linked metadata", async () => {
@@ -402,7 +516,7 @@ describe("Part 1 — projects & membership", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, {
+    const member = await addActiveMember(projects, agents, project.id, owner, {
       userName: "Dana",
       role: "Frontend",
     });
@@ -531,8 +645,8 @@ describe("Part 1 — permission model", () => {
     const sam = await agents.createUser("Sam");
     const stranger = await agents.createUser("Stranger");
     const project = await projects.createProject("App", owner.id);
-    const danaMember = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
-    const samMember = await projects.addMember(project.id, owner, { userName: "Sam", role: "Backend" });
+    const danaMember = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
+    const samMember = await addActiveMember(projects, agents, project.id, owner, { userName: "Sam", role: "Backend" });
 
     await expect(projects.assertProjectAccess(project.id, dana, "project.read")).resolves.toMatchObject({ role: "member" });
     await expect(projects.assertProjectAccess(project.id, dana, "file.read")).resolves.toBeTruthy();
@@ -558,7 +672,7 @@ describe("Part 1 — permission model", () => {
     const owner = await agents.createUser("Owner");
     const dana = await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
     const ownerView = projects.getProject(project.id, owner);
     expect(ownerView.role).toBe("owner");
@@ -566,7 +680,13 @@ describe("Part 1 — permission model", () => {
 
     const memberView = projects.getProject(project.id, dana);
     expect(memberView.role).toBe("member");
-    expect(memberView.members[0]).toEqual({ userId: dana.id, name: "Dana", role: "Frontend" });
+    expect(memberView.owner).toEqual({ id: owner.id, name: "Owner" });
+    expect(memberView.members[0]).toEqual({
+      userId: dana.id,
+      name: "Dana",
+      status: "active",
+      role: "Frontend",
+    });
     expect((memberView.members[0] as Record<string, unknown>).childAgentId).toBeUndefined();
   });
 });
@@ -595,8 +715,8 @@ describe("Part 1 — agent access across the project", () => {
     const dana = await agents.createUser("Dana");
     const sam = await agents.createUser("Sam");
     const project = await projects.createProject("App", owner.id);
-    const danaMember = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
-    const samMember = await projects.addMember(project.id, owner, { userName: "Sam", role: "Backend" });
+    const danaMember = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
+    const samMember = await addActiveMember(projects, agents, project.id, owner, { userName: "Sam", role: "Backend" });
 
     await expect(agents.assertAgentAccess(danaMember.childAgentId, dana, "child.query")).resolves.toMatchObject({ id: danaMember.childAgentId });
     await expect(agents.assertAgentAccess(samMember.childAgentId, owner, "child.query")).resolves.toBeTruthy();
@@ -614,7 +734,7 @@ describe("Part 1 — agent access across the project", () => {
     const owner = await agents.createUser("Owner");
     const dana = await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
     const { mkdir, writeFile } = await import("node:fs/promises");
     await mkdir(path.join(member.workspacePath, "src"), { recursive: true });
@@ -655,7 +775,7 @@ describe("Part 1 — agent access across the project", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
     const { writeFile } = await import("node:fs/promises");
     await writeFile(path.join(member.workspacePath, "app.ts"), "export const x = 1;\n", "utf8");
@@ -682,7 +802,7 @@ describe("Part 1 — agent access across the project", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
     const { writeFile } = await import("node:fs/promises");
     await writeFile(path.join(member.workspacePath, "a.ts"), "export const a = 1;\n", "utf8");
@@ -704,7 +824,7 @@ describe("Part 1 — agent access across the project", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
     await expect(
       projects.submitCommitRequest(project.id, member.id, {}),
     ).rejects.toMatchObject({ statusCode: 409 });
@@ -716,7 +836,7 @@ describe("Part 1 — agent access across the project", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
     const { writeFile } = await import("node:fs/promises");
 
     // 1. nothing changed vs main -> passing, no model call
@@ -781,7 +901,7 @@ describe("Part 1 — agent access across the project", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
     const { writeFile } = await import("node:fs/promises");
     await writeFile(path.join(member.workspacePath, "index.html"), original, "utf8");
@@ -811,7 +931,7 @@ describe("Part 1 — agent access across the project", () => {
     const owner = await agents.createUser("Owner");
     const dana = await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
     // only the owner may archive
     await expect(projects.setProjectArchived(project.id, dana, true)).rejects.toMatchObject({
@@ -868,7 +988,7 @@ describe("Part 1 — agent access across the project", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
     const { run } = await agents.sendMessage(member.childAgentId, "make a file anywhere");
     await expect.poll(() => agents.getRun(run.id).status).toBe("completed");
@@ -891,7 +1011,7 @@ describe("Part 1 — agent access across the project", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
     // a run creates a checkpoint on the trunk
     const { run } = await agents.sendMessage(member.childAgentId, "add feature");
@@ -939,7 +1059,7 @@ describe("Part 1 — agent access across the project", () => {
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
-    const member = await projects.addMember(project.id, owner, { userName: "Dana", role: "Frontend" });
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
 
     const { run } = await agents.sendMessage(member.childAgentId, "add feature");
     await expect.poll(() => agents.getRun(run.id).status).toBe("completed");
