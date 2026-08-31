@@ -1848,6 +1848,25 @@ textarea:focus {
   cursor: pointer;
 }
 
+.branch-card-merge-only {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.branch-card-merge-only .branch-card-select {
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  width: 100%;
+}
+
+.branch-card-copy {
+  min-width: 0;
+}
+
+.branch-card-chevron {
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
 .branch-delete-button {
   margin-right: 10px;
   padding: 6px 8px;
@@ -3216,5 +3235,6 @@ textarea:focus {
 .merge-overlay li { margin: 5px 0; }
 .merge-overlay select { min-height: 36px; padding: 7px 10px; border: 1px solid #ccd8e7; border-radius: 8px; background: white; }
 @media (max-width: 620px) { .merge-outcomes { grid-template-columns: 1fr; } .merge-overlay { padding: 18px; } .merge-conflict-choice { grid-template-columns: 1fr; gap: 7px; } .merge-conflict-choice .button { width: 100%; } }
-.branch-card-row { display: flex; align-items: center; gap: 8px; }
-.branch-card-row .branch-card { flex: 1; }
+.branch-card-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 8px; min-width: 0; }
+.branch-card-row .branch-card { min-width: 0; }
+.branch-card-row .branch-merge-button { min-width: 78px; padding-inline: 14px; white-space: nowrap; }

@@ -1140,10 +1140,14 @@ export function BranchPointPanel({ ws, onMergeBranch }: { ws: WorkspaceApi; onMe
               <div className="branch-list">
                 {ws.branches.map((branch) => (
                   <div className="branch-card-row" key={branch.id}>
-                    <button className={"branch-card " + (branch.id === ws.activeBranchId ? "active" : "")} type="button" onClick={() => ws.selectBranch(branch.id)}>
-                      <span className="branch-card-icon">⑂</span><span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span><span>›</span>
-                    </button>
-                    {onMergeBranch && <button className="button button-ghost" type="button" onClick={() => onMergeBranch(branch.id)}>Merge</button>}
+                    <div className={"branch-card branch-card-merge-only " + (branch.id === ws.activeBranchId ? "active" : "")}>
+                      <button className="branch-card-select" type="button" onClick={() => ws.selectBranch(branch.id)}>
+                        <span className="branch-card-icon">⑂</span>
+                        <span className="branch-card-copy"><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span>
+                        <span className="branch-card-chevron" aria-hidden="true">›</span>
+                      </button>
+                    </div>
+                    {onMergeBranch && <button className="button button-ghost branch-merge-button" type="button" onClick={() => onMergeBranch(branch.id)}>Merge</button>}
                   </div>
                 ))}
               </div>
