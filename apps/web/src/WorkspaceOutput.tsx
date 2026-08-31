@@ -33,6 +33,10 @@ export function WorkspaceOutput({
   onExpand,
   onClose,
 }: WorkspaceOutputProps) {
+  // Keep the workspace output out of the layout until this workspace has a
+  // real HTML entry point (including a built app discovered by the server).
+  if (!workspacePreview?.available || !workspacePreview.entryFile) return null;
+
   const previewUrl = workspacePreview?.entryFile
     ? api.previewUrl(agentId, workspacePreview.entryFile, activeBranchId) + "&v=" + previewReload
     : null;

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, cp, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { captureSessionOffset, forkSessionAtOffset, rebuildSessionFromTimeline } from "./codex-session-fork.js";
 import type { AppConfig } from "./config.js";
@@ -417,7 +417,8 @@ export class AgentService {
     const preferredEntries = ["dist/index.html", "build/index.html", "index.html", "public/index.html"];
     for (const entryFile of preferredEntries) {
       try {
-        await access(path.join(directory, entryFile));
+        const entry = await stat(path.join(directory, entryFile));
+        if (!entry.isFile()) continue;
         const manifest = await this.history.manifest(directory);
         return { available: true, entryFile, workspaceHash: manifest.workspaceHash };
       } catch { /* try the next entry */ }
@@ -431,8 +432,8 @@ export class AgentService {
         const relative = path.relative(directory, absolute).split(path.sep).join("/");
         if (entry.isDirectory()) {
           // Branch workspaces are managed by Launchpad and are not project files.
-          if (!["node_modules", "dist", "build", "branches"].includes(entry.name)) await scan(absolute);
-        } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".html") && entry.name !== "AGENTS.md") {
+          if (!["node_modules", "branches", ".git"].includes(entry.name)) await scan(absolute);
+        } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".html") && entry.name.toLowerCase() !== "agents.md") {
           candidates.push({ path: relative, modifiedAt: (await stat(absolute)).mtimeMs });
         }
       }
