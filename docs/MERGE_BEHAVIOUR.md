@@ -18,7 +18,7 @@ There are two merge scopes:
 | Operation | Authorized users |
 | --- | --- |
 | Child branch → that child agent's own main | The child-agent owner or project owner |
-| Child agent / child branch → project parent agent's main | Project owner only |
+| Child agent → project parent agent's main | Project owner only |
 | Preview, AI resolution, or manual application of a project-level merge | Project owner only |
 
 The agent-level routes use `branch.merge` authorization. An agent owner can merge their own branches, and the project owner can access agents in the project. A different project member cannot merge another member's child branch.
