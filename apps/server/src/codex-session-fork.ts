@@ -183,16 +183,25 @@ export async function rebuildSessionFromTimeline(
   source: MergeSessionSide,
   timeline: ConversationCommit[],
 ): Promise<string | null> {
-  if (!target.threadId || !target.rolloutRelativePath || target.baseLineOffset === null) return null;
-  if (target.baseThreadId && target.baseThreadId !== target.threadId) return null;
-  const targetPath = path.join(codexHome, target.rolloutRelativePath);
-  if (!existsSync(targetPath)) return null;
-  const targetLines = readFileLines(targetPath);
-  if (target.baseLineOffset < 1 || target.baseLineOffset > targetLines.length) return null;
-  const sourceLines = source.rolloutRelativePath
-    ? readFileLines(path.join(codexHome, source.rolloutRelativePath))
-    : null;
-  const mergedLines = targetLines.slice(0, target.baseLineOffset);
+  const targetPath = target.rolloutRelativePath ? path.join(codexHome, target.rolloutRelativePath) : null;
+  const sourcePath = source.rolloutRelativePath ? path.join(codexHome, source.rolloutRelativePath) : null;
+  const hasTargetSession = Boolean(target.threadId && targetPath && existsSync(targetPath));
+  const hasSourceSession = Boolean(source.threadId && sourcePath && existsSync(sourcePath));
+  if (!hasTargetSession && !hasSourceSession) return null;
+  if (hasTargetSession && target.baseThreadId && target.baseThreadId !== target.threadId) return null;
+
+  const targetLines = hasTargetSession ? readFileLines(targetPath!) : null;
+  const sourceLines = hasSourceSession ? readFileLines(sourcePath!) : null;
+  const targetBaseLineOffset = target.baseLineOffset ?? 1;
+  if (targetLines && (targetBaseLineOffset < 1 || targetBaseLineOffset > targetLines.length)) return null;
+
+  // Prefer the target session metadata so the merged thread keeps the main
+  // agent's model/workspace settings. If main has never run, the source
+  // session is the only valid registration template.
+  const templateThreadId = hasTargetSession ? target.threadId! : source.threadId!;
+  const templateLines = targetLines ?? sourceLines!;
+  const templateMetaLine = templateLines[0];
+  const mergedLines = targetLines ? targetLines.slice(0, targetBaseLineOffset) : templateLines.slice(0, 1);
   const alreadyIncluded = new Set<string>();
   for (const commit of timeline) {
     if (commit.origin === "base") {
@@ -200,7 +209,7 @@ export async function rebuildSessionFromTimeline(
       continue;
     }
     const lines = commit.origin === "source" ? sourceLines : targetLines;
-    const startAt = commit.origin === "source" ? 1 : target.baseLineOffset;
+    const startAt = commit.origin === "source" ? 1 : targetBaseLineOffset;
     if (!lines) return null;
     const block = transcriptTurnBlock(lines, commit.prompt, startAt);
     if (!block) return null;
@@ -208,7 +217,7 @@ export async function rebuildSessionFromTimeline(
     mergedLines.push(...block);
     alreadyIncluded.add(commit.id);
   }
-  return writeRegisteredFork(codexHome, target.threadId, targetLines[0], mergedLines);
+  return writeRegisteredFork(codexHome, templateThreadId, templateMetaLine, mergedLines);
 }
 
 function transcriptTurnBlock(lines: string[], prompt: string, startAt: number): string[] | null {

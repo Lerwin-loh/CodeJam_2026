@@ -395,15 +395,32 @@ const COMMIT_GATE_MESSAGE: Record<Exclude<MemberSecurityView["reason"], "ok">, s
 };
 
 export class ProjectService {
+  private readonly mergeEngine: MergeEngine;
+  private readonly codexHome: string;
+  private readonly classify: SecurityClassifier | undefined;
+
   constructor(
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly history: WorkspaceHistory,
-    /** One direct model call for the OWASP gate (no agent). Wired in index.ts. */
-    private readonly classify?: SecurityClassifier,
-    private readonly mergeEngine = new MergeEngine(history),
-    private readonly codexHome = "",
-  ) {}
+    mergeEngineOrClassify: MergeEngine | SecurityClassifier = new MergeEngine(history),
+    codexHomeOrMergeEngine: string | MergeEngine = "",
+    classifyOrCodexHome?: SecurityClassifier | string,
+  ) {
+    // Support the legacy classifier-only constructor and both production
+    // argument orderings while the feature branch is rebased.
+    if (typeof mergeEngineOrClassify === "function") {
+      this.classify = mergeEngineOrClassify;
+      this.mergeEngine = codexHomeOrMergeEngine instanceof MergeEngine
+        ? codexHomeOrMergeEngine
+        : new MergeEngine(history);
+      this.codexHome = typeof classifyOrCodexHome === "string" ? classifyOrCodexHome : "";
+    } else {
+      this.mergeEngine = mergeEngineOrClassify;
+      this.codexHome = typeof codexHomeOrMergeEngine === "string" ? codexHomeOrMergeEngine : "";
+      this.classify = typeof classifyOrCodexHome === "function" ? classifyOrCodexHome : undefined;
+    }
+  }
 
   // --------------------------------------------------------------------------
   // lookups & permissions
@@ -1017,6 +1034,20 @@ export class ProjectService {
       "Invited " + target.name + " as " + role,
     );
     return member;
+  }
+
+  /** Legacy helper used by local callers that provision an active member immediately. */
+  async addMember(
+    projectId: string,
+    actor: User,
+    input: { userName: string; role: string },
+  ): Promise<ProjectMember> {
+    const invited = await this.inviteMember(projectId, actor, input);
+    const target = this.store.snapshot().users.find(
+      (user) => user.name.toLowerCase() === input.userName.trim().toLowerCase(),
+    );
+    if (!target) throw new HttpError(404, "User not found");
+    return this.acceptInvitation(projectId, target);
   }
 
   /** Invitee accepts — provisions their child agent + forked workspace. */

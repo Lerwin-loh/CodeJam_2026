@@ -129,4 +129,27 @@ describe("codex session forking", () => {
     expect(mergedContent.match(/turn 1/g)).toHaveLength(1);
     expect(JSON.parse(mergedContent.split("\n")[0]!).payload.id).toBe(mergedThreadId);
   });
+
+  it("can create the first main session from a source session", async () => {
+    const { codexHome, threadId, rolloutAbsolutePath } = await makeCodexHome();
+    const metaLine = JSON.stringify({ type: "session_meta", payload: { id: threadId } });
+    const turn = turnLines(1);
+    await writeFile(rolloutAbsolutePath, [metaLine, ...turn].join("\n") + "\n", "utf8");
+
+    const mergedThreadId = await rebuildSessionFromTimeline(
+      codexHome,
+      { threadId: null, rolloutRelativePath: null, baseLineOffset: null },
+      { threadId, rolloutRelativePath: "sessions/2026/08/29/rollout-test-" + threadId + ".jsonl", baseLineOffset: null },
+      [{ id: "source", runId: "source", branchId: "branch", prompt: "turn 1", response: "source", createdAt: "2026-01-01", origin: "source" }],
+    );
+
+    expect(mergedThreadId).not.toBeNull();
+    const db = new DatabaseSync(path.join(codexHome, "state_5.sqlite"));
+    const row = db.prepare("SELECT rollout_path FROM threads WHERE id = ?").get(mergedThreadId) as { rollout_path: string } | undefined;
+    db.close();
+    expect(row).toBeDefined();
+    const mergedContent = await readFile(row!.rollout_path, "utf8");
+    expect(mergedContent).toContain("turn 1");
+    expect(JSON.parse(mergedContent.split("\n")[0]!).payload.id).toBe(mergedThreadId);
+  });
 });

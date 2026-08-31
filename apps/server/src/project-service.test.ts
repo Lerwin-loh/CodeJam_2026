@@ -373,7 +373,7 @@ describe("Part 1 — projects & membership", () => {
   });
 
   it("rejects adding an unknown user, the owner, or a duplicate member", async () => {
-    const { projects, agents } = await makeStack();
+    const { projects, agents, store } = await makeStack();
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
