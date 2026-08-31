@@ -37,6 +37,12 @@ export interface Agent {
   updatedAt: string;
 }
 
+export interface WorkspacePreview {
+  available: boolean;
+  entryFile: string | null;
+  workspaceHash: string | null;
+}
+
 export interface Project {
   id: string;
   name: string;

@@ -300,6 +300,19 @@ describe("Agent lifecycle", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("does not discover preview pages from managed branch storage", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Preview scope" });
+    await writeFile(path.join(agent.workspacePath, "admin-dashboard.html"), "<main>Main</main>\n");
+    await mkdir(path.join(agent.workspacePath, "branches", "managed-branch"), { recursive: true });
+    await writeFile(path.join(agent.workspacePath, "branches", "managed-branch", "employees.html"), "<main>Branch</main>\n");
+
+    const preview = await service.getWorkspacePreview(agent.id);
+
+    expect(preview.available).toBe(true);
+    expect(preview.entryFile).toBe("admin-dashboard.html");
+  });
+
   it("recoverably deletes leaf branches without orphaning branch lineage", async () => {
     const service = await makeService({
       run: async (request) => {

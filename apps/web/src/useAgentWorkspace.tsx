@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { branchPointSettingsTabs, type BranchPointSettingsTabKey } from "./branchPointSettingsContent";
+import { WorkspaceOutput } from "./WorkspaceOutput";
 import type {
   AgentBranch,
   AgentCheckpoint,
@@ -12,6 +13,7 @@ import type {
   ParentAgentView,
   RunDetails,
   TraceEvent,
+  WorkspacePreview,
 } from "./types";
 
 const RUN_ACTIVE = ["queued", "running"];
@@ -87,6 +89,11 @@ export function useAgentWorkspace(
   const [restoreResult, setRestoreResult] = useState<{ path: string; hash: string } | null>(null);
   const [checkpointLabel, setCheckpointLabel] = useState("");
   const [savingCheckpoint, setSavingCheckpoint] = useState(false);
+  const [workspacePreview, setWorkspacePreview] = useState<WorkspacePreview | null>(null);
+  const [previewReload, setPreviewReload] = useState(0);
+  const [previewError, setPreviewError] = useState(false);
+  const [previewExpanded, setPreviewExpanded] = useState(false);
+  const [exportingProject, setExportingProject] = useState(false);
 
   const mounted = useRef(true);
   const agentIdRef = useRef<string | null>(null);
@@ -271,6 +278,22 @@ export function useAgentWorkspace(
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, canManage, activeBranchId]);
+
+  useEffect(() => {
+    setWorkspacePreview(null);
+    setPreviewError(false);
+    setPreviewExpanded(false);
+    if (!agentId || !canManage) return;
+    let cancelled = false;
+    void api.previewStatus(agentId, activeBranchId)
+      .then(({ preview }) => {
+        if (!cancelled) setWorkspacePreview(preview);
+      })
+      .catch(() => {
+        if (!cancelled) setWorkspacePreview({ available: false, entryFile: null, workspaceHash: null });
+      });
+    return () => { cancelled = true; };
+  }, [agentId, canManage, activeBranchId, activeRun?.status]);
 
   const toggleBranchPoint = useCallback(() => {
     setShowBranchPoint((open) => {
@@ -457,6 +480,27 @@ export function useAgentWorkspace(
     }
   }, [agentId, onDeleted, fail]);
 
+  const downloadProject = useCallback(async () => {
+    if (!agentId || !canManage || exportingProject) return;
+    setExportingProject(true);
+    setError(null);
+    try {
+      const blob = await api.exportProject(agentId);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = (name || "agent-project").replace(/[^a-z0-9._-]+/gi, "-") + ".zip";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      if (mounted.current) setExportingProject(false);
+    }
+  }, [agentId, canManage, exportingProject, fail, name]);
+
   const historyItems = useMemo(
     () =>
       [
@@ -533,6 +577,15 @@ export function useAgentWorkspace(
     checkpointLabel,
     setCheckpointLabel,
     savingCheckpoint,
+    workspacePreview,
+    previewReload,
+    setPreviewReload,
+    previewError,
+    setPreviewError,
+    previewExpanded,
+    setPreviewExpanded,
+    exportingProject,
+    downloadProject,
     historyItems,
     branchGraphRows,
     selectBranch,
@@ -550,6 +603,104 @@ export function useAgentWorkspace(
 }
 
 export type WorkspaceApi = ReturnType<typeof useAgentWorkspace>;
+
+function AgentWorkspaceOutput({ ws }: { ws: WorkspaceApi }) {
+  if (!ws.canManage || !ws.agentId) return null;
+  return (
+    <WorkspaceOutput
+      agentId={ws.agentId}
+      agentName={ws.name}
+      activeBranchId={ws.activeBranchId}
+      branches={ws.branches}
+      workspacePreview={ws.workspacePreview}
+      previewReload={ws.previewReload}
+      previewError={ws.previewError}
+      previewExpanded={ws.previewExpanded}
+      onBranchChange={(branchId) => {
+        ws.setPreviewError(false);
+        ws.selectBranch(branchId);
+      }}
+      onRefresh={() => {
+        ws.setPreviewError(false);
+        ws.setPreviewReload((value) => value + 1);
+      }}
+      onError={() => ws.setPreviewError(true)}
+      onExpand={() => ws.setPreviewExpanded(true)}
+      onClose={() => ws.setPreviewExpanded(false)}
+    />
+  );
+}
+
+function LivePreview({ ws }: { ws: WorkspaceApi }) {
+  if (!ws.canManage) return null;
+
+  const preview = ws.workspacePreview;
+  const sourceKey = ws.agentId && preview
+    ? [ws.agentId, ws.activeBranchId ?? "main", preview.entryFile ?? "none", preview.workspaceHash ?? "none"].join(":")
+    : "none";
+  const previewUrl = preview?.entryFile && ws.agentId
+    ? api.previewUrl(ws.agentId, preview.entryFile, ws.activeBranchId) + "&v=" + ws.previewReload
+    : null;
+  const refresh = () => {
+    ws.setPreviewError(false);
+    ws.setPreviewReload((value) => value + 1);
+  };
+  const selectBranch = (value: string) => {
+    ws.setPreviewError(false);
+    ws.selectBranch(value === "main" ? null : value);
+  };
+
+  const controls = (
+    <div className="live-preview-actions">
+      {ws.branches.length > 0 && (
+        <select className="preview-branch-select" value={ws.activeBranchId ?? "main"} onChange={(event) => selectBranch(event.target.value)} aria-label="Preview workspace">
+          <option value="main">Main workspace</option>
+          {ws.branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+        </select>
+      )}
+      <button className="button button-ghost" type="button" onClick={refresh}>Refresh</button>
+      <button className="button button-ghost preview-expand-button" type="button" onClick={() => ws.setPreviewExpanded(true)} aria-label="Expand website preview">⛶ <span>Expand</span></button>
+    </div>
+  );
+
+  const body = preview?.available && previewUrl && !ws.previewError
+    ? <iframe key={sourceKey + ":" + ws.previewReload} className="live-preview-frame" title="Generated website preview" src={previewUrl} sandbox="allow-scripts allow-same-origin allow-forms" onError={() => ws.setPreviewError(true)} />
+    : <div className="live-preview-empty"><strong>{ws.previewError ? "Preview could not be loaded" : "No website preview yet"}</strong><span>{ws.previewError ? "Refresh the preview or ask the Agent to check the website entry file." : "Ask the Agent to create a website. The preview automatically discovers HTML pages and built web apps."}</span></div>;
+
+  return (
+    <>
+      {!ws.previewExpanded && (
+        <section className="live-preview-card" aria-label="Live website preview">
+          <div className="live-preview-heading">
+            <div><span className="eyebrow">Workspace output</span><h2>Live website preview</h2></div>
+            {preview?.available && controls}
+          </div>
+          {body}
+        </section>
+      )}
+      {ws.previewExpanded && preview?.available && previewUrl && !ws.previewError && (
+        <div className="preview-expanded-backdrop" role="dialog" aria-modal="true" aria-label="Expanded website preview">
+          <section className="preview-expanded-panel">
+            <header className="preview-expanded-heading">
+              <div><span className="eyebrow">Workspace output</span><h2>{ws.name} · Live preview</h2></div>
+              <div className="live-preview-actions">
+                {ws.branches.length > 0 && (
+                  <select className="preview-branch-select" value={ws.activeBranchId ?? "main"} onChange={(event) => { ws.setPreviewExpanded(false); selectBranch(event.target.value); }} aria-label="Preview workspace">
+                    <option value="main">Main workspace</option>
+                    {ws.branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+                  </select>
+                )}
+                <button className="button button-ghost" type="button" onClick={refresh}>Refresh</button>
+                <button className="button button-ghost" type="button" onClick={() => ws.setPreviewExpanded(false)} aria-label="Close expanded website preview">× Close</button>
+              </div>
+            </header>
+            <iframe key={sourceKey + ":" + ws.previewReload + ":expanded"} className="live-preview-frame live-preview-frame-expanded" title="Expanded generated website preview" src={previewUrl} sandbox="allow-scripts allow-same-origin allow-forms" onError={() => { ws.setPreviewError(true); ws.setPreviewExpanded(false); }} />
+          </section>
+        </div>
+      )}
+    </>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* Playground: agent header (Settings · BranchPoint · Stop · Delete)   */
@@ -615,6 +766,15 @@ export function AgentPlayground({
           >
             {ws.status === "stopped" ? "Start" : "Stop"}
           </button>
+          {canManage && (
+            <button
+              className="button button-ghost"
+              onClick={() => void ws.downloadProject()}
+              disabled={ws.busy || ws.exportingProject}
+            >
+              {ws.exportingProject ? "Preparing..." : "Download ZIP"}
+            </button>
+          )}
           {showDelete && (
             <button
               className="button button-danger"
@@ -686,6 +846,7 @@ export function AgentPlayground({
           (sidePanel && ws.showBranchPoint && !ws.showBpSettings ? " has-side-panel" : "")
         }
       >
+      <div className="workspace-main-column">
       <section className="playground">
         <div className="playground-topbar">
           <div>
@@ -848,6 +1009,8 @@ export function AgentPlayground({
           </div>
         )}
       </section>
+      <AgentWorkspaceOutput ws={ws} />
+      </div>
       {sidePanel}
       </div>
     </div>

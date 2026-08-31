@@ -1,12 +1,15 @@
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AgentService } from "./agent-service.js";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import { MergeConflictError } from "./merge-engine.js";
+import { createProjectZip } from "./project-export.js";
 import type { ProjectService } from "./project-service.js";
 import type { MergePreview, User } from "./types.js";
 
@@ -136,6 +139,9 @@ export async function createApp(
     if (!request.url.startsWith("/api/")) return;
     const path = request.url.split("?")[0] ?? request.url;
     if (publicPaths.has(path)) return;
+    // Preview iframes cannot attach a bearer header; preview routes validate
+    // their short-lived query token inside the route handler.
+    if (path.includes("/preview/") || path.includes("/preview-image")) return;
     if (path === "/api/users" && request.method === "POST") return;
     const header = request.headers.authorization ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
@@ -366,6 +372,74 @@ export async function createApp(
     await service.assertAgentAccess(id, request.user, "agent.trace.read");
     const { branchId } = branchQuery.parse(request.query);
     return { events: service.getTrace(id, branchId ?? null) };
+  });
+
+  app.get("/api/agents/:id/preview-status", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    const { branchId } = branchQuery.parse(request.query);
+    await service.assertAgentAccess(id, request.user, "workspace.preview.read");
+    return { preview: await service.getWorkspacePreview(id, branchId ?? null) };
+  });
+
+  app.get("/api/agents/:id/export", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    const agent = await service.assertAgentAccess(id, request.user, "workspace.export");
+    const archive = await createProjectZip(agent);
+    const filename = agent.name.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "") || "agent-project";
+    return reply.type("application/zip").header("content-disposition", `attachment; filename="${filename}.zip"`).send(archive);
+  });
+
+  app.get("/api/agents/:id/preview-image", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    const query = request.query as { token?: string; url?: string };
+    const user = service.getUserByToken(query.token ?? "");
+    if (!user) return reply.code(401).send({ error: "Preview session expired" });
+    await service.assertAgentAccess(id, user, "workspace.preview.read");
+    if (!query.url || !/^https:\/\/picsum\.photos\//i.test(query.url)) return reply.code(400).send({ error: "Unsupported preview image" });
+    try {
+      const upstream = await fetch(query.url);
+      if (!upstream.ok) return reply.code(404).send({ error: "Preview image not found" });
+      const contentType = upstream.headers.get("content-type") ?? "image/jpeg";
+      return reply.header("cache-control", "public, max-age=3600").type(contentType).send(Buffer.from(await upstream.arrayBuffer()));
+    } catch {
+      return reply.code(502).send({ error: "Preview image unavailable" });
+    }
+  });
+
+  app.get("/api/agents/:id/preview/*", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    const query = request.query as { token?: string; branchId?: string };
+    const referer = request.headers.referer ?? request.headers.referrer ?? "";
+    const refererToken = referer ? new URL(referer).searchParams.get("token") ?? "" : "";
+    const user = service.getUserByToken(query.token ?? refererToken);
+    if (!user) return reply.code(401).send({ error: "Preview session expired" });
+    await service.assertAgentAccess(id, user, "workspace.preview.read");
+    const directory = service.getWorkspaceDirectory(id, query.branchId ?? null);
+    const relative = String((request.params as { "*": string })["*"] || "index.html");
+    const requested = path.resolve(directory, relative);
+    if (requested !== directory && !requested.startsWith(path.resolve(directory) + path.sep)) return reply.code(400).send({ error: "Invalid preview path" });
+    try {
+      let body = await readFile(requested);
+      const extension = path.extname(requested).toLowerCase();
+      const contentType = extension === ".html" ? "text/html; charset=utf-8" : extension === ".css" ? "text/css; charset=utf-8" : extension === ".js" || extension === ".mjs" ? "text/javascript; charset=utf-8" : extension === ".json" ? "application/json" : "application/octet-stream";
+      const tokenQuery = "?token=" + encodeURIComponent(query.token ?? refererToken) + (query.branchId ? "&branchId=" + encodeURIComponent(query.branchId) : "");
+      if (extension === ".html") {
+        const html = body.toString("utf8")
+          .replace(/((?:href|src)=[\"'])(?!https?:|data:|#|\/)([^\"']+)([\"'])/gi, (_match, start: string, asset: string, end: string) => start + asset + (asset.includes("?") ? "&" : "?") + tokenQuery.slice(1) + end)
+          .replace(/((?:href|src)=[\"'])\/(?!api\/)([^\"']+)([\"'])/gi, (_match, start: string, asset: string, end: string) => {
+            const entryDirectory = path.posix.dirname(relative);
+            const previewPath = entryDirectory === "." ? asset : entryDirectory + "/" + asset;
+            return start + "/api/agents/" + id + "/preview/" + previewPath + tokenQuery + end;
+          });
+        body = Buffer.from(html, "utf8");
+      } else if (extension === ".js" || extension === ".mjs") {
+        const script = body.toString("utf8").replace(/https:\/\/picsum\.photos\/[^\"'`\\]+/gi, (imageUrl) => "/api/agents/" + id + "/preview-image?url=" + encodeURIComponent(imageUrl) + tokenQuery);
+        body = Buffer.from(script, "utf8");
+      }
+      return reply.type(contentType).send(body);
+    } catch {
+      return reply.code(404).send({ error: "Preview file not found" });
+    }
   });
 
   app.post("/api/agents/:id/messages", async (request, reply) => {

@@ -45,6 +45,12 @@ export interface Agent {
   updatedAt: string;
 }
 
+export interface WorkspacePreview {
+  available: boolean;
+  entryFile: string | null;
+  workspaceHash: string | null;
+}
+
 /** A collaboration project: one canonical `main` tree, one owner, many members. */
 export interface Project {
   id: string;
@@ -332,6 +338,12 @@ export interface WorkspaceManifest {
   workspaceHash: string;
   files: WorkspaceFile[];
   createdAt: string;
+}
+
+export interface WorkspacePreview {
+  available: boolean;
+  entryFile: string | null;
+  workspaceHash: string | null;
 }
 
 export interface WorkspaceSnapshot {

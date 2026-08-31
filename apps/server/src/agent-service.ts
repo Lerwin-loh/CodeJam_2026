@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, rename, rm } from "node:fs/promises";
+import { access, cp, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { captureSessionOffset, forkSessionAtOffset, rebuildSessionFromTimeline } from "./codex-session-fork.js";
 import type { AppConfig } from "./config.js";
@@ -26,7 +26,8 @@ import type {
     TraceEventType,
     UpdateAgentInput,
     User,
-    WorkspaceManifest
+    WorkspaceManifest,
+    WorkspacePreview
 } from "./types.js";
 import { WorkspaceHistory } from "./workspace-history.js";
 import { WorkspaceManager } from "./workspace.js";
@@ -402,6 +403,47 @@ export class AgentService {
       throw new HttpError(404, "Agent not found");
     }
     return agent;
+  }
+
+  getWorkspaceDirectory(agentId: string, branchId: string | null = null): string {
+    if (!branchId) return this.getAgent(agentId).workspacePath;
+    const branch = this.store.snapshot().branches.find((item) => item.id === branchId && item.agentId === agentId);
+    if (!branch) throw new HttpError(404, "Branch not found");
+    return branch.workspacePath;
+  }
+
+  async getWorkspacePreview(agentId: string, branchId: string | null = null): Promise<WorkspacePreview> {
+    const directory = this.getWorkspaceDirectory(agentId, branchId);
+    const preferredEntries = ["dist/index.html", "build/index.html", "index.html", "public/index.html"];
+    for (const entryFile of preferredEntries) {
+      try {
+        await access(path.join(directory, entryFile));
+        const manifest = await this.history.manifest(directory);
+        return { available: true, entryFile, workspaceHash: manifest.workspaceHash };
+      } catch { /* try the next entry */ }
+    }
+
+    const candidates: Array<{ path: string; modifiedAt: number }> = [];
+    const scan = async (current: string): Promise<void> => {
+      for (const entry of await readdir(current, { withFileTypes: true })) {
+        if (entry.isSymbolicLink() || entry.name.startsWith(".")) continue;
+        const absolute = path.join(current, entry.name);
+        const relative = path.relative(directory, absolute).split(path.sep).join("/");
+        if (entry.isDirectory()) {
+          // Branch workspaces are managed by Launchpad and are not project files.
+          if (!["node_modules", "dist", "build", "branches"].includes(entry.name)) await scan(absolute);
+        } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".html") && entry.name !== "AGENTS.md") {
+          candidates.push({ path: relative, modifiedAt: (await stat(absolute)).mtimeMs });
+        }
+      }
+    };
+    await scan(directory);
+    const entryFile = candidates.sort((left, right) => right.modifiedAt - left.modifiedAt || left.path.localeCompare(right.path))[0]?.path;
+    if (entryFile) {
+      const manifest = await this.history.manifest(directory);
+      return { available: true, entryFile, workspaceHash: manifest.workspaceHash };
+    }
+    return { available: false, entryFile: null, workspaceHash: null };
   }
 
   async createAgent(input: CreateAgentInput, ownerId: string): Promise<Agent> {

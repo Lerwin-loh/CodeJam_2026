@@ -20,6 +20,7 @@ import type {
     SystemInfo,
     TraceEvent,
     User,
+    WorkspacePreview,
 } from "./types";
 
 export class ApiError extends Error {
@@ -118,6 +119,19 @@ export const api = {
     }>("/api/users/me", { method: "DELETE" }),
   audit: () => request<{ entries: AuditEntry[] }>("/api/audit"),
   system: () => request<SystemInfo>("/api/system"),
+  previewStatus: (id: string, branchId: string | null = null) => request<{ preview: WorkspacePreview }>(branchUrl("/api/agents/" + id + "/preview-status", branchId)),
+  previewUrl: (id: string, entryFile: string, branchId: string | null = null) => {
+    const query = "token=" + encodeURIComponent(authToken) + (branchId ? "&branchId=" + encodeURIComponent(branchId) : "");
+    return "/api/agents/" + id + "/preview/" + entryFile + "?" + query;
+  },
+  exportProject: async (id: string): Promise<Blob> => {
+    const response = await fetch("/api/agents/" + id + "/export", { headers: authToken ? { Authorization: "Bearer " + authToken } : {} });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new ApiError(data.error ?? "Project download failed", response.status);
+    }
+    return response.blob();
+  },
   listAgents: () => request<{ agents: Agent[] }>("/api/agents"),
   getAgent: (id: string) => request<{ agent: Agent }>("/api/agents/" + id),
   createAgent: (body: {

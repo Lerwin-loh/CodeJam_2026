@@ -26,6 +26,158 @@ body {
   min-height: 100vh;
 }
 
+.live-preview-card {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--paper);
+  overflow: hidden;
+}
+
+.live-preview-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.live-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+.preview-expand-button {
+  gap: 5px;
+}
+
+.preview-branch-select {
+  min-height: 38px;
+  max-width: 170px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0 10px;
+  color: #464741;
+  background: #f0efea;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.live-preview-heading h2 {
+  margin: 4px 0 0;
+  font-size: 18px;
+}
+
+.live-preview-frame {
+  display: block;
+  width: 100%;
+  height: 520px;
+  border: 0;
+  background: white;
+}
+
+.live-preview-empty {
+  min-height: 180px;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.live-preview-empty strong { color: var(--ink); }
+
+.preview-expanded-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(26, 26, 24, 0.62);
+  backdrop-filter: blur(8px);
+}
+
+.preview-expanded-panel {
+  width: min(1500px, 100%);
+  height: min(920px, 100%);
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 16px;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.preview-expanded-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.preview-expanded-heading h2 {
+  margin: 4px 0 0;
+  font-size: 16px;
+}
+
+.live-preview-frame-expanded {
+  height: 100%;
+  min-height: 0;
+}
+
+/* The conversation and workspace output are independent, stacked panels. */
+@media (min-width: 901px) {
+  .playground {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(420px, 1fr) auto;
+  }
+}
+
+.workspace-main-column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.workspace-main-column > .playground,
+.workspace-main-column > .live-preview-card {
+  width: 100%;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.workspace-main-column > .live-preview-card {
+  margin-top: 0;
+}
+
+@media (max-width: 900px) {
+  .live-preview-card {
+    margin: 14px 0 0;
+  }
+
+  .live-preview-frame {
+    height: 360px;
+  }
+
+  .preview-expanded-backdrop {
+    padding: 10px;
+  }
+
+  .preview-expanded-panel {
+    height: 100%;
+  }
+}
+
 .auth-screen {
   min-height: 100vh;
   display: grid;
@@ -789,12 +941,12 @@ textarea:focus {
 }
 
 .playground {
-  height: calc(100vh - 150px);
-  min-height: 560px;
+  height: min(calc(100vh - 180px), 760px);
+  min-height: 500px;
   border-radius: 17px;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(420px, 1fr) auto;
 }
 
 .playground-topbar {
@@ -834,6 +986,8 @@ textarea:focus {
 .messages {
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding: 28px max(28px, calc((100% - 760px) / 2));
   background:
     linear-gradient(rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0.52)),
@@ -1110,6 +1264,10 @@ textarea:focus {
 .branchpoint-panel {
   min-width: 0;
   height: calc(100vh - 32px);
+  max-height: calc(100vh - 32px);
+  position: sticky;
+  top: 16px;
+  align-self: start;
   margin: 16px 16px 16px 0;
   overflow-y: auto;
   padding: 19px;
@@ -2559,13 +2717,19 @@ textarea:focus {
   }
 
   .branchpoint-panel {
+    position: static;
     height: auto;
+    max-height: none;
     margin: 0 12px 12px;
   }
 
   .playground {
-    height: calc(100vh - 224px);
-    min-height: 490px;
+    height: min(calc(100vh - 220px), 680px);
+    min-height: 460px;
+  }
+
+  .workspace-main-column > .live-preview-card {
+    margin-top: 0;
   }
 
   .playground-topbar {
@@ -2627,7 +2791,7 @@ textarea:focus {
   border-bottom-color: var(--purple);
 }
 
-.project-panel { padding: 20px; overflow-y: auto; }
+.project-panel { padding: 20px; overflow: visible; }
 .muted-note { color: var(--muted); font-size: 13px; }
 
 .project-agent-layout {
@@ -2646,8 +2810,8 @@ textarea:focus {
   margin-right: 0;
 }
 
-/* Only the playground row splits when BranchPoint opens; the agent header
-   above it keeps its full width and does not move. */
+/* Only the workspace row splits when BranchPoint opens; the agent header
+   above it keeps its full width and the chat/output pair stay together. */
 .playground-row {
   min-width: 0;
 }
@@ -2659,13 +2823,17 @@ textarea:focus {
   align-items: start;
 }
 
-.playground-row.has-side-panel > .playground {
+.playground-row.has-side-panel > .workspace-main-column {
   min-width: 0;
 }
 
 .playground-row > .branchpoint-panel {
   width: 100%;
   height: min(calc(100vh - 260px), 640px);
+  max-height: calc(100vh - 32px);
+  position: sticky;
+  top: 16px;
+  align-self: start;
   min-width: 0;
   margin: 0;
   box-shadow: 0 12px 32px rgba(43, 42, 38, 0.12);
@@ -3172,7 +3340,7 @@ textarea:focus {
 .agent-workspace { display: flex; flex-direction: column; gap: 14px; }
 .agent-workspace .agent-header { margin: 0; max-width: none; min-height: 0; }
 .agent-workspace .agent-header h1 { font-size: 19px; }
-.agent-workspace .playground { height: min(calc(100vh - 260px), 640px); min-height: 420px; }
+.agent-workspace .playground { height: min(calc(100vh - 300px), 680px); min-height: 420px; }
 .composer.composer-locked {
   border: 1px dashed var(--line);
   border-top: 1px dashed var(--line);
