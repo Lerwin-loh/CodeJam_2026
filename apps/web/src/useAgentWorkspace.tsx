@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { branchPointSettingsTabs, type BranchPointSettingsTabKey } from "./branchPointSettingsContent";
+import { WorkspaceOutput } from "./WorkspaceOutput";
 import type {
   AgentBranch,
   AgentCheckpoint,
@@ -603,6 +604,33 @@ export function useAgentWorkspace(
 
 export type WorkspaceApi = ReturnType<typeof useAgentWorkspace>;
 
+function AgentWorkspaceOutput({ ws }: { ws: WorkspaceApi }) {
+  if (!ws.canManage || !ws.agentId) return null;
+  return (
+    <WorkspaceOutput
+      agentId={ws.agentId}
+      agentName={ws.name}
+      activeBranchId={ws.activeBranchId}
+      branches={ws.branches}
+      workspacePreview={ws.workspacePreview}
+      previewReload={ws.previewReload}
+      previewError={ws.previewError}
+      previewExpanded={ws.previewExpanded}
+      onBranchChange={(branchId) => {
+        ws.setPreviewError(false);
+        ws.selectBranch(branchId);
+      }}
+      onRefresh={() => {
+        ws.setPreviewError(false);
+        ws.setPreviewReload((value) => value + 1);
+      }}
+      onError={() => ws.setPreviewError(true)}
+      onExpand={() => ws.setPreviewExpanded(true)}
+      onClose={() => ws.setPreviewExpanded(false)}
+    />
+  );
+}
+
 function LivePreview({ ws }: { ws: WorkspaceApi }) {
   if (!ws.canManage) return null;
 
@@ -818,6 +846,7 @@ export function AgentPlayground({
           (sidePanel && ws.showBranchPoint && !ws.showBpSettings ? " has-side-panel" : "")
         }
       >
+      <div className="workspace-main-column">
       <section className="playground">
         <div className="playground-topbar">
           <div>
@@ -980,6 +1009,8 @@ export function AgentPlayground({
           </div>
         )}
       </section>
+      <AgentWorkspaceOutput ws={ws} />
+      </div>
       {sidePanel}
       </div>
     </div>
