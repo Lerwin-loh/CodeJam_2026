@@ -313,6 +313,30 @@ describe("Agent lifecycle", () => {
     expect(preview.entryFile).toBe("admin-dashboard.html");
   });
 
+  it("does not report a preview when the workspace has no web entry", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "No preview" });
+    await writeFile(path.join(agent.workspacePath, "README.md"), "Not a website\n");
+
+    await expect(service.getWorkspacePreview(agent.id)).resolves.toEqual({
+      available: false,
+      entryFile: null,
+      workspaceHash: null,
+    });
+  });
+
+  it("discovers HTML entries nested in built app output", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Built app" });
+    await mkdir(path.join(agent.workspacePath, "dist", "site"), { recursive: true });
+    await writeFile(path.join(agent.workspacePath, "dist", "site", "app.html"), "<main>Built app</main>\n");
+
+    const preview = await service.getWorkspacePreview(agent.id);
+
+    expect(preview.available).toBe(true);
+    expect(preview.entryFile).toBe("dist/site/app.html");
+  });
+
   it("recoverably deletes leaf branches without orphaning branch lineage", async () => {
     const service = await makeService({
       run: async (request) => {
