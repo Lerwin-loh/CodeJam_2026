@@ -715,10 +715,25 @@ export function AgentPlayground({
             ws.messages.map((message) => (
               <article className={"message message-" + message.role} key={message.id}>
                 <div className="message-meta">
-                  <strong>{message.role === "user" ? "You" : ws.name || "Agent"}</strong>
+                  <strong>{message.kind === "merge" ? "Merge history" : message.role === "user" ? "You" : ws.name || "Agent"}</strong>
                   <span>{fmt(message.createdAt)}</span>
                 </div>
-                <div className="message-body">{message.content}</div>
+                {message.kind === "merge" ? (
+                  <div className="message-body merge-history-event">
+                    <strong>{message.content}</strong>
+                    {message.mergeProvenance?.map((item) => (
+                      <div className="merge-history-provenance" key={item.id}>
+                        <b>{item.paths.join(", ")}</b>
+                        <div className="merge-provenance-columns">
+                          <div><b>Target prompts</b>{item.targetPrompts.map((commit) => <p key={commit.id}>{commit.prompt}</p>)}</div>
+                          <div><b>Source prompts</b>{item.sourcePrompts.map((commit) => <p key={commit.id}>{commit.prompt}</p>)}</div>
+                        </div>
+                        <small>Merge instruction: {item.mergePrompt}</small>
+                        <small>{item.explanation}</small>
+                      </div>
+                    ))}
+                  </div>
+                ) : <div className="message-body">{message.content}</div>}
               </article>
             ))
           )}

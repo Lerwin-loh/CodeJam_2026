@@ -176,6 +176,8 @@ export interface ConversationCommit {
   prompt: string;
   response: string | null;
   createdAt: string;
+  /** Files changed by the run that produced this prompt, when known. */
+  changedPaths?: string[];
   sessionRolloutPath?: string | null;
   sessionLineOffset?: number | null;
   origin?: "base" | "target" | "source";
@@ -190,10 +192,19 @@ export interface MergeWorkspaceConflict {
   sourcePaths?: string[];
 }
 
+export interface MergeCombinedFile {
+  path: string;
+  targetPrompts: ConversationCommit[];
+  sourcePrompts: ConversationCommit[];
+}
+
 export interface MergeContextConflict {
   id: string;
   target: ConversationCommit;
   source: ConversationCommit;
+  targetCommits?: ConversationCommit[];
+  sourceCommits?: ConversationCommit[];
+  paths: string[];
   targetSideId: string;
   sourceSideId: string;
   targetDeleted?: boolean;
@@ -212,16 +223,35 @@ export interface MergePreview {
   changedFiles: ChangedFiles;
   workspaceConflicts: MergeWorkspaceConflict[];
   contextConflicts: MergeContextConflict[];
+  combinedFiles: MergeCombinedFile[];
+}
+
+export interface MergeProvenance {
+  id: string;
+  paths: string[];
+  targetPrompts: ConversationCommit[];
+  sourcePrompts: ConversationCommit[];
+  mergePrompt: string;
+  explanation: string;
+  mode: "automatic" | "ai";
+}
+
+export interface MergeCombinedDecision {
+  content: string;
+  mergePrompt: string;
+  explanation: string;
 }
 
 export interface MergeResolution {
-  workspace: Record<string, "target" | "source" | "ai">;
-  context: Record<string, "target" | "source" | "ai">;
+  workspace: Record<string, "target" | "source" | "ai" | "combined">;
+  context: Record<string, "target" | "source" | "ai" | "combined">;
+  combined?: Record<string, MergeCombinedDecision> | undefined;
 }
 
 export interface MergeResult {
   preview: MergePreview;
   conversation: ConversationCommit[];
+  provenance: MergeProvenance[];
   snapshot: WorkspaceSnapshot | null;
 }
 
@@ -246,6 +276,8 @@ export interface Message {
   role: MessageRole;
   content: string;
   createdAt: string;
+  kind?: "conversation" | "merge";
+  mergeProvenance?: MergeProvenance[];
 }
 
 export interface RunUsage {

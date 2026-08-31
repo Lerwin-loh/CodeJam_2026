@@ -6,11 +6,14 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type {
   AgentRunner,
+  AgentCheckpoint,
   ChangedFiles,
   ConversationCommit,
   AgentRun,
   Message,
+  MergeCombinedDecision,
   MergePreview,
+  MergeProvenance,
   MergeResolution,
   MergeResult,
   MergeSide,
@@ -22,23 +25,38 @@ import { WorkspaceHistory } from "./workspace-history.js";
 const execFileAsync = promisify(execFile);
 
 export interface MergeAiResolver {
-  choosePrompt(input: { preview: MergePreview; conflictId: string; target: ConversationCommit; source: ConversationCommit }): Promise<"target" | "source" | { choice: "target" | "source"; explanation: string }>;
-  chooseWorkspace?(input: { preview: MergePreview; path: string; targetContent: string | null; sourceContent: string | null }): Promise<"target" | "source" | { choice: "target" | "source"; explanation: string }>;
+  chooseWorkspace?(input: { preview: MergePreview; path: string; targetContent: string | null; sourceContent: string | null; baseContent: string | null }): Promise<MergeWorkspaceDecision | "target" | "source">;
   summarizeOutcome?(input: { outcome: MergeSide["outcome"] }): Promise<string>;
 }
 
-export function conversationCommits(messages: Message[], runs: AgentRun[]): ConversationCommit[] {
+export type MergeWorkspaceDecision =
+  | { choice: "target" | "source"; explanation: string; satisfiesAllCriteria?: boolean }
+  | ({ choice: "combined" } & MergeCombinedDecision);
+
+export interface MergeResolutionResult {
+  conversation: ConversationCommit[];
+  context: Record<string, "target" | "source" | "combined">;
+  workspace: Record<string, "target" | "source" | "combined">;
+  combinedContent: Record<string, string>;
+  combined: Record<string, MergeCombinedDecision>;
+  aiDecisions: Record<string, string>;
+  provenance: MergeProvenance[];
+}
+
+export function conversationCommits(messages: Message[], runs: AgentRun[], checkpoints: AgentCheckpoint[] = []): ConversationCommit[] {
   const runById = new Map(runs.map((run) => [run.id, run]));
+  const checkpointById = new Map(checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]));
   const assistants = new Map<string, Message>();
   for (const message of messages) {
-    if (message.role === "assistant") assistants.set(message.runId, message);
+    if (message.kind !== "merge" && message.role === "assistant") assistants.set(message.runId, message);
   }
   return messages
-    .filter((message) => message.role === "user")
+    .filter((message) => message.kind !== "merge" && message.role === "user")
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
     .map((message) => {
       const run = runById.get(message.runId);
       const response = assistants.get(message.runId);
+      const checkpoint = run?.checkpointId ? checkpointById.get(run.checkpointId) : undefined;
       return {
         id: message.runId,
         runId: message.runId,
@@ -46,6 +64,7 @@ export function conversationCommits(messages: Message[], runs: AgentRun[]): Conv
         prompt: message.content,
         response: response?.content ?? run?.output ?? null,
         createdAt: message.createdAt,
+        changedPaths: checkpoint ? changedFilePaths(checkpoint.changedFiles) : [],
       };
     });
 }
@@ -74,28 +93,6 @@ export function createIsolatedMergeAiResolver(runner: AgentRunner): MergeAiResol
         await rm(workspacePath, { recursive: true, force: true });
       }
     },
-    async choosePrompt(input) {
-      const workspacePath = await mkdtemp(path.join(tmpdir(), "launchpad-merge-ai-"));
-      try {
-        const result = await runner.run({
-          agentId: "merge-resolver-" + randomUUID(),
-          workspacePath,
-          threadId: null,
-          prompt: [
-            "You are an isolated merge resolver. Do not edit files. Return JSON with exactly this shape: {\"choice\":\"TARGET\" or \"SOURCE\",\"explanation\":\"one concise sentence\"}.",
-            "Choose the prompt that best satisfies the complete combined acceptance criteria and workspace outcomes.",
-            "Evaluate this conflict independently. The final merge may keep some prompts from TARGET and other prompts from SOURCE; never choose a side merely to keep one branch intact.",
-            JSON.stringify(input.preview),
-            "Conflict " + input.conflictId,
-            "TARGET COMMIT:\n" + JSON.stringify(input.target),
-            "SOURCE COMMIT:\n" + JSON.stringify(input.source),
-          ].join("\n\n"),
-        });
-        return parseAiDecision(result.output);
-      } finally {
-        await rm(workspacePath, { recursive: true, force: true });
-      }
-    },
     async chooseWorkspace(input) {
       const workspacePath = await mkdtemp(path.join(tmpdir(), "launchpad-merge-ai-"));
       try {
@@ -104,13 +101,17 @@ export function createIsolatedMergeAiResolver(runner: AgentRunner): MergeAiResol
           workspacePath,
           threadId: null,
           prompt: [
-            "You are an isolated merge resolver. Do not edit files. Return JSON with exactly this shape: {\"choice\":\"TARGET\" or \"SOURCE\",\"explanation\":\"one concise sentence\"}.",
+            "You are an isolated merge resolver. Do not edit files. Return JSON with exactly this shape: {\"choice\":\"TARGET\", \"SOURCE\", or \"COMBINED\", \"satisfiesAllCriteria\":true/false, \"content\":\"required and complete for COMBINED\", \"mergePrompt\":\"required for COMBINED\", \"explanation\":\"one concise sentence\"}.",
+            "Check every combined acceptance criterion against the actual TARGET and SOURCE implementations before choosing. TARGET or SOURCE is legal only when that exact implementation satisfies every criterion; set satisfiesAllCriteria true only in that case.",
+            "If either implementation misses even one criterion, or the criteria are split across both implementations, COMBINED is mandatory. Never choose a side just because it satisfies more criteria.",
+            "For COMBINED, return the complete merged file content, not a patch, and a concise human-readable instruction describing how the two implementations were combined.",
             "Choose the implementation that best satisfies the complete acceptance criteria and preserves downstream dependencies.",
             "Prefer an identity implementation that supports verification, recovery, and existing integrations over one that removes those capabilities.",
             "Evaluate this file independently. The final merge may keep some files from TARGET and other files from SOURCE; never choose a side merely to keep one branch intact.",
             JSON.stringify(input.preview),
             "Workspace conflict: " + input.path,
             "TARGET IMPLEMENTATION:\n" + (input.targetContent ?? "<deleted>"),
+            "BASE IMPLEMENTATION:\n" + (input.baseContent ?? "<deleted>"),
             "SOURCE IMPLEMENTATION:\n" + (input.sourceContent ?? "<deleted>"),
           ].join("\n\n"),
         });
@@ -143,6 +144,7 @@ export class MergeEngine {
     ]);
     const changedFiles: ChangedFiles = { created: [], modified: [], deleted: [] };
     const conflicts: MergePreview["workspaceConflicts"] = [];
+    const combinedFiles: MergePreview["combinedFiles"] = [];
     for (const filePath of [...paths].sort()) {
       // AGENTS.md is platform-managed and must never be merged from a branch.
       if (filePath === "AGENTS.md") continue;
@@ -159,30 +161,41 @@ export class MergeEngine {
         const merged = baseContent !== null && targetContent !== null && sourceContent !== null
           ? await gitThreeWayMerge(baseContent, targetContent, sourceContent)
           : { content: null, conflict: true };
-        if (merged.conflict) conflicts.push({ path: filePath, targetContent, sourceContent, baseContent });
+        if (merged.conflict) {
+          conflicts.push({ path: filePath, targetContent, sourceContent, baseContent });
+        } else if (merged.content !== null && merged.content !== targetContent && merged.content !== sourceContent) {
+          combinedFiles.push({ path: filePath, targetPrompts: [], sourcePrompts: [] });
+        }
       }
     }
     const baseConversation = (target.baseConversation ?? source.baseConversation ?? []).map((commit) => ({ ...commit, origin: "base" as const }));
     const targetConversation = target.conversation.map((commit) => ({ ...commit, origin: "target" as const }));
     const sourceConversation = source.conversation.map((commit) => ({ ...commit, origin: "source" as const }));
-    const conversationMerge = buildConversationMerge(
-      baseConversation,
-      targetConversation,
-      sourceConversation,
-      target.id,
-      source.id,
-    );
     const targetChangedPaths = changedPaths(targetManifest, baseManifest);
     const sourceChangedPaths = changedPaths(sourceManifest, baseManifest);
-    if (conversationMerge.conflicts.some((conflict) => hasLoginIdentityConflict(conflict.target.prompt, conflict.source.prompt))) {
-      const targetPaths = await this.identityPaths(target.workspacePath, targetChangedPaths);
-      const sourcePaths = await this.identityPaths(source.workspacePath, sourceChangedPaths);
-      if (targetPaths.length > 0 && sourcePaths.length > 0) {
-        const targetContent = await this.readMany(target.workspacePath, targetPaths);
-        const sourceContent = await this.readMany(source.workspacePath, sourcePaths);
+    const actualConflictPaths = conflicts
+      .map((conflict) => conflict.path)
+      .filter((filePath) => !filePath.startsWith("semantic:"));
+    const targetPaths = await this.identityPaths(target.workspacePath, targetChangedPaths);
+    const sourcePaths = await this.identityPaths(source.workspacePath, sourceChangedPaths);
+    const hasActualIdentityConflict = actualConflictPaths.some((filePath) =>
+      targetPaths.includes(filePath) && sourcePaths.includes(filePath),
+    );
+    // Semantic identity checks are supplemental to a real file-level merge
+    // conflict. Never manufacture a prompt conflict merely because two
+    // unrelated files mention email and username.
+    if (hasActualIdentityConflict) {
+      const targetContent = await this.readMany(target.workspacePath, targetPaths);
+      const sourceContent = await this.readMany(source.workspacePath, sourcePaths);
+      if (hasLoginIdentityCodeConflict(targetContent, sourceContent)) {
         conflicts.push({ path: "semantic:login-identity", targetContent, sourceContent, baseContent: null, targetPaths, sourcePaths });
       }
     }
+    for (const combined of combinedFiles) {
+      combined.targetPrompts = promptContributors(targetConversation, baseConversation, [combined.path]);
+      combined.sourcePrompts = promptContributors(sourceConversation, baseConversation, [combined.path]);
+    }
+    const contextConflicts = linkPromptConflicts(conflicts, targetConversation, sourceConversation, baseConversation, target.id, source.id);
     const targetOutcome = await summarizeOutcome(target.outcome, this.aiResolver);
     const sourceOutcome = await summarizeOutcome(source.outcome, this.aiResolver);
     return {
@@ -196,57 +209,100 @@ export class MergeEngine {
       acceptanceCriteria: combineAcceptanceCriteria(targetOutcome, sourceOutcome),
       changedFiles,
       workspaceConflicts: conflicts,
-      contextConflicts: conversationMerge.conflicts,
+      contextConflicts,
+      combinedFiles,
     };
   }
 
-  async resolve(preview: MergePreview, resolution: MergeResolution): Promise<{ conversation: ConversationCommit[]; context: Record<string, "target" | "source">; workspace: Record<string, "target" | "source">; aiDecisions: Record<string, string> }> {
+  async resolve(preview: MergePreview, resolution: MergeResolution): Promise<MergeResolutionResult> {
     const missingWorkspace = preview.workspaceConflicts.some((conflict) => !resolution.workspace[conflict.path]);
-    const missingContext = preview.contextConflicts.some((conflict) => !resolution.context[conflict.id]);
-    if (missingWorkspace || missingContext) throw new MergeConflictError(preview);
-    const context: Record<string, "target" | "source"> = {};
+    if (missingWorkspace) throw new MergeConflictError(preview);
+    const context: Record<string, "target" | "source" | "combined"> = {};
+    const combinedContent: Record<string, string> = {};
+    const combined: Record<string, MergeCombinedDecision> = {};
     const aiDecisions: Record<string, string> = {};
-    for (const conflict of preview.contextConflicts) {
-      const aiChoice = resolution.context[conflict.id] === "ai"
-        ? await this.aiResolver?.choosePrompt({ preview, conflictId: conflict.id, target: conflict.target, source: conflict.source }) ?? "target"
-        : null;
-      const choice: "target" | "source" = aiChoice ? decisionChoice(aiChoice) : resolution.context[conflict.id] === "source" ? "source" : "target";
-      if (aiChoice && typeof aiChoice !== "string") aiDecisions["context:" + conflict.id] = aiChoice.explanation;
-      context[conflict.id] = choice;
-    }
-    const workspace: Record<string, "target" | "source"> = {};
+    const combinedInstructions: Record<string, string> = {};
+    const workspace: Record<string, "target" | "source" | "combined"> = {};
     for (const [path, choice] of Object.entries(resolution.workspace)) {
-      if (choice !== "ai") workspace[path] = choice;
-    }
-    const loginPrompt = preview.contextConflicts.find((conflict) => hasLoginIdentityConflict(conflict.target.prompt, conflict.source.prompt));
-    const manualLoginChoice: "target" | "source" | null = loginPrompt && resolution.context[loginPrompt.id] !== "ai"
-      ? resolution.context[loginPrompt.id] === "source" ? "source" : "target"
-      : null;
-    const semantic = preview.workspaceConflicts.find((conflict) => conflict.path.startsWith("semantic:login-identity"));
-    if (manualLoginChoice && semantic) {
-      const relatedPaths = new Set([semantic.path, ...(manualLoginChoice === "target" ? semantic.targetPaths ?? [] : semantic.sourcePaths ?? [])]);
-      for (const conflict of preview.workspaceConflicts) {
-        if (relatedPaths.has(conflict.path) && resolution.workspace[conflict.path] === "ai") workspace[conflict.path] = manualLoginChoice;
+      if (choice !== "ai") {
+        workspace[path] = choice;
+        if (choice === "combined") {
+          const decision = resolution.combined?.[path];
+          if (!decision) throw new MergeConflictError(preview);
+          validateCombinedDecision(decision, preview);
+          combined[path] = decision;
+          combinedContent[path] = decision.content;
+          combinedInstructions[path] = decision.mergePrompt;
+        }
       }
     }
     for (const conflict of preview.workspaceConflicts) {
       if (resolution.workspace[conflict.path] === "ai") {
-        const aiChoice = await this.aiResolver?.chooseWorkspace?.({ preview, path: conflict.path, targetContent: conflict.targetContent, sourceContent: conflict.sourceContent }) ?? "target";
-        workspace[conflict.path] = decisionChoice(aiChoice);
-        if (typeof aiChoice !== "string") aiDecisions["workspace:" + conflict.path] = aiChoice.explanation;
+        const aiChoice = await this.aiResolver?.chooseWorkspace?.({ preview, path: conflict.path, targetContent: conflict.targetContent, sourceContent: conflict.sourceContent, baseContent: conflict.baseContent }) ?? "target";
+        const decision = normalizeWorkspaceDecision(aiChoice);
+        if (decision.choice === "combined" && conflict.path.startsWith("semantic:")) {
+          workspace[conflict.path] = "target";
+          aiDecisions["workspace:" + conflict.path] = "AI selected the target implementation for the grouped semantic conflict.";
+        } else {
+          if (decision.choice === "combined") validateCombinedDecision(decision, preview);
+          workspace[conflict.path] = decision.choice;
+          if (decision.choice === "combined") {
+            combined[conflict.path] = decision;
+            combinedContent[conflict.path] = decision.content;
+            combinedInstructions[conflict.path] = decision.mergePrompt;
+          }
+          aiDecisions["workspace:" + conflict.path] = decision.explanation;
+        }
       }
+    }
+    const semantic = preview.workspaceConflicts.find((conflict) => conflict.path.startsWith("semantic:"));
+    if (semantic && (workspace[semantic.path] === "target" || workspace[semantic.path] === "source")) {
+      const relatedPaths = new Set([...(semantic.targetPaths ?? []), ...(semantic.sourcePaths ?? [])]);
+      for (const conflict of preview.workspaceConflicts) {
+        if (relatedPaths.has(conflict.path) && resolution.workspace[conflict.path] === "ai" && workspace[conflict.path] !== "combined") {
+          workspace[conflict.path] = workspace[semantic.path]!;
+        }
+      }
+    }
+    for (const conflict of preview.contextConflicts) {
+      const choices = new Set(conflict.paths.map((path) => workspace[path] ?? "target"));
+      context[conflict.id] = choices.size === 1 && !choices.has("combined")
+        ? [...choices][0] as "target" | "source"
+        : "combined";
+    }
+    const provenance: MergeProvenance[] = preview.combinedFiles
+      .filter((item) => item.targetPrompts.length > 0 && item.sourcePrompts.length > 0)
+      .map((item) => ({
+        id: "merge:auto:" + item.path,
+        paths: [item.path],
+        targetPrompts: item.targetPrompts,
+        sourcePrompts: item.sourcePrompts,
+        mergePrompt: `Combine the non-conflicting changes from the target and source implementations of ${item.path}.`,
+        explanation: "The three-way merge retained compatible code from both sides.",
+        mode: "automatic",
+      }));
+    for (const conflict of preview.contextConflicts.filter((item) => context[item.id] === "combined")) {
+      const instructions = conflict.paths.map((path) => combinedInstructions[path]).filter(Boolean);
+      provenance.push({
+        id: "merge:combined:" + conflict.id,
+        paths: conflict.paths,
+        targetPrompts: conflict.targetCommits ?? [conflict.target],
+        sourcePrompts: conflict.sourceCommits ?? [conflict.source],
+        mergePrompt: instructions[0] ?? buildCombinedMergePrompt(conflict),
+        explanation: instructions.length > 0 ? aiDecisions["workspace:" + conflict.paths.find((path) => combinedInstructions[path])!] ?? "AI combined both implementations." : "The selected file decisions use code from both sides.",
+        mode: instructions.length > 0 ? "ai" : "automatic",
+      });
     }
     const mergedConversation = buildConversationMerge(
       preview.baseConversation,
       preview.targetConversation,
       preview.sourceConversation,
-      preview.target.id,
-      preview.source.id,
-    ).merge((conflict) => context[conflict.id] ?? "target");
-    return { conversation: mergedConversation, context, workspace, aiDecisions };
+      preview.contextConflicts,
+    ).merge((conflict) => context[conflict.id] ?? "combined");
+    return { conversation: mergedConversation, context, workspace, combinedContent, combined, aiDecisions, provenance };
   }
 
-  async apply(target: MergeSide, source: MergeSide, resolution: MergeResolution, persist: (manifest: WorkspaceManifest, conversation: ConversationCommit[]) => Promise<WorkspaceSnapshot | null>): Promise<MergeResult> {
+  async apply(target: MergeSide, source: MergeSide, resolution: MergeResolution, persist: (manifest: WorkspaceManifest, conversation: ConversationCommit[], provenance: MergeProvenance[]) => Promise<WorkspaceSnapshot | null>): Promise<MergeResult> {
     const preview = await this.preview(target, source);
     const resolved = await this.resolve(preview, resolution);
     const staging = path.join(path.dirname(target.workspacePath), ".merge-staging-" + randomUUID());
@@ -269,8 +325,16 @@ export class MergeEngine {
         const merged = !conflict && baseContent !== null && targetContent !== null && sourceContent !== null && targetChanged && sourceChanged && !same(targetContent, sourceContent)
           ? await gitThreeWayMerge(baseContent, targetContent, sourceContent)
           : null;
-        const value = conflict ? (resolved.workspace[filePath] === "source" ? sourceContent : targetContent) : merged && !merged.conflict ? merged.content : sourceChanged ? sourceContent : targetContent;
         if (conflict && !resolved.workspace[filePath]) throw new MergeConflictError(preview);
+        const combinedValue = resolved.combinedContent[filePath];
+        if (conflict && resolved.workspace[filePath] === "combined" && combinedValue === undefined) {
+          throw new MergeConflictError(preview);
+        }
+        const value: string | null = conflict
+          ? resolved.workspace[filePath] === "combined"
+            ? combinedValue!
+            : resolved.workspace[filePath] === "source" ? sourceContent : targetContent
+          : merged && !merged.conflict ? merged.content : sourceChanged ? sourceContent : targetContent;
         if (!targetChanged && !sourceChanged) continue;
         const destination = path.join(staging, filePath);
         if (value === null) await rm(destination, { force: true });
@@ -289,9 +353,9 @@ export class MergeEngine {
       await rename(target.workspacePath, backup);
       await rename(staging, target.workspacePath);
       swapped = true;
-      const snapshot = await persist(manifest, resolved.conversation);
+      const snapshot = await persist(manifest, resolved.conversation, resolved.provenance);
       await rm(backup, { recursive: true, force: true });
-      return { preview, conversation: resolved.conversation, snapshot };
+      return { preview, conversation: resolved.conversation, provenance: resolved.provenance, snapshot };
     } catch (error) {
       await rm(staging, { recursive: true, force: true });
       if (swapped) {
@@ -370,24 +434,44 @@ function summaryBullets(value: string): string[] {
     .filter(Boolean)
     .slice(0, 5);
 }
-function parseAiDecision(output: string): { choice: "target" | "source"; explanation: string } {
+function parseAiDecision(output: string): MergeWorkspaceDecision {
   const json = output.match(/\{[\s\S]*\}/)?.[0];
   if (json) {
     try {
-      const parsed = JSON.parse(json) as { choice?: unknown; explanation?: unknown };
-      const choice = String(parsed.choice ?? "").toLowerCase() === "source" ? "source" : "target";
+      const parsed = JSON.parse(json) as { choice?: unknown; satisfiesAllCriteria?: unknown; content?: unknown; mergePrompt?: unknown; explanation?: unknown };
+      const normalized = String(parsed.choice ?? "").toLowerCase();
+      const choice = normalized === "source" ? "source" : normalized === "combined" ? "combined" : "target";
       const explanation = typeof parsed.explanation === "string" && parsed.explanation.trim()
         ? parsed.explanation.trim()
         : `AI kept the ${choice} implementation based on the combined merge criteria.`;
-      return { choice, explanation };
+      if (choice === "combined") {
+        const content = typeof parsed.content === "string" ? parsed.content : "";
+        const mergePrompt = typeof parsed.mergePrompt === "string" ? parsed.mergePrompt.trim() : "";
+        const combinedExplanation = typeof parsed.explanation === "string" ? parsed.explanation.trim() : "";
+        return { choice, content, mergePrompt, explanation: combinedExplanation };
+      }
+      if (parsed.satisfiesAllCriteria !== true) {
+        return { choice: "combined", content: "", mergePrompt: "", explanation: "AI did not verify that one implementation satisfies every acceptance criterion." };
+      }
+      return { choice, explanation, satisfiesAllCriteria: true };
     } catch { /* fall through to safe token parsing */ }
   }
-  const decision = output.trim().match(/^(TARGET|SOURCE)\b/i)?.[1] ?? output.match(/(?:^|\n)\s*(TARGET|SOURCE)\s*(?:$|\n)/i)?.[1];
-  const choice = decision?.toLowerCase() === "source" ? "source" : "target";
+  const decision = output.trim().match(/^(TARGET|SOURCE|COMBINED)\b/i)?.[1] ?? output.match(/(?:^|\n)\s*(TARGET|SOURCE|COMBINED)\s*(?:$|\n)/i)?.[1];
+  const choice = decision?.toLowerCase() === "source" ? "source" : decision?.toLowerCase() === "combined" ? "combined" : "target";
+  if (choice === "combined") {
+    return { choice, content: "", mergePrompt: "", explanation: "AI requested a combined file but did not return a valid complete file body." };
+  }
   return { choice, explanation: `AI kept the ${choice} implementation based on the combined merge criteria.` };
 }
-function decisionChoice(decision: "target" | "source" | { choice: "target" | "source"; explanation: string }): "target" | "source" {
-  return typeof decision === "string" ? decision : decision.choice;
+function normalizeWorkspaceDecision(decision: MergeWorkspaceDecision | "target" | "source"): MergeWorkspaceDecision {
+  if (typeof decision === "string") return { choice: decision, explanation: `AI kept the ${decision} implementation based on the combined merge criteria.` };
+  return decision;
+}
+
+function validateCombinedDecision(decision: MergeCombinedDecision, preview: MergePreview): void {
+  if (!decision.content.trim() || decision.content.length > 200_000 || !decision.mergePrompt.trim() || !decision.explanation.trim()) {
+    throw new MergeConflictError(preview);
+  }
 }
 
 function combineAcceptanceCriteria(target: MergeSide["outcome"], source: MergeSide["outcome"]): string[] {
@@ -412,47 +496,97 @@ function changedPaths(manifest: WorkspaceManifest, base: WorkspaceManifest | nul
   return [...new Set([...changed, ...deleted])].filter((filePath) => filePath !== "AGENTS.md");
 }
 
+function changedFilePaths(changed: ChangedFiles): string[] {
+  return [...new Set([...changed.created, ...changed.modified, ...changed.deleted])]
+    .filter((filePath) => filePath !== "AGENTS.md")
+    .sort();
+}
+
+function promptContributors(
+  commits: ConversationCommit[],
+  base: ConversationCommit[],
+  paths: string[],
+): ConversationCommit[] {
+  const baseIds = new Set(base.map((commit) => commit.id));
+  const wanted = new Set(paths);
+  return commits.filter((commit) => !baseIds.has(commit.id) && (commit.changedPaths ?? []).some((filePath) => wanted.has(filePath)));
+}
+
+function conflictPaths(conflict: MergePreview["workspaceConflicts"][number]): string[] {
+  return conflict.path.startsWith("semantic:")
+    ? [...new Set([...(conflict.targetPaths ?? []), ...(conflict.sourcePaths ?? [])])]
+    : [conflict.path];
+}
+
+function linkPromptConflicts(
+  workspaceConflicts: MergePreview["workspaceConflicts"],
+  target: ConversationCommit[],
+  source: ConversationCommit[],
+  base: ConversationCommit[],
+  targetSideId: string,
+  sourceSideId: string,
+): MergePreview["contextConflicts"] {
+  const byPair = new Map<string, MergePreview["contextConflicts"][number]>();
+  for (const workspaceConflict of workspaceConflicts) {
+    const paths = conflictPaths(workspaceConflict);
+    const targetCommits = promptContributors(target, base, paths);
+    const sourceCommits = promptContributors(source, base, paths);
+    if (targetCommits.length === 0 || sourceCommits.length === 0) continue;
+    const key = [...targetCommits.map((commit) => "t:" + commit.id), ...sourceCommits.map((commit) => "s:" + commit.id)].sort().join(":");
+    const current = byPair.get(key);
+    if (current) {
+      current.paths = [...new Set([...current.paths, ...paths])];
+      continue;
+    }
+    byPair.set(key, {
+      id: "prompt:" + targetSideId + ":" + sourceSideId + ":" + byPair.size,
+      target: targetCommits[0]!,
+      source: sourceCommits[0]!,
+      targetCommits,
+      sourceCommits,
+      paths: [...paths],
+      targetSideId,
+      sourceSideId,
+    });
+  }
+  return [...byPair.values()];
+}
+
+function hasLoginIdentityCodeConflict(target: string, source: string): boolean {
+  const targetEmail = /\bemail\b/i.test(target);
+  const targetUsername = /\buser(?:name|_name)\b/i.test(target);
+  const sourceEmail = /\bemail\b/i.test(source);
+  const sourceUsername = /\buser(?:name|_name)\b/i.test(source);
+  return (targetEmail && !targetUsername && sourceUsername && !sourceEmail)
+    || (targetUsername && !targetEmail && sourceEmail && !sourceUsername);
+}
+
+function buildCombinedMergePrompt(conflict: MergePreview["contextConflicts"][number]): string {
+  const files = conflict.paths.join(", ");
+  return `Combine the target and source code changes for ${files}, preserving compatible behavior from both implementations.`;
+}
+
 interface ConversationMergeResult {
   conflicts: MergePreview["contextConflicts"];
-  merge: (choice: (conflict: MergePreview["contextConflicts"][number]) => "target" | "source") => ConversationCommit[];
+  merge: (choice: (conflict: MergePreview["contextConflicts"][number]) => "target" | "source" | "combined") => ConversationCommit[];
 }
 
 function buildConversationMerge(
   base: ConversationCommit[],
   target: ConversationCommit[],
   source: ConversationCommit[],
-  targetSideId: string,
-  sourceSideId: string,
+  suppliedConflicts: MergePreview["contextConflicts"] = [],
 ): ConversationMergeResult {
   const baseIds = new Set(base.map((commit) => commit.id));
   const targetById = new Map(target.map((commit) => [commit.id, commit]));
   const sourceById = new Map(source.map((commit) => [commit.id, commit]));
-  const conflicts: MergePreview["contextConflicts"] = [];
+  const conflicts: MergePreview["contextConflicts"] = suppliedConflicts;
   const conflictByTarget = new Map<string, MergePreview["contextConflicts"][number]>();
   const conflictBySource = new Map<string, MergePreview["contextConflicts"][number]>();
-  const conflictByBase = new Map<string, MergePreview["contextConflicts"][number]>();
 
-  const addConflict = (targetCommit: ConversationCommit, sourceCommit: ConversationCommit, options: { targetDeleted?: boolean; sourceDeleted?: boolean } = {}) => {
-    const conflict = {
-      id: "prompt:" + targetSideId + ":" + sourceSideId + ":" + conflicts.length,
-      target: targetCommit,
-      source: sourceCommit,
-      targetSideId,
-      sourceSideId,
-      ...options,
-    };
-    conflicts.push(conflict);
-    conflictByTarget.set(targetCommit.id, conflict);
-    conflictBySource.set(sourceCommit.id, conflict);
-    conflictByBase.set(targetCommit.id, conflict);
-  };
-
-  for (const baseCommit of base) {
-    const targetCommit = targetById.get(baseCommit.id);
-    const sourceCommit = sourceById.get(baseCommit.id);
-    if (targetCommit && sourceCommit && !sameConversationCommit(targetCommit, sourceCommit)) addConflict(targetCommit, sourceCommit);
-    else if (!targetCommit && sourceCommit && !sameConversationCommit(baseCommit, sourceCommit)) addConflict(baseCommit, sourceCommit, { targetDeleted: true });
-    else if (targetCommit && !sourceCommit && !sameConversationCommit(baseCommit, targetCommit)) addConflict(targetCommit, baseCommit, { sourceDeleted: true });
+  for (const conflict of conflicts) {
+    for (const commit of conflict.targetCommits ?? [conflict.target]) conflictByTarget.set(commit.id, conflict);
+    for (const commit of conflict.sourceCommits ?? [conflict.source]) conflictBySource.set(commit.id, conflict);
   }
 
   const additions = (commits: ConversationCommit[]) => {
@@ -471,33 +605,6 @@ function buildConversationMerge(
   };
   const targetAdditions = additions(target);
   const sourceAdditions = additions(source);
-  const anchors = new Set(["__start__", ...base.map((commit) => commit.id)]);
-  for (const anchor of [...anchors]) {
-    const targetCommits = targetAdditions.get(anchor) ?? [];
-    const sourceCommits = sourceAdditions.get(anchor) ?? [];
-    if (targetCommits.length === 0 || sourceCommits.length === 0) continue;
-
-    const pairedCount = Math.min(targetCommits.length, sourceCommits.length);
-    for (let index = 0; index < pairedCount; index += 1) {
-      const targetCommit = targetCommits[index]!;
-      const sourceCommit = sourceCommits[index]!;
-      if (!sameConversationCommit(targetCommit, sourceCommit)) {
-        const sameTurnIntent = isSameConversationIntent(targetCommit, sourceCommit);
-        if (sameTurnIntent) addConflict(targetCommit, sourceCommit);
-      }
-    }
-
-    if (targetCommits.length > pairedCount && sourceCommits.length > pairedCount) {
-      for (let index = pairedCount; index < targetCommits.length; index += 1) {
-        const targetCommit = targetCommits[index]!;
-        const sourceCommit = sourceCommits[index - pairedCount] ?? sourceCommits[sourceCommits.length - 1]!;
-        if (isSameConversationIntent(targetCommit, sourceCommit)) {
-          addConflict(targetCommit, sourceCommit);
-        }
-      }
-    }
-  }
-
   return {
     conflicts,
     merge: (choice) => {
@@ -509,12 +616,10 @@ function buildConversationMerge(
         for (const targetCommit of targetCommits) {
           const conflict = conflictByTarget.get(targetCommit.id);
           if (conflict) {
-            const selectingSource = choice(conflict) === "source";
-            if ((selectingSource && conflict.sourceDeleted) || (!selectingSource && conflict.targetDeleted)) continue;
-            const selected = selectingSource ? conflict.source : conflict.target;
-            if (!emitted.has(selected.id)) {
-              result.push(selected);
-              emitted.add(selected.id);
+            const selectedChoice = choice(conflict);
+            if (selectedChoice !== "source" && !emitted.has(targetCommit.id)) {
+              result.push(targetCommit);
+              emitted.add(targetCommit.id);
             }
           } else if (!emitted.has(targetCommit.id)) {
             result.push(targetCommit);
@@ -522,7 +627,8 @@ function buildConversationMerge(
           }
         }
         for (const sourceCommit of sourceCommits) {
-          if (conflictBySource.has(sourceCommit.id)) continue;
+          const conflict = conflictBySource.get(sourceCommit.id);
+          if (conflict && choice(conflict) === "target") continue;
           if (!emitted.has(sourceCommit.id)) {
             result.push(sourceCommit);
             emitted.add(sourceCommit.id);
@@ -533,15 +639,12 @@ function buildConversationMerge(
       for (const baseCommit of base) {
         const targetCommit = targetById.get(baseCommit.id);
         const sourceCommit = sourceById.get(baseCommit.id);
-        const conflict = conflictByBase.get(baseCommit.id);
-        if (conflict) {
-          if (conflict) {
-            const selectingSource = choice(conflict) === "source";
-            if ((selectingSource && conflict.sourceDeleted) || (!selectingSource && conflict.targetDeleted)) continue;
-            result.push(selectingSource ? conflict.source : conflict.target);
+        if (targetCommit && sourceCommit) {
+          if (sameConversationCommit(targetCommit, baseCommit)) result.push({ ...targetCommit, origin: "base" });
+          else {
+            result.push(targetCommit);
+            if (!sameConversationCommit(sourceCommit, baseCommit) && sourceCommit.id !== targetCommit.id) result.push(sourceCommit);
           }
-        } else if (targetCommit && sourceCommit) {
-          result.push(sameConversationCommit(targetCommit, baseCommit) ? { ...targetCommit, origin: "base" } : targetCommit);
         } else if (targetCommit ?? sourceCommit) {
           const selected = targetCommit ?? sourceCommit!;
           result.push(sameConversationCommit(selected, baseCommit) ? { ...selected, origin: "base" } : selected);
@@ -555,22 +658,6 @@ function buildConversationMerge(
 
 function sameConversationCommit(left: ConversationCommit, right: ConversationCommit): boolean {
   return left.prompt === right.prompt && left.response === right.response;
-}
-
-function isSameConversationIntent(left: ConversationCommit, right: ConversationCommit): boolean {
-  const leftPrompt = (left.prompt ?? "").trim().toLowerCase();
-  const rightPrompt = (right.prompt ?? "").trim().toLowerCase();
-  if (!leftPrompt || !rightPrompt) return false;
-  if (leftPrompt === rightPrompt) return true;
-  const leftWords = new Set(leftPrompt.split(/\W+/).filter(Boolean));
-  const rightWords = new Set(rightPrompt.split(/\W+/).filter(Boolean));
-  const overlap = [...leftWords].filter((word) => word.length > 2 && rightWords.has(word));
-  return overlap.length > 0 && overlap.length >= Math.min(leftWords.size, rightWords.size) * 0.5;
-}
-
-function hasLoginIdentityConflict(targetPrompt: string, sourcePrompt: string): boolean {
-  const combined = (targetPrompt + " " + sourcePrompt).toLowerCase();
-  return /login|sign.?in|authentication|auth/.test(combined) && ((targetPrompt.toLowerCase().includes("email") && sourcePrompt.toLowerCase().includes("username")) || (targetPrompt.toLowerCase().includes("username") && sourcePrompt.toLowerCase().includes("email")));
 }
 
 export function outcomeDetails(runOutput: string, fileSummary: string): string[] {

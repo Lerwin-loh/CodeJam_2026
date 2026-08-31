@@ -489,7 +489,7 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
     finally { if (mountedRef.current) setMergeBusy(false); }
   };
 
-  const applyBranchMerge = async (branch: AgentBranch, resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => {
+  const applyBranchMerge = async (branch: AgentBranch, resolution: { workspace: Record<string, "target" | "source" | "ai" | "combined">; context: Record<string, "target" | "source" | "ai" | "combined">; combined?: Record<string, import("./types").MergeCombinedDecision> }) => {
     if (!selected) return;
     setMergeBusy(true); setError(null);
     try {
@@ -801,10 +801,25 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
                   messages.map((message) => (
                     <article className={"message message-" + message.role} key={message.id}>
                       <div className="message-meta">
-                        <strong>{message.role === "user" ? "You" : selected.name}</strong>
+                        <strong>{message.kind === "merge" ? "Merge history" : message.role === "user" ? "You" : selected.name}</strong>
                         <span>{formatTime(message.createdAt)}</span>
                       </div>
-                      <div className="message-body">{message.content}</div>
+                      {message.kind === "merge" ? (
+                        <div className="message-body merge-history-event">
+                          <strong>{message.content}</strong>
+                          {message.mergeProvenance?.map((item) => (
+                            <div className="merge-history-provenance" key={item.id}>
+                              <b>{item.paths.join(", ")}</b>
+                              <div className="merge-provenance-columns">
+                                <div><b>Target prompts</b>{item.targetPrompts.map((commit) => <p key={commit.id}>{commit.prompt}</p>)}</div>
+                                <div><b>Source prompts</b>{item.sourcePrompts.map((commit) => <p key={commit.id}>{commit.prompt}</p>)}</div>
+                              </div>
+                              <small>Merge instruction: {item.mergePrompt}</small>
+                              <small>{item.explanation}</small>
+                            </div>
+                          ))}
+                        </div>
+                      ) : <div className="message-body">{message.content}</div>}
                     </article>
                   ))
                 )}

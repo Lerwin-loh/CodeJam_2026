@@ -165,6 +165,8 @@ export async function forkSessionAtOffset(
 }
 
 export interface MergeSessionSide {
+  /** Workspace that the reconstructed thread must use for subsequent runs. */
+  workspacePath: string;
   threadId: string | null;
   rolloutRelativePath: string | null;
   baseLineOffset: number | null;
@@ -217,7 +219,7 @@ export async function rebuildSessionFromTimeline(
     mergedLines.push(...block);
     alreadyIncluded.add(commit.id);
   }
-  return writeRegisteredFork(codexHome, templateThreadId, templateMetaLine, mergedLines);
+  return writeRegisteredFork(codexHome, templateThreadId, templateMetaLine, mergedLines, target.workspacePath || source.workspacePath);
 }
 
 function transcriptTurnBlock(lines: string[], prompt: string, startAt: number): string[] | null {
@@ -244,6 +246,7 @@ function writeRegisteredFork(
   sourceThreadId: string,
   sourceMetaLine: string | undefined,
   lines: string[],
+  workspacePath: string,
 ): string | null {
   if (!sourceMetaLine) return null;
   const dbPath = findStateDbPath(codexHome);
@@ -254,6 +257,7 @@ function writeRegisteredFork(
     if (meta.type !== "session_meta" || !meta.payload) return null;
     const newThreadId = randomUUID();
     meta.payload.id = newThreadId;
+    meta.payload.cwd = workspacePath;
     lines[0] = JSON.stringify(meta);
     const sourceRowDb = openDb(dbPath);
     try {
@@ -267,7 +271,7 @@ function writeRegisteredFork(
       createdAbsolute = newAbsolute;
       const newRolloutPath = row.rollout_path.replace(path.basename(row.rollout_path), newFilename);
       const now = Math.floor(Date.now() / 1000);
-      sourceRowDb.prepare(`INSERT INTO threads (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, tokens_used, has_user_event, cli_version, first_user_message, memory_mode, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0)`).run(newThreadId, newRolloutPath, now, now, row.source, row.model_provider, row.cwd, row.title, row.sandbox_policy, row.approval_mode, row.has_user_event, row.cli_version, row.first_user_message, row.memory_mode);
+      sourceRowDb.prepare(`INSERT INTO threads (id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, tokens_used, has_user_event, cli_version, first_user_message, memory_mode, archived) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0)`).run(newThreadId, newRolloutPath, now, now, row.source, row.model_provider, workspacePath, row.title, row.sandbox_policy, row.approval_mode, row.has_user_event, row.cli_version, row.first_user_message, row.memory_mode);
       return newThreadId;
     } finally {
       sourceRowDb.close();

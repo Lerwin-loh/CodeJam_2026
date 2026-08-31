@@ -559,7 +559,7 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
     finally { if (mounted.current) setMergeBusy(false); }
   };
 
-  const applyAgentMerge = async (resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => {
+  const applyAgentMerge = async (resolution: { workspace: Record<string, "target" | "source" | "ai" | "combined">; context: Record<string, "target" | "source" | "ai" | "combined">; combined?: Record<string, import("./types").MergeCombinedDecision> }) => {
     if (!agentMergePreview) return;
     setMergeBusy(true); setError(null);
     try { await api.merge(agentMergePreview.agentId, agentMergePreview.branchId, resolution); setAgentMergePreview(null); }
@@ -567,15 +567,15 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
     finally { if (mounted.current) setMergeBusy(false); }
   };
 
-  const openChildMerge = async (memberId: string, branchId: string | null = null) => {
+  const openChildMerge = async (memberId: string, branchId: string | null = null, requestId?: string) => {
     if (!selectedId) return;
     setMergeBusy(true); setError(null);
-    try { setMergePreview({ preview: await api.projects.mergePreview(selectedId, memberId, branchId), memberId, branchId }); }
+    try { setMergePreview({ preview: await api.projects.mergePreview(selectedId, memberId, branchId), memberId, branchId, requestId }); }
     catch (reason) { fail(reason); }
     finally { if (mounted.current) setMergeBusy(false); }
   };
 
-  const applyChildMerge = async (resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => {
+  const applyChildMerge = async (resolution: { workspace: Record<string, "target" | "source" | "ai" | "combined">; context: Record<string, "target" | "source" | "ai" | "combined">; combined?: Record<string, import("./types").MergeCombinedDecision> }) => {
     if (!selectedId || !mergePreview) return;
     setMergeBusy(true); setError(null);
     try { await api.projects.merge(selectedId, mergePreview.memberId, mergePreview.branchId, resolution, mergePreview.requestId); setMergePreview(null); await loadDetail(selectedId); }
@@ -992,7 +992,7 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
                         </div>
                       )}
                       {isOwner && cr.status === "approved" && !isArchived && (
-                        <div className="commit-actions"><button className="button button-primary" onClick={() => void openChildMerge(cr.memberId, null)}>Review merge into main</button></div>
+                        <div className="commit-actions"><button className="button button-primary" onClick={() => void openChildMerge(cr.memberId, null, cr.id)}>Merge</button></div>
                       )}
                       {isOwner && cr.status === "pending" && isArchived && (
                         <p className="muted-note">

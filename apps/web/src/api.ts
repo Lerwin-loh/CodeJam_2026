@@ -7,6 +7,8 @@ import type {
     CheckpointDiff,
     CommitRequest,
     MemberSecurityView,
+    MergeCombinedDecision,
+    MergeProvenance,
     MergePreview,
     Message,
     ParentAgentView,
@@ -175,8 +177,8 @@ export const api = {
       body: JSON.stringify({ checkpointId, name }),
     }),
   mergePreview: (agentId: string, branchId: string) => request<MergePreview>("/api/agents/" + agentId + "/merge-preview", { method: "POST", body: JSON.stringify({ branchId }) }),
-  merge: (agentId: string, branchId: string, resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[] }>("/api/agents/" + agentId + "/merge", { method: "POST", body: JSON.stringify({ branchId, resolution }) }),
-  mergeAi: (agentId: string, branchId: string) => request<{ context: Record<string, "target" | "source">; workspace: Record<string, "target" | "source">; aiDecisions: Record<string, string> }>("/api/agents/" + agentId + "/merge-ai", { method: "POST", body: JSON.stringify({ branchId }) }),
+  merge: (agentId: string, branchId: string, resolution: { workspace: Record<string, "target" | "source" | "ai" | "combined">; context: Record<string, "target" | "source" | "ai" | "combined">; combined?: Record<string, MergeCombinedDecision> }) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[]; provenance: MergeProvenance[] }>("/api/agents/" + agentId + "/merge", { method: "POST", body: JSON.stringify({ branchId, resolution }) }),
+  mergeAi: (agentId: string, branchId: string) => request<{ context: Record<string, "target" | "source" | "combined">; workspace: Record<string, "target" | "source" | "combined">; combined: Record<string, MergeCombinedDecision>; aiDecisions: Record<string, string>; provenance: MergeProvenance[] }>("/api/agents/" + agentId + "/merge-ai", { method: "POST", body: JSON.stringify({ branchId }) }),
   deleteBranch: (id: string, branchId: string) =>
     request<{ branchId: string; archivedWorkspace: string | null }>(
       "/api/agents/" + id + "/branches/" + branchId,
@@ -287,8 +289,8 @@ export const api = {
         body: JSON.stringify({ decision }),
       }),
     mergePreview: (id: string, memberId: string, branchId: string | null = null) => request<MergePreview>("/api/projects/" + id + "/merge-preview", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
-    merge: (id: string, memberId: string, branchId: string | null, resolution: { workspace: Record<string, "target" | "source" | "ai">; context: Record<string, "target" | "source" | "ai"> }, requestId?: string) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[] }>("/api/projects/" + id + "/merge", { method: "POST", body: JSON.stringify({ memberId, branchId, requestId, resolution }) }),
-    mergeAi: (id: string, memberId: string, branchId: string | null) => request<{ context: Record<string, "target" | "source">; workspace: Record<string, "target" | "source">; aiDecisions: Record<string, string> }>("/api/projects/" + id + "/merge-ai", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
+    merge: (id: string, memberId: string, branchId: string | null, resolution: { workspace: Record<string, "target" | "source" | "ai" | "combined">; context: Record<string, "target" | "source" | "ai" | "combined">; combined?: Record<string, MergeCombinedDecision> }, requestId?: string) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[]; provenance: MergeProvenance[] }>("/api/projects/" + id + "/merge", { method: "POST", body: JSON.stringify({ memberId, branchId, requestId, resolution }) }),
+    mergeAi: (id: string, memberId: string, branchId: string | null) => request<{ context: Record<string, "target" | "source" | "combined">; workspace: Record<string, "target" | "source" | "combined">; combined: Record<string, MergeCombinedDecision>; aiDecisions: Record<string, string>; provenance: MergeProvenance[] }>("/api/projects/" + id + "/merge-ai", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
   },
   restoreCheckpoint: (id: string) =>
     request<{

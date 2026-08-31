@@ -80,8 +80,13 @@ const commitRequestBody = z.object({
 });
 const decideCommitBody = z.object({ decision: z.enum(["approved", "rejected"]) });
 const mergeResolution = z.object({
-  workspace: z.record(z.string(), z.enum(["target", "source", "ai"])),
-  context: z.record(z.string(), z.enum(["target", "source", "ai"])),
+  workspace: z.record(z.string(), z.enum(["target", "source", "ai", "combined"])),
+  context: z.record(z.string(), z.enum(["target", "source", "ai", "combined"])),
+  combined: z.record(z.string(), z.object({
+    content: z.string().max(200_000),
+    mergePrompt: z.string().trim().min(1).max(2_000),
+    explanation: z.string().trim().min(1).max(2_000),
+  })).optional(),
 });
 const agentMergeBody = z.object({ branchId: z.string().uuid(), resolution: mergeResolution.optional() });
 const projectMergeBody = z.object({ memberId: z.string().uuid(), branchId: z.string().uuid().nullable().optional(), requestId: z.string().uuid().optional(), resolution: mergeResolution.optional() });
@@ -294,7 +299,7 @@ export async function createApp(
 
   app.post("/api/agents/:id/merge", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    await service.assertAgentAccess(id, request.user, "agent.run");
+    await service.assertAgentAccess(id, request.user, "branch.merge");
     const body = agentMergeBody.parse(request.body);
     if (!body.resolution) throw new HttpError(400, "Merge resolutions are required.");
     return service.mergeBranch(id, body.branchId, body.resolution);
@@ -302,7 +307,7 @@ export async function createApp(
 
   app.post("/api/agents/:id/merge-ai", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    await service.assertAgentAccess(id, request.user, "agent.run");
+    await service.assertAgentAccess(id, request.user, "branch.merge");
     const body = agentMergeBody.parse(request.body);
     return service.resolveBranchMerge(id, body.branchId);
   });
