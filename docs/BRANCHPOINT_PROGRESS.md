@@ -207,15 +207,3 @@ npm run check
 This runs server and Web TypeScript checks, production builds, and the full
 server test suite. The tests use mocks/fixtures and do not require Ark secrets,
 an external network, or a running Docker daemon.
-
-## Known limitations
-
-- Demo identity and generated bearer tokens are not production authentication.
-- `JsonStore` is single-process JSON persistence, not a distributed database.
-- Runtime containers are resource-limited but not hardened tenant isolation.
-- The OWASP gate is a focused pre-commit control, not a complete security audit.
-- Native Codex transcripts cannot be surgically rewritten; merges create a new
-  thread when reconstruction is possible.
-- Reconstruction is best-effort if rollout files or offsets are missing.
-- The POC does not provide distributed locks, remote object storage, or hosted
-  multi-node collaboration.
