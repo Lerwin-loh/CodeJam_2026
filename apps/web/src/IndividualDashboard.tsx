@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { branchPointSettingsTabs, type BranchPointSettingsTabKey } from "./branchPointSettingsContent";
+import { MergeReview } from "./MergeReview";
 import { traceEventDescription, traceEventLabel } from "./tracePresentation";
 import type {
   Agent,
@@ -13,6 +14,7 @@ import type {
   SystemInfo,
   TraceEvent,
   User,
+  MergePreview,
 } from "./types";
 
 const starterPrompts = [
@@ -81,7 +83,7 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
   const [showBranchPointSettings, setShowBranchPointSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<BranchPointSettingsTabKey>("trace");
   const [howItWorksOpen, setHowItWorksOpen] = useState(false);
-  const [activeBranchPointView, setActiveBranchPointView] = useState<"history" | "branches" | "compare">("history");
+  const [activeBranchPointView, setActiveBranchPointView] = useState<"history" | "branches">("history");
   const [expandedBranchPointView, setExpandedBranchPointView] = useState<string | null>("history");
   const [checkpointOverlay, setCheckpointOverlay] = useState<{
     kind: "diff" | "details" | "unavailable";
@@ -98,6 +100,8 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
   } | null>(null);
   const [checkpointLabel, setCheckpointLabel] = useState("");
   const [savingCheckpoint, setSavingCheckpoint] = useState(false);
+  const [mergePreview, setMergePreview] = useState<MergePreview | null>(null);
+  const [mergeBusy, setMergeBusy] = useState(false);
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
   const activeBranchIdRef = useRef<string | null>(null);
@@ -146,8 +150,8 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
     );
   }, []);
 
-  const refreshMessages = useCallback(async (agentId: string) => {
-    const result = await api.messages(agentId, activeBranchId);
+  const refreshMessages = useCallback(async (agentId: string, branchId: string | null = activeBranchId) => {
+    const result = await api.messages(agentId, branchId);
     if (mountedRef.current && selectedIdRef.current === agentId) {
       setMessages(result.messages);
     }
@@ -477,6 +481,25 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
     }
   };
 
+  const openBranchMerge = async (branch: AgentBranch) => {
+    if (!selected) return;
+    setMergeBusy(true); setError(null);
+    try { setMergePreview(await api.mergePreview(selected.id, branch.id)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { if (mountedRef.current) setMergeBusy(false); }
+  };
+
+  const applyBranchMerge = async (branch: AgentBranch, resolution: { workspace: Record<string, "target" | "source" | "ai" | "combined">; context: Record<string, "target" | "source" | "ai" | "combined">; combined?: Record<string, import("./types").MergeCombinedDecision> }) => {
+    if (!selected) return;
+    setMergeBusy(true); setError(null);
+    try {
+      await api.merge(selected.id, branch.id, resolution);
+      setMergePreview(null); setActiveBranchId(null);
+      await Promise.all([refreshMessages(selected.id, null), refreshBranchPoint(selected.id)]);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { if (mountedRef.current) setMergeBusy(false); }
+  };
+
   const deleteBranch = async (branch: AgentBranch) => {
     if (!selected) return;
     const confirmed = window.confirm(
@@ -778,10 +801,25 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
                   messages.map((message) => (
                     <article className={"message message-" + message.role} key={message.id}>
                       <div className="message-meta">
-                        <strong>{message.role === "user" ? "You" : selected.name}</strong>
+                        <strong>{message.kind === "merge" ? "Merge history" : message.role === "user" ? "You" : selected.name}</strong>
                         <span>{formatTime(message.createdAt)}</span>
                       </div>
-                      <div className="message-body">{message.content}</div>
+                      {message.kind === "merge" ? (
+                        <div className="message-body merge-history-event">
+                          <strong>{message.content}</strong>
+                          {message.mergeProvenance?.map((item) => (
+                            <div className="merge-history-provenance" key={item.id}>
+                              <b>{item.paths.join(", ")}</b>
+                              <div className="merge-provenance-columns">
+                                <div><b>Target prompts</b>{item.targetPrompts.map((commit) => <p key={commit.id}>{commit.prompt}</p>)}</div>
+                                <div><b>Source prompts</b>{item.sourcePrompts.map((commit) => <p key={commit.id}>{commit.prompt}</p>)}</div>
+                              </div>
+                              <small>Merge instruction: {item.mergePrompt}</small>
+                              <small>{item.explanation}</small>
+                            </div>
+                          ))}
+                        </div>
+                      ) : <div className="message-body">{message.content}</div>}
                     </article>
                   ))
                 )}
@@ -920,7 +958,7 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
           </div>
 
           <nav className="branchpoint-tabs" aria-label="BranchPoint views">
-            {(["history", "branches", "compare"] as const).map((view) => (
+            {(["history", "branches"] as const).map((view) => (
               <button
                 className={activeBranchPointView === view ? "active" : ""}
                 key={view}
@@ -941,7 +979,7 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
               onClick={() => setExpandedBranchPointView((current) => current === activeBranchPointView ? null : activeBranchPointView)}
               aria-expanded={expandedBranchPointView === activeBranchPointView}
             >
-              <span>{activeBranchPointView === "history" ? "Execution history" : activeBranchPointView === "branches" ? "Branch workspaces" : "Compare workspaces"}</span>
+              <span>{activeBranchPointView === "history" ? "Execution history" : "Branch workspaces"}</span>
               <span>{expandedBranchPointView === activeBranchPointView ? "−" : "+"}</span>
             </button>
             {expandedBranchPointView === activeBranchPointView && activeBranchPointView === "history" && (
@@ -1060,21 +1098,24 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
                 </div>
                 <div className="branch-list">
                   {branches.map((branch) => (
-                    <div className={"branch-card " + (branch.id === activeBranchId ? "active" : "")} key={branch.id}>
-                      <button className="branch-card-select" type="button" onClick={() => { setActiveBranchId(branch.id); setActiveBranchPointView("history"); }}>
-                        <span className="branch-card-icon">⑂</span>
-                        <span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span>
-                      </button>
-                      <button
-                        className="branch-delete-button"
-                        type="button"
-                        disabled={busy || branch.status === "busy"}
-                        title={branch.status === "busy" ? "Stop the branch run before deleting it" : "Delete branch"}
-                        aria-label={`Delete branch ${branch.name}`}
-                        onClick={() => void deleteBranch(branch)}
-                      >
-                        Delete
-                      </button>
+                    <div className="branch-card-row" key={branch.id}>
+                      <div className={"branch-card " + (branch.id === activeBranchId ? "active" : "")}>
+                        <button className="branch-card-select" type="button" onClick={() => { setActiveBranchId(branch.id); setActiveBranchPointView("history"); }}>
+                          <span className="branch-card-icon">⑂</span>
+                          <span><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span>
+                        </button>
+                        <button
+                          className="branch-delete-button"
+                          type="button"
+                          disabled={busy || branch.status === "busy"}
+                          title={branch.status === "busy" ? "Stop the branch run before deleting it" : "Delete branch"}
+                          aria-label={`Delete branch ${branch.name}`}
+                          onClick={() => void deleteBranch(branch)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                      <button className="button button-ghost" type="button" disabled={busy || branch.status === "busy"} onClick={() => void openBranchMerge(branch)}>Merge</button>
                     </div>
                   ))}
                 </div>
@@ -1082,13 +1123,6 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
                 <span className="branchpoint-empty-icon">⑂</span>
                 <strong>No branch workspaces yet</strong>
                 <p>Choose “Branch from here” on a Checkpoint event to create an independent workspace.</p>
-              </div>
-            )}
-            {expandedBranchPointView === activeBranchPointView && activeBranchPointView === "compare" && (
-              <div className="branchpoint-empty-state">
-                <span className="branchpoint-empty-icon">⇄</span>
-                <strong>{branches.length > 1 ? "Comparison is ready for the next step" : "No workspaces to compare yet"}</strong>
-                <p>{branches.length > 1 ? "Select branch snapshots to compare their files and outcomes." : "Create two independent branches from Checkpoint events to compare their files and outcomes."}</p>
               </div>
             )}
           </div>
@@ -1289,6 +1323,9 @@ export default function IndividualDashboard({ currentUser, onProjectUpgraded, on
           </section>
         </div>
       )}
+
+      {mergeBusy && !mergePreview && <div className="modal-backdrop merge-loading-backdrop"><section className="merge-loading-card" role="status" aria-live="polite"><span className="spinner" /><div><strong>Preparing merge review…</strong><p>Comparing outcomes, workspace files, and context prompts.</p></div></section></div>}
+      {mergePreview && selected && <MergeReview preview={mergePreview} busy={mergeBusy} onCancel={() => setMergePreview(null)} onFixWithAi={() => { const branch = branches.find((item) => item.id === mergePreview.source.id); if (!branch) throw new Error("Branch not found"); return api.mergeAi(selected.id, branch.id); }} onMerge={(resolution) => { const branch = branches.find((item) => item.id === mergePreview.source.id); if (branch) void applyBranchMerge(branch, resolution); }} />}
 
       {showCreate && (
         <div className="modal-backdrop" onMouseDown={() => setShowCreate(false)}>

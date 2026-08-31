@@ -3,11 +3,12 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import type { AgentService } from "./agent-service.js";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
-import type { AgentService } from "./agent-service.js";
+import { MergeConflictError } from "./merge-engine.js";
 import type { ProjectService } from "./project-service.js";
-import type { User } from "./types.js";
+import type { MergePreview, User } from "./types.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -78,9 +79,38 @@ const commitRequestBody = z.object({
   note: z.string().trim().max(2000).optional(),
 });
 const decideCommitBody = z.object({ decision: z.enum(["approved", "rejected"]) });
+const mergeResolution = z.object({
+  workspace: z.record(z.string(), z.enum(["target", "source", "ai", "combined"])),
+  context: z.record(z.string(), z.enum(["target", "source", "ai", "combined"])),
+  combined: z.record(z.string(), z.object({
+    content: z.string().max(200_000),
+    mergePrompt: z.string().trim().min(1).max(2_000),
+    explanation: z.string().trim().min(1).max(2_000),
+  })).optional(),
+});
+const agentMergeBody = z.object({ branchId: z.string().uuid(), resolution: mergeResolution.optional() });
+const projectMergeBody = z.object({ memberId: z.string().uuid(), branchId: z.string().uuid().nullable().optional(), requestId: z.string().uuid().optional(), resolution: mergeResolution.optional() });
 const commitRequestParams = z.object({ id: z.string().uuid() });
 
 const publicPaths = new Set(["/api/health", "/api/auth"]);
+
+type MergeConflictLike = { message: string; preview: MergePreview };
+
+function mergeConflictFrom(error: unknown): MergeConflictLike | null {
+  if (error instanceof MergeConflictError) return error;
+  if (
+    error &&
+    typeof error === "object" &&
+    "message" in error &&
+    typeof error.message === "string" &&
+    "preview" in error &&
+    error.preview &&
+    typeof error.preview === "object"
+  ) {
+    return error as MergeConflictLike;
+  }
+  return null;
+}
 
 export async function createApp(
   config: AppConfig,
@@ -278,11 +308,26 @@ export async function createApp(
     return reply.code(201).send({ branch });
   });
 
-  app.post("/api/agents/:id/branches/merge", async (request) => {
+  app.post("/api/agents/:id/merge-preview", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "agent.read");
+    const body = agentMergeBody.parse(request.body);
+    return service.previewBranchMerge(id, body.branchId);
+  });
+
+  app.post("/api/agents/:id/merge", async (request) => {
     const { id } = agentIdParams.parse(request.params);
     await service.assertAgentAccess(id, request.user, "branch.merge");
-    const { branchIds } = mergeBranchesBody.parse(request.body);
-    return service.mergeBranches(id, branchIds);
+    const body = agentMergeBody.parse(request.body);
+    if (!body.resolution) throw new HttpError(400, "Merge resolutions are required.");
+    return service.mergeBranch(id, body.branchId, body.resolution);
+  });
+
+  app.post("/api/agents/:id/merge-ai", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "branch.merge");
+    const body = agentMergeBody.parse(request.body);
+    return service.resolveBranchMerge(id, body.branchId);
   });
 
   app.delete("/api/agents/:id/branches/:branchId", async (request) => {
@@ -629,6 +674,28 @@ export async function createApp(
     return reply.code(201).send({ request: created });
   });
 
+  app.post("/api/projects/:id/merge-preview", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.decide");
+    const body = projectMergeBody.parse(request.body);
+    return projects.previewChildMerge(id, body.memberId, body.branchId ?? null);
+  });
+
+  app.post("/api/projects/:id/merge", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.decide");
+    const body = projectMergeBody.parse(request.body);
+    if (!body.resolution) throw new HttpError(400, "Merge resolutions are required.");
+    return projects.mergeChild(id, body.memberId, body.branchId ?? null, body.resolution, body.requestId, request.user.id);
+  });
+
+  app.post("/api/projects/:id/merge-ai", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.decide");
+    const body = projectMergeBody.parse(request.body);
+    return projects.resolveChildMerge(id, body.memberId, body.branchId ?? null);
+  });
+
   app.get("/api/projects/:id/commit-requests", async (request) => {
     const { id } = projectIdParams.parse(request.params);
     const { role, member } = await projects.assertProjectAccess(
@@ -641,7 +708,7 @@ export async function createApp(
     };
   });
 
-  app.post("/api/commit-requests/:id/decide", async (request) => {
+  app.post("/api/commit-requests/:id/decide", async (request, reply) => {
     const { id } = commitRequestParams.parse(request.params);
     const existing = projects.getCommitRequest(id);
     await projects.assertProjectAccess(
@@ -650,8 +717,25 @@ export async function createApp(
       "commit.request.decide",
     );
     const body = decideCommitBody.parse(request.body);
-    const updated = await projects.decideCommitRequest(id, body.decision, request.user);
-    return { request: updated };
+    try {
+      const updated = await projects.decideCommitRequest(id, body.decision, request.user);
+      return { request: updated };
+    } catch (error) {
+      // Keep the conflict preview attached to this response even if an
+      // adapter/framework wraps the domain error before the global handler
+      // sees it. The owner must receive the review data to resolve the merge.
+      const conflict = mergeConflictFrom(error);
+      if (conflict) {
+        return reply.code(409).send({
+          error: conflict.message,
+          preview: conflict.preview,
+          requestId: id,
+          memberId: existing.memberId,
+          branchId: null,
+        });
+      }
+      throw error;
+    }
   });
 
   if (config.nodeEnv === "production") {
@@ -670,14 +754,17 @@ export async function createApp(
 
   app.setErrorHandler((error, request, reply) => {
     const appError = error instanceof Error ? error : new Error(String(error));
+    const mergeConflict = mergeConflictFrom(error);
     const validationError = error instanceof z.ZodError;
     const frameworkStatus =
       typeof (error as { statusCode?: unknown }).statusCode === "number"
         ? (error as { statusCode: number }).statusCode
         : null;
     const statusCode =
-      error instanceof HttpError
-        ? error.statusCode
+      mergeConflict
+        ? 409
+        : error instanceof HttpError
+          ? error.statusCode
         : validationError
           ? 400
           : frameworkStatus && frameworkStatus >= 400 && frameworkStatus <= 599
@@ -688,6 +775,7 @@ export async function createApp(
     }
     return reply.code(statusCode).send({
       error: appError.message,
+      ...(mergeConflict ? { preview: mergeConflict.preview } : {}),
       ...(validationError ? { details: error.issues } : {}),
     });
   });

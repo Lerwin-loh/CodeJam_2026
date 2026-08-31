@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
+import { MergeConflictError } from "./merge-engine.js";
 import { ProjectService } from "./project-service.js";
 import { JsonStore } from "./store.js";
 import type { AgentRunner, OwaspStatus, User } from "./types.js";
@@ -373,7 +374,7 @@ describe("Part 1 — projects & membership", () => {
   });
 
   it("rejects adding an unknown user, the owner, or a duplicate member", async () => {
-    const { projects, agents } = await makeStack();
+    const { projects, agents, store } = await makeStack();
     const owner = await agents.createUser("Owner");
     await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
@@ -719,18 +720,20 @@ describe("Part 1 — agent access across the project", () => {
     const samMember = await addActiveMember(projects, agents, project.id, owner, { userName: "Sam", role: "Backend" });
 
     await expect(agents.assertAgentAccess(danaMember.childAgentId, dana, "child.query")).resolves.toMatchObject({ id: danaMember.childAgentId });
+    await expect(agents.assertAgentAccess(danaMember.childAgentId, dana, "branch.merge")).resolves.toMatchObject({ id: danaMember.childAgentId });
     await expect(agents.assertAgentAccess(samMember.childAgentId, owner, "child.query")).resolves.toBeTruthy();
     await expect(agents.assertAgentAccess(samMember.childAgentId, dana, "child.query")).rejects.toMatchObject({ statusCode: 403 });
+    await expect(agents.assertAgentAccess(samMember.childAgentId, dana, "branch.merge")).rejects.toMatchObject({ statusCode: 403 });
 
-    await expect(agents.assertAgentAccess(project.parentAgentId, dana, "agent.run")).rejects.toMatchObject({ statusCode: 403 });
-    await expect(agents.assertAgentAccess(project.parentAgentId, owner, "agent.run")).resolves.toBeTruthy();
+    await expect(agents.assertAgentAccess(project.parentAgentId, dana, "branch.merge")).rejects.toMatchObject({ statusCode: 403 });
+    await expect(agents.assertAgentAccess(project.parentAgentId, owner, "branch.merge")).resolves.toBeTruthy();
 
     expect(agents.listAgents(dana.id)).toEqual([]);
     expect(agents.listAgents(sam.id)).toEqual([]);
   });
 
   it("gates a commit request on a passing OWASP verdict, then lets the owner decide", async () => {
-    const { projects, agents } = await makeStack();
+    const { projects, agents, store } = await makeStack();
     const owner = await agents.createUser("Owner");
     const dana = await agents.createUser("Dana");
     const project = await projects.createProject("App", owner.id);
@@ -767,7 +770,61 @@ describe("Part 1 — agent access across the project", () => {
     ).rejects.toMatchObject({ statusCode: 403 });
 
     const decided = await projects.decideCommitRequest(request.id, "approved", owner);
-    expect(decided.status).toBe("approved");
+    expect(decided.status).toBe("merged");
+    expect(decided.decidedBy).toBe(owner.id);
+    expect(store.snapshot().projects.find((item) => item.id === project.id)?.headSnapshotId)
+      .not.toBe(project.headSnapshotId);
+  });
+
+  it("leaves a conflicting approval pending until the owner resolves the merge", async () => {
+    const { projects, agents } = await makeStack();
+    const owner = await agents.createUser("Owner");
+    const project = await projects.createProject("App", owner.id);
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
+    const childFile = path.join(member.workspacePath, "src", "app.ts");
+    await mkdir(path.dirname(childFile), { recursive: true });
+    await writeFile(childFile, "export const source = true;\n", "utf8");
+    await projects.runSecurityGate(project.id, member.id);
+    const request = await projects.submitCommitRequest(project.id, member.id, { title: "add app" });
+
+    const parentFile = path.join(project.mainWorkspacePath, "src", "app.ts");
+    await mkdir(path.dirname(parentFile), { recursive: true });
+    await writeFile(parentFile, "export const target = true;\n", "utf8");
+
+    let preview: import("./types.js").MergePreview | null = null;
+    let thrown: unknown = null;
+    try {
+      await projects.decideCommitRequest(request.id, "approved", owner);
+    } catch (error) {
+      thrown = error;
+      if (error instanceof MergeConflictError) preview = error.preview;
+    }
+    expect(thrown).toBeInstanceOf(MergeConflictError);
+    expect(preview?.workspaceConflicts.map((item) => item.path)).toContain("src/app.ts");
+    expect(projects.getCommitRequest(request.id).status).toBe("pending");
+    expect(await readFile(parentFile, "utf8")).toBe("export const target = true;\n");
+
+    await projects.mergeChild(project.id, member.id, null, {
+      workspace: { "src/app.ts": "source" },
+      context: {},
+    }, request.id, owner.id);
+    expect(projects.getCommitRequest(request.id).status).toBe("merged");
+    expect(await readFile(parentFile, "utf8")).toBe("export const source = true;\n");
+  });
+
+  it("rejecting a commit request changes only its status", async () => {
+    const { projects, agents } = await makeStack();
+    const owner = await agents.createUser("Owner");
+    const project = await projects.createProject("App", owner.id);
+    const member = await addActiveMember(projects, agents, project.id, owner, { userName: "Dana", role: "Frontend" });
+    await writeFile(path.join(member.workspacePath, "app.ts"), "export const source = true;\n", "utf8");
+    await projects.runSecurityGate(project.id, member.id);
+    const request = await projects.submitCommitRequest(project.id, member.id, { title: "reject app" });
+    const before = await readFile(path.join(project.mainWorkspacePath, "README.md"), "utf8");
+    const rejected = await projects.decideCommitRequest(request.id, "rejected", owner);
+    expect(rejected.status).toBe("rejected");
+    expect(await readFile(path.join(project.mainWorkspacePath, "README.md"), "utf8")).toBe(before);
+    await expect(readFile(path.join(project.mainWorkspacePath, "app.ts"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("keeps the commit gate closed on a failing OWASP point", async () => {

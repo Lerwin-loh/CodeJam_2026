@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { branchPointSettingsTabs, type BranchPointSettingsTabKey } from "./branchPointSettingsContent";
-import { traceEventDescription, traceEventLabel } from "./tracePresentation";
 import type {
   AgentBranch,
   AgentCheckpoint,
@@ -67,7 +66,7 @@ export function useAgentWorkspace(
   const [error, setError] = useState<string | null>(null);
 
   const [showBranchPoint, setShowBranchPoint] = useState(false);
-  const [bpView, setBpView] = useState<"history" | "branches" | "compare">("history");
+  const [bpView, setBpView] = useState<"history" | "branches">("history");
   const [bpExpanded, setBpExpanded] = useState<string | null>("history");
   const [selectedCheckpointId, setSelectedCheckpointId] = useState<string | null>(null);
   const [showBpSettings, setShowBpSettings] = useState(false);
@@ -85,11 +84,7 @@ export function useAgentWorkspace(
   } | null>(null);
   const [showCodeChanges, setShowCodeChanges] = useState(false);
   const [runOverlay, setRunOverlay] = useState<RunDetails | null>(null);
-  const [restoreResult, setRestoreResult] = useState<{
-    recoveryPath: string;
-    activePath: string;
-    hash: string;
-  } | null>(null);
+  const [restoreResult, setRestoreResult] = useState<{ path: string; hash: string } | null>(null);
   const [checkpointLabel, setCheckpointLabel] = useState("");
   const [savingCheckpoint, setSavingCheckpoint] = useState(false);
 
@@ -382,11 +377,7 @@ export function useAgentWorkspace(
       setError(null);
       try {
         const result = await api.restoreCheckpoint(checkpoint.id);
-        setRestoreResult({
-          recoveryPath: result.workspacePath,
-          activePath: result.activeWorkspacePath,
-          hash: result.workspaceHash,
-        });
+        setRestoreResult({ path: result.workspacePath, hash: result.workspaceHash });
         setCheckpointOverlay(null);
         setSelectedCheckpointId(null);
         await Promise.all([
@@ -420,49 +411,6 @@ export function useAgentWorkspace(
       }
     },
     [agentId, fail],
-  );
-
-  const mergeBranches = useCallback(
-    async (branchIds: string[]): Promise<{ mergedBranchIds: string[]; changedFiles: string[] }> => {
-      const empty = { mergedBranchIds: [] as string[], changedFiles: [] as string[] };
-      if (!agentId || branchIds.length === 0) return empty;
-      setError(null);
-      try {
-        const result = await api.mergeBranches(agentId, branchIds);
-        const merged = new Set(result.mergedBranchIds);
-        setBranches((current) => current.filter((item) => !merged.has(item.id)));
-        setActiveBranchId((current) => (current && merged.has(current) ? null : current));
-        return result;
-      } catch (reason) {
-        fail(reason);
-        return empty;
-      }
-    },
-    [agentId, fail],
-  );
-
-  const deleteBranch = useCallback(
-    async (branch: AgentBranch): Promise<boolean> => {
-      if (!agentId || !canManage) return false;
-      const confirmed = window.confirm(
-        `Delete branch "${branch.name}"? Its workspace will be archived for recovery, but its branch history will be removed.`,
-      );
-      if (!confirmed) return false;
-      setBusy(true);
-      setError(null);
-      try {
-        await api.deleteBranch(agentId, branch.id);
-        setBranches((current) => current.filter((item) => item.id !== branch.id));
-        setActiveBranchId((current) => (current === branch.id ? null : current));
-        return true;
-      } catch (reason) {
-        fail(reason);
-        return false;
-      } finally {
-        if (mounted.current) setBusy(false);
-      }
-    },
-    [agentId, canManage, fail],
   );
 
   const toggleAgent = useCallback(async () => {
@@ -588,8 +536,6 @@ export function useAgentWorkspace(
     historyItems,
     branchGraphRows,
     selectBranch,
-    deleteBranch,
-    mergeBranches,
     send,
     sendText,
     saveCheckpoint,
@@ -769,10 +715,25 @@ export function AgentPlayground({
             ws.messages.map((message) => (
               <article className={"message message-" + message.role} key={message.id}>
                 <div className="message-meta">
-                  <strong>{message.role === "user" ? "You" : ws.name || "Agent"}</strong>
+                  <strong>{message.kind === "merge" ? "Merge history" : message.role === "user" ? "You" : ws.name || "Agent"}</strong>
                   <span>{fmt(message.createdAt)}</span>
                 </div>
-                <div className="message-body">{message.content}</div>
+                {message.kind === "merge" ? (
+                  <div className="message-body merge-history-event">
+                    <strong>{message.content}</strong>
+                    {message.mergeProvenance?.map((item) => (
+                      <div className="merge-history-provenance" key={item.id}>
+                        <b>{item.paths.join(", ")}</b>
+                        <div className="merge-provenance-columns">
+                          <div><b>Target prompts</b>{item.targetPrompts.map((commit) => <p key={commit.id}>{commit.prompt}</p>)}</div>
+                          <div><b>Source prompts</b>{item.sourcePrompts.map((commit) => <p key={commit.id}>{commit.prompt}</p>)}</div>
+                        </div>
+                        <small>Merge instruction: {item.mergePrompt}</small>
+                        <small>{item.explanation}</small>
+                      </div>
+                    ))}
+                  </div>
+                ) : <div className="message-body">{message.content}</div>}
               </article>
             ))
           )}
@@ -812,15 +773,25 @@ export function AgentPlayground({
                     .filter((event) => event.runId === ws.activeRun!.id)
                     .slice(-8)
                     .map((event) => {
+                      const label =
+                        event.type === "codex.event" && typeof event.metadata.eventType === "string"
+                          ? event.metadata.eventType === "error"
+                            ? "Codex error"
+                            : event.metadata.eventType
+                          : event.type;
                       return (
                         <div className="live-trace-event" key={event.id}>
                           <span className="trace-event-dot" />
                           <div>
-                            <strong>{traceEventLabel(event)}</strong>
+                            <strong>{label}</strong>
                             <small>{fmt(event.timestamp)}</small>
                           </div>
                           <p>
-                            {traceEventDescription(event)}
+                            {typeof event.metadata.explanation === "string"
+                              ? event.metadata.explanation
+                              : typeof event.metadata.output === "string"
+                                ? event.metadata.output
+                                : "Observable execution activity recorded."}
                           </p>
                         </div>
                       );
@@ -884,10 +855,10 @@ export function AgentPlayground({
 }
 
 /* ------------------------------------------------------------------ */
-/* BranchPoint drawer: History / Branches / Compare. */
+/* BranchPoint drawer: History / Branches. */
 /* ------------------------------------------------------------------ */
 
-export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
+export function BranchPointPanel({ ws, onMergeBranch }: { ws: WorkspaceApi; onMergeBranch?: (branchId: string) => void }) {
   const canManage = ws.canManage;
   return (
     <>
@@ -934,7 +905,7 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
       </div>
 
       <nav className="branchpoint-tabs" aria-label="BranchPoint views">
-        {(["history", "branches", "compare"] as const).map((view) => (
+        {(["history", "branches"] as const).map((view) => (
           <button
             className={ws.bpView === view ? "active" : ""}
             key={view}
@@ -959,7 +930,7 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
               ? "Execution history"
               : ws.bpView === "branches"
                 ? "Branch workspaces"
-                : "Compare workspaces"}
+              : "Branch workspaces"}
           </span>
           <span>{ws.bpExpanded === ws.bpView ? "−" : "+"}</span>
         </button>
@@ -1168,35 +1139,15 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
               </div>
               <div className="branch-list">
                 {ws.branches.map((branch) => (
-                  <div
-                    className={"branch-card " + (branch.id === ws.activeBranchId ? "active" : "")}
-                    key={branch.id}
-                  >
-                    <button
-                      className="branch-card-select"
-                      type="button"
-                      onClick={() => ws.selectBranch(branch.id)}
-                    >
-                      <span className="branch-card-icon">⑂</span>
-                      <span>
-                        <strong>{branch.name}</strong>
-                        <small>
-                          {branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}
-                        </small>
-                      </span>
-                    </button>
-                    {ws.canManage && (
-                      <button
-                        className="branch-delete-button"
-                        type="button"
-                        disabled={ws.busy || branch.status === "busy"}
-                        title={branch.status === "busy" ? "Stop the branch run before deleting it" : "Delete branch"}
-                        aria-label={`Delete branch ${branch.name}`}
-                        onClick={() => void ws.deleteBranch(branch)}
-                      >
-                        Delete
+                  <div className="branch-card-row" key={branch.id}>
+                    <div className={"branch-card branch-card-merge-only " + (branch.id === ws.activeBranchId ? "active" : "")}>
+                      <button className="branch-card-select" type="button" onClick={() => ws.selectBranch(branch.id)}>
+                        <span className="branch-card-icon">⑂</span>
+                        <span className="branch-card-copy"><strong>{branch.name}</strong><small>{branch.status} · from checkpoint {branch.parentCheckpointId?.slice(0, 8)}</small></span>
+                        <span className="branch-card-chevron" aria-hidden="true">›</span>
                       </button>
-                    )}
+                    </div>
+                    {onMergeBranch && <button className="button button-ghost branch-merge-button" type="button" onClick={() => onMergeBranch(branch.id)}>Merge</button>}
                   </div>
                 ))}
               </div>
@@ -1209,17 +1160,6 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
             </div>
           ))}
 
-        {ws.bpExpanded === ws.bpView && ws.bpView === "compare" && (
-          <div className="branchpoint-empty-state">
-            <span className="branchpoint-empty-icon">⇄</span>
-            <strong>{ws.branches.length > 1 ? "Comparison is ready for the next step" : "No workspaces to compare yet"}</strong>
-            <p>
-              {ws.branches.length > 1
-                ? "Select branch snapshots to compare their files and outcomes."
-                : "Create two independent branches from Checkpoint events to compare their files and outcomes."}
-            </p>
-          </div>
-        )}
       </div>
     </aside>
     )}
@@ -1233,7 +1173,7 @@ export function BranchPointPanel({ ws }: { ws: WorkspaceApi }) {
               <div>
                 <span className="eyebrow">BranchPoint · Beta</span>
                 <h2>BranchPoint</h2>
-                <p>Understand how execution is tracked, versioned, recovered, and security-checked across runs, checkpoints, and branches.</p>
+                <p>Understand how execution is tracked, versioned, and recovered across runs, checkpoints, and branches.</p>
               </div>
               <button className="panel-close" type="button" onClick={() => ws.setShowBpSettings(false)} aria-label="Close BranchPoint settings">×</button>
             </div>
@@ -1495,11 +1435,15 @@ export function WorkspaceOverlays({ ws }: { ws: WorkspaceApi }) {
                 {ws.runOverlay.trace.map((event) => (
                   <div key={event.id}>
                     <header>
-                      <strong>{traceEventLabel(event)}</strong>
+                      <strong>{event.type}</strong>
                       <span>{fmt(event.timestamp)}</span>
                     </header>
                     <p>
-                      {traceEventDescription(event)}
+                      {typeof event.metadata.explanation === "string"
+                        ? event.metadata.explanation
+                        : event.type === "codex.event"
+                          ? "Codex reported observable execution activity."
+                          : "Recorded BranchPoint activity."}
                     </p>
                   </div>
                 ))}
@@ -1530,11 +1474,7 @@ export function WorkspaceOverlays({ ws }: { ws: WorkspaceApi }) {
             <p className="inspection-message">The workspace now matches the saved snapshot.</p>
             <label>
               Restored workspace
-              <input readOnly value={ws.restoreResult.activePath} />
-            </label>
-            <label>
-              Recovery copy
-              <input readOnly value={ws.restoreResult.recoveryPath} />
+              <input readOnly value={ws.restoreResult.path} />
             </label>
             <p className="inspection-muted">Workspace hash: {ws.restoreResult.hash}</p>
           </section>

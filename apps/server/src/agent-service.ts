@@ -1,33 +1,35 @@
 import { randomUUID } from "node:crypto";
 import { cp, mkdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
+import { captureSessionOffset, forkSessionAtOffset, rebuildSessionFromTimeline } from "./codex-session-fork.js";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
+import { MergeEngine, conversationCommits, outcomeDetails, outcomeSummary } from "./merge-engine.js";
 import { JsonStore } from "./store.js";
 import type {
-  Agent,
-  AgentRun,
-  AgentRunner,
-  AgentCheckpoint,
-  AuditDecision,
-  AuditEntry,
-  CheckpointDetails,
-  CheckpointDiff,
-  CreateAgentInput,
-  Message,
-  RunnerEvent,
-  AgentContextSnapshot,
-  TraceEvent,
-  TraceEventType,
-  RunDetails,
-  User,
-  WorkspaceManifest,
-  UpdateAgentInput,
+    Agent,
+    AgentCheckpoint,
+    AgentContextSnapshot,
+    AgentRun,
+    AgentRunner,
+    AuditDecision,
+    AuditEntry,
+    CheckpointDetails,
+    CheckpointDiff,
+    CreateAgentInput,
+    MergeProvenance,
+    MergeResolution,
+    Message,
+    RunDetails,
+    TraceEvent,
+    TraceEventType,
+    UpdateAgentInput,
+    User,
+    WorkspaceManifest
 } from "./types.js";
-import { WorkspaceManager } from "./workspace.js";
 import { WorkspaceHistory } from "./workspace-history.js";
-import { captureSessionOffset, forkSessionAtOffset } from "./codex-session-fork.js";
+import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
@@ -89,6 +91,7 @@ export class AgentService {
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
     private readonly history = new WorkspaceHistory(path.join(config.dataDirectory, "branchpoint")),
+    private readonly mergeEngine = new MergeEngine(history),
   ) {}
 
   async initialize(): Promise<void> {
@@ -712,8 +715,8 @@ export class AgentService {
   }
 
   getMessages(agentId: string, branchId: string | null = null): Message[] {
-    this.getAgent(agentId);
     const database = this.store.snapshot();
+    if (!database.agents.some((item) => item.id === agentId)) throw new HttpError(404, "Agent not found");
     return this.store
       .snapshot()
       .messages.filter((message) => message.agentId === agentId)
@@ -762,6 +765,132 @@ export class AgentService {
     const branch = this.store.snapshot().branches.find((item) => item.id === id);
     if (!branch) throw new HttpError(404, "Branch not found");
     return branch;
+  }
+
+  private async mergeSide(
+    agent: Agent,
+    workspacePath: string,
+    id: string,
+    label: string,
+    baseSnapshotId: string | null,
+    branchId: string | null = null,
+    mergeBaseContext: AgentContextSnapshot | null = null,
+  ) {
+    const database = this.store.snapshot();
+    const runs = database.runs.filter((run) => run.agentId === agent.id && run.branchId === branchId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const messages = this.getMessages(agent.id, branchId);
+    const conversation = conversationCommits(messages, database.runs, database.checkpoints);
+    const branch = branchId ? database.branches.find((item) => item.id === branchId) : null;
+    const checkpoint = branch?.parentCheckpointId
+      ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)
+      : null;
+    const context = checkpoint ? database.contexts.find((item) => item.id === checkpoint.contextId) : null;
+    const baseContext = mergeBaseContext ?? context;
+    const baseConversation = baseContext ? conversationCommits(baseContext.messages, database.runs, database.checkpoints) : [];
+    const currentThreadId = branch?.codexThreadId ?? agent.codexThreadId;
+    const currentOffset = captureSessionOffset(this.config.codexHome, currentThreadId);
+    const prompts = conversation.map((commit) => commit.prompt);
+    const baseSnapshot = baseSnapshotId ? database.snapshots.find((snapshot) => snapshot.id === baseSnapshotId) ?? null : null;
+    const changed = baseSnapshot ? this.history.diff(baseSnapshot.manifest, await this.history.manifest(workspacePath)) : { created: [], modified: [], deleted: [] };
+    const fileSummary = [
+      changed.created.length ? "created " + changed.created.join(", ") : "",
+      changed.modified.length ? "updated " + changed.modified.join(", ") : "",
+      changed.deleted.length ? "deleted " + changed.deleted.join(", ") : "",
+    ].filter(Boolean).join("; ");
+    return {
+      id, label, workspacePath,
+      outcome: { id, label, summary: outcomeSummary(runs[0]?.output ?? "", fileSummary), details: outcomeDetails(runs[0]?.output ?? "", fileSummary), requestedFeatures: prompts },
+      prompts,
+      conversation,
+      baseConversation,
+      session: {
+        workspacePath,
+        threadId: currentThreadId,
+        rolloutRelativePath: currentOffset?.rolloutRelativePath ?? baseContext?.sessionRolloutPath ?? null,
+        // A standalone/project merge has no shared Codex checkpoint. In that
+        // case rebuild from the session metadata line and append the merged
+        // application timeline in order.
+        baseLineOffset: baseContext?.sessionLineOffset ?? 1,
+        baseThreadId: baseContext?.sourceThreadId ?? null,
+      },
+      baseSnapshot,
+    };
+  }
+
+  async previewBranchMerge(agentId: string, branchId: string) {
+    const agent = this.getAgent(agentId);
+    const branch = this.getBranch(branchId);
+    if (branch.agentId !== agentId) throw new HttpError(403, "This branch belongs to another Agent");
+    const baseId = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null;
+    const checkpoint = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId);
+    const baseContext = checkpoint ? this.store.snapshot().contexts.find((item) => item.id === checkpoint.contextId) ?? null : null;
+    return this.mergeEngine.preview(await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId, null, baseContext), await this.mergeSide(agent, branch.workspacePath, branch.id, branch.name, baseId, branch.id));
+  }
+
+  async mergeBranch(agentId: string, branchId: string, resolution: MergeResolution) {
+    const agent = this.getAgent(agentId);
+    const branch = this.getBranch(branchId);
+    if (branch.agentId !== agentId) throw new HttpError(403, "This branch belongs to another Agent");
+    const baseId = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null;
+    const checkpoint = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId);
+    const baseContext = checkpoint ? this.store.snapshot().contexts.find((item) => item.id === checkpoint.contextId) ?? null : null;
+    const target = await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId, null, baseContext);
+    const source = await this.mergeSide(agent, branch.workspacePath, branch.id, branch.name, baseId, branch.id);
+    return this.mergeEngine.apply(target, source, resolution, async (manifest, conversation, provenance: MergeProvenance[]) => {
+      const snapshot = await this.history.createSnapshot(agent.id, null, agent.workspacePath, manifest);
+      const mergedThreadId = target.session && source.session
+        ? await rebuildSessionFromTimeline(this.config.codexHome, target.session, source.session, conversation)
+        : null;
+      try {
+        await this.store.mutate((database) => {
+          database.snapshots.push(snapshot);
+          const row = database.agents.find((item) => item.id === agent.id);
+          if (row) {
+            database.messages = database.messages.filter((message) =>
+              !(message.agentId === agent.id && message.branchId === null),
+            );
+            for (const commit of conversation) {
+              database.messages.push({
+                id: randomUUID(), agentId: agent.id, runId: commit.runId, branchId: null,
+                role: "user", content: commit.prompt, createdAt: commit.createdAt,
+              });
+              if (commit.response !== null) {
+                database.messages.push({
+                  id: randomUUID(), agentId: agent.id, runId: commit.runId, branchId: null,
+                  role: "assistant", content: commit.response, createdAt: commit.createdAt,
+                });
+              }
+            }
+            if (provenance.length > 0) {
+              database.messages.push({
+                id: randomUUID(),
+                agentId: agent.id,
+                runId: "merge:" + randomUUID(),
+                branchId: null,
+                role: "assistant",
+                content: "Combined implementation recorded for this merge.",
+                createdAt: now(),
+                kind: "merge",
+                mergeProvenance: provenance,
+              });
+            }
+            row.codexThreadId = mergedThreadId;
+          }
+        });
+      } catch (error) {
+        await rm(snapshot.directory, { recursive: true, force: true });
+        throw error;
+      }
+      return snapshot;
+    });
+  }
+
+  async resolveBranchMerge(agentId: string, branchId: string) {
+    const preview = await this.previewBranchMerge(agentId, branchId);
+    return this.mergeEngine.resolve(preview, {
+      workspace: Object.fromEntries(preview.workspaceConflicts.map((conflict) => [conflict.path, "ai"])),
+      context: Object.fromEntries(preview.contextConflicts.map((conflict) => [conflict.id, "ai"])),
+    });
   }
 
   async createBranchFromCheckpoint(

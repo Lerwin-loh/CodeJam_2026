@@ -1,28 +1,35 @@
 import type {
-  Agent,
-  AgentCheckpoint,
-  AgentRun,
-  AuditEntry,
-  CheckpointDetails,
-  CheckpointDiff,
-  CommitRequest,
-  Message,
-  ParentAgentView,
-  Project,
-  ProjectDetail,
-  ProjectMemberView,
-  MemberSecurityView,
-  RosterEntry,
-  RunDetails,
-  SystemInfo,
-  TraceEvent,
-  User,
+    Agent,
+    AgentCheckpoint,
+    AgentRun,
+    AuditEntry,
+    CheckpointDetails,
+    CheckpointDiff,
+    CommitRequest,
+    MemberSecurityView,
+    MergeCombinedDecision,
+    MergeProvenance,
+    MergePreview,
+    Message,
+    ParentAgentView,
+    Project,
+    ProjectDetail,
+    ProjectMemberView,
+    RosterEntry,
+    RunDetails,
+    SystemInfo,
+    TraceEvent,
+    User,
 } from "./types";
 
 export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly preview?: MergePreview,
+    public readonly requestId?: string,
+    public readonly memberId?: string,
+    public readonly branchId?: string | null,
   ) {
     super(message);
   }
@@ -71,13 +78,24 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const data = (await response.json().catch(() => ({}))) as T & {
     error?: string;
     message?: string;
+    preview?: MergePreview;
+    requestId?: string;
+    memberId?: string;
+    branchId?: string | null;
   };
   if (!response.ok) {
     // Our handler puts the real text in `error`; Fastify's default puts a bare
     // status phrase in `error` and the real text in `message`.
     const detail =
       typeof data.message === "string" && data.message ? data.message : data.error;
-    throw new ApiError(detail ?? "Request failed", response.status);
+    throw new ApiError(
+      detail ?? "Request failed",
+      response.status,
+      data.preview,
+      data.requestId,
+      data.memberId,
+      data.branchId,
+    );
   }
   return data;
 }
@@ -171,6 +189,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ checkpointId, name }),
     }),
+  mergePreview: (agentId: string, branchId: string) => request<MergePreview>("/api/agents/" + agentId + "/merge-preview", { method: "POST", body: JSON.stringify({ branchId }) }),
+  merge: (agentId: string, branchId: string, resolution: { workspace: Record<string, "target" | "source" | "ai" | "combined">; context: Record<string, "target" | "source" | "ai" | "combined">; combined?: Record<string, MergeCombinedDecision> }) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[]; provenance: MergeProvenance[] }>("/api/agents/" + agentId + "/merge", { method: "POST", body: JSON.stringify({ branchId, resolution }) }),
+  mergeAi: (agentId: string, branchId: string) => request<{ context: Record<string, "target" | "source" | "combined">; workspace: Record<string, "target" | "source" | "combined">; combined: Record<string, MergeCombinedDecision>; aiDecisions: Record<string, string>; provenance: MergeProvenance[] }>("/api/agents/" + agentId + "/merge-ai", { method: "POST", body: JSON.stringify({ branchId }) }),
   deleteBranch: (id: string, branchId: string) =>
     request<{ branchId: string; archivedWorkspace: string | null }>(
       "/api/agents/" + id + "/branches/" + branchId,
@@ -280,6 +301,9 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ decision }),
       }),
+    mergePreview: (id: string, memberId: string, branchId: string | null = null) => request<MergePreview>("/api/projects/" + id + "/merge-preview", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
+    merge: (id: string, memberId: string, branchId: string | null, resolution: { workspace: Record<string, "target" | "source" | "ai" | "combined">; context: Record<string, "target" | "source" | "ai" | "combined">; combined?: Record<string, MergeCombinedDecision> }, requestId?: string) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[]; provenance: MergeProvenance[] }>("/api/projects/" + id + "/merge", { method: "POST", body: JSON.stringify({ memberId, branchId, requestId, resolution }) }),
+    mergeAi: (id: string, memberId: string, branchId: string | null) => request<{ context: Record<string, "target" | "source" | "combined">; workspace: Record<string, "target" | "source" | "combined">; combined: Record<string, MergeCombinedDecision>; aiDecisions: Record<string, string>; provenance: MergeProvenance[] }>("/api/projects/" + id + "/merge-ai", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
   },
   restoreCheckpoint: (id: string) =>
     request<{

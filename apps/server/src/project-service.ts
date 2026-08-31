@@ -1,13 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { captureSessionOffset, rebuildSessionFromTimeline } from "./codex-session-fork.js";
 import { HttpError } from "./errors.js";
+import { MergeConflictError, MergeEngine, conversationCommits, outcomeDetails, outcomeSummary } from "./merge-engine.js";
 import { JsonStore } from "./store.js";
 import type {
   Agent,
+  AgentContextSnapshot,
+  AgentRun,
   AuditDecision,
   ChangedFiles,
   CommitRequest,
+  MergeProvenance,
+  MergeResolution,
   OwaspStatus,
   Project,
   ProjectMember,
@@ -390,13 +396,32 @@ const COMMIT_GATE_MESSAGE: Record<Exclude<MemberSecurityView["reason"], "ok">, s
 };
 
 export class ProjectService {
+  private readonly mergeEngine: MergeEngine;
+  private readonly codexHome: string;
+  private readonly classify: SecurityClassifier | undefined;
+
   constructor(
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly history: WorkspaceHistory,
-    /** One direct model call for the OWASP gate (no agent). Wired in index.ts. */
-    private readonly classify?: SecurityClassifier,
-  ) {}
+    mergeEngineOrClassify: MergeEngine | SecurityClassifier = new MergeEngine(history),
+    codexHomeOrMergeEngine: string | MergeEngine = "",
+    classifyOrCodexHome?: SecurityClassifier | string,
+  ) {
+    // Support the legacy classifier-only constructor and both production
+    // argument orderings while the feature branch is rebased.
+    if (typeof mergeEngineOrClassify === "function") {
+      this.classify = mergeEngineOrClassify;
+      this.mergeEngine = codexHomeOrMergeEngine instanceof MergeEngine
+        ? codexHomeOrMergeEngine
+        : new MergeEngine(history);
+      this.codexHome = typeof classifyOrCodexHome === "string" ? classifyOrCodexHome : "";
+    } else {
+      this.mergeEngine = mergeEngineOrClassify;
+      this.codexHome = typeof codexHomeOrMergeEngine === "string" ? codexHomeOrMergeEngine : "";
+      this.classify = typeof classifyOrCodexHome === "function" ? classifyOrCodexHome : undefined;
+    }
+  }
 
   // --------------------------------------------------------------------------
   // lookups & permissions
@@ -1010,6 +1035,20 @@ export class ProjectService {
       "Invited " + target.name + " as " + role,
     );
     return member;
+  }
+
+  /** Legacy helper used by local callers that provision an active member immediately. */
+  async addMember(
+    projectId: string,
+    actor: User,
+    input: { userName: string; role: string },
+  ): Promise<ProjectMember> {
+    const invited = await this.inviteMember(projectId, actor, input);
+    const target = this.store.snapshot().users.find(
+      (user) => user.name.toLowerCase() === input.userName.trim().toLowerCase(),
+    );
+    if (!target) throw new HttpError(404, "User not found");
+    return this.acceptInvitation(projectId, target);
   }
 
   /** Invitee accepts — provisions their child agent + forked workspace. */
@@ -1796,26 +1835,149 @@ export class ProjectService {
     return request;
   }
 
-  /**
-   * Owner decision on a pending commit request. Approve/reject only records the
-   * outcome: actually applying the change to main (with conflict handling) is
-   * the next iteration.
-   */
+  private async projectMergeSide(
+    agent: Agent,
+    workspacePath: string,
+    id: string,
+    label: string,
+    baseSnapshotId: string | null,
+    branchId: string | null = null,
+    mergeBaseContext: AgentContextSnapshot | null = null,
+  ) {
+    const database = this.store.snapshot();
+    const runs = database.runs.filter((run) => run.agentId === agent.id && run.branchId === branchId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const branch = branchId ? database.branches.find((item) => item.id === branchId) : null;
+    const checkpoint = branch?.parentCheckpointId ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId) : null;
+    const context = checkpoint ? database.contexts.find((item) => item.id === checkpoint.contextId) ?? null : null;
+    const baseContext = mergeBaseContext ?? context;
+    const contextMessages = baseContext?.messages ?? [];
+    const sideMessages = database.messages.filter((message) => message.agentId === agent.id && (branchId === null ? message.branchId === null : message.branchId === branchId));
+    const conversation = conversationCommits([...contextMessages, ...sideMessages], database.runs, database.checkpoints);
+    const baseConversation = conversationCommits(contextMessages, database.runs, database.checkpoints);
+    const currentThreadId = branch?.codexThreadId ?? agent.codexThreadId;
+    const currentOffset = this.codexHome ? captureSessionOffset(this.codexHome, currentThreadId) : null;
+    const prompts = conversation.map((commit) => commit.prompt);
+    const baseSnapshot = baseSnapshotId ? database.snapshots.find((snapshot) => snapshot.id === baseSnapshotId) ?? null : null;
+    const changed = baseSnapshot ? this.history.diff(baseSnapshot.manifest, await this.history.manifest(workspacePath)) : { created: [], modified: [], deleted: [] };
+    const fileSummary = [changed.created.length ? "created " + changed.created.join(", ") : "", changed.modified.length ? "updated " + changed.modified.join(", ") : "", changed.deleted.length ? "deleted " + changed.deleted.join(", ") : ""].filter(Boolean).join("; ");
+    return { id, label, workspacePath, outcome: { id, label, summary: outcomeSummary(runs[0]?.output ?? "", fileSummary), details: outcomeDetails(runs[0]?.output ?? "", fileSummary), requestedFeatures: prompts }, prompts, conversation, baseConversation, session: { workspacePath, threadId: currentThreadId, rolloutRelativePath: currentOffset?.rolloutRelativePath ?? baseContext?.sessionRolloutPath ?? null, baseLineOffset: baseContext?.sessionLineOffset ?? 1, baseThreadId: baseContext?.sourceThreadId ?? null }, baseSnapshot };
+  }
+
+  async previewChildMerge(projectId: string, memberId: string, branchId: string | null = null) {
+    const database = this.store.snapshot();
+    const project = this.getProjectOrThrow(projectId);
+    const parent = database.agents.find((agent) => agent.id === project.parentAgentId);
+    const member = database.projectMembers.find((item) => item.id === memberId && item.projectId === projectId);
+    const child = member && database.agents.find((agent) => agent.id === member.childAgentId);
+    if (!parent || !member || !child) throw new HttpError(404, "Project member not found");
+    const branch = branchId ? database.branches.find((item) => item.id === branchId && item.agentId === child.id) : null;
+    if (branchId && !branch) throw new HttpError(404, "Branch not found");
+    const childBase = branch ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null : database.snapshots.filter((snapshot) => snapshot.agentId === child.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.id ?? null;
+    return this.mergeEngine.preview(await this.projectMergeSide(parent, project.mainWorkspacePath, parent.id, "main", childBase), await this.projectMergeSide(child, branch?.workspacePath ?? child.workspacePath, branch?.id ?? child.id, branch?.name ?? child.name, childBase, branch?.id ?? null));
+  }
+
+  async mergeChild(projectId: string, memberId: string, branchId: string | null, resolution: MergeResolution, requestId?: string, decidedBy?: string) {
+    const database = this.store.snapshot();
+    const project = this.getProjectOrThrow(projectId);
+    const parent = database.agents.find((agent) => agent.id === project.parentAgentId);
+    const member = database.projectMembers.find((item) => item.id === memberId && item.projectId === projectId);
+    const child = member && database.agents.find((agent) => agent.id === member.childAgentId);
+    const branch = branchId ? database.branches.find((item) => item.id === branchId && item.agentId === child?.id) : null;
+    if (!parent || !member || !child || (branchId && !branch)) throw new HttpError(404, "Project merge source not found");
+    if (requestId) {
+      const request = database.commitRequests.find((item) => item.id === requestId && item.projectId === projectId && item.memberId === memberId);
+      if (!request) throw new HttpError(404, "Commit request not found");
+      if (request.status !== "pending" && request.status !== "approved") {
+        throw new HttpError(409, "This commit request has already been merged or rejected.");
+      }
+    }
+    const childBase = branch ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null : database.snapshots.filter((snapshot) => snapshot.agentId === child.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.id ?? null;
+    const target = await this.projectMergeSide(parent, project.mainWorkspacePath, parent.id, "main", childBase);
+    const source = await this.projectMergeSide(child, branch?.workspacePath ?? child.workspacePath, branch?.id ?? child.id, branch?.name ?? child.name, childBase, branch?.id ?? null);
+    return this.mergeEngine.apply(target, source, resolution, async (manifest, conversation, provenance: MergeProvenance[]) => {
+      const snapshot = await this.history.createSnapshot(parent.id, project.id, project.mainWorkspacePath, manifest);
+      const mergedThreadId = target.session && source.session
+        ? await rebuildSessionFromTimeline(this.codexHome, target.session, source.session, conversation)
+        : null;
+      try {
+        await this.store.mutate((db) => {
+          db.snapshots.push(snapshot);
+          const row = db.projects.find((item) => item.id === projectId);
+          if (row) {
+            row.headSnapshotId = snapshot.id;
+            row.updatedAt = now();
+            db.messages = db.messages.filter((message) => !(message.agentId === parent.id && message.branchId === null));
+            for (const commit of conversation) {
+              db.messages.push({ id: randomUUID(), agentId: parent.id, runId: commit.runId, branchId: null, role: "user", content: commit.prompt, createdAt: commit.createdAt });
+              if (commit.response !== null) db.messages.push({ id: randomUUID(), agentId: parent.id, runId: commit.runId, branchId: null, role: "assistant", content: commit.response, createdAt: commit.createdAt });
+            }
+            if (provenance.length > 0) {
+              db.messages.push({
+                id: randomUUID(),
+                agentId: parent.id,
+                runId: "merge:" + randomUUID(),
+                branchId: null,
+                role: "assistant",
+                content: "Combined implementation recorded for this merge.",
+                createdAt: now(),
+                kind: "merge",
+                mergeProvenance: provenance,
+              });
+            }
+            const parentAgent = db.agents.find((item) => item.id === parent.id);
+            if (parentAgent) parentAgent.codexThreadId = mergedThreadId;
+          }
+          const request = requestId
+            ? db.commitRequests.find((item) => item.id === requestId && item.projectId === projectId && item.memberId === memberId)
+            : null;
+          if (request) {
+            request.status = "merged";
+            request.decidedBy = request.decidedBy ?? decidedBy ?? null;
+            request.decidedAt = request.decidedAt ?? now();
+          }
+        });
+      } catch (error) {
+        await rm(snapshot.directory, { recursive: true, force: true });
+        throw error;
+      }
+      return snapshot;
+    });
+  }
+
+  /** Owner decision on a pending commit request. Approval applies a clean merge. */
   async decideCommitRequest(
     requestId: string,
     decision: "approved" | "rejected",
     decidedBy: User,
   ): Promise<CommitRequest> {
-    return this.store.mutate((database) => {
-      const request = database.commitRequests.find((item) => item.id === requestId);
-      if (!request) throw new HttpError(404, "Commit request not found");
-      if (request.status !== "pending") {
-        throw new HttpError(409, "This commit request has already been decided.");
-      }
-      request.status = decision;
-      request.decidedBy = decidedBy.id;
-      request.decidedAt = now();
-      return structuredClone(request);
+    const request = this.getCommitRequest(requestId);
+    if (request.status !== "pending") {
+      throw new HttpError(409, "This commit request has already been decided.");
+    }
+    if (decision === "rejected") {
+      return this.store.mutate((database) => {
+        const row = database.commitRequests.find((item) => item.id === requestId);
+        if (!row || row.status !== "pending") throw new HttpError(409, "This commit request has already been decided.");
+        row.status = "rejected";
+        row.decidedBy = decidedBy.id;
+        row.decidedAt = now();
+        return structuredClone(row);
+      });
+    }
+
+    const preview = await this.previewChildMerge(request.projectId, request.memberId);
+    if (preview.workspaceConflicts.length > 0 || preview.contextConflicts.length > 0) {
+      throw new MergeConflictError(preview);
+    }
+    await this.mergeChild(request.projectId, request.memberId, null, { workspace: {}, context: {} }, requestId, decidedBy.id);
+    return this.getCommitRequest(requestId);
+  }
+
+  async resolveChildMerge(projectId: string, memberId: string, branchId: string | null) {
+    const preview = await this.previewChildMerge(projectId, memberId, branchId);
+    return this.mergeEngine.resolve(preview, {
+      workspace: Object.fromEntries(preview.workspaceConflicts.map((conflict) => [conflict.path, "ai"])),
+      context: Object.fromEntries(preview.contextConflicts.map((conflict) => [conflict.id, "ai"])),
     });
   }
 
