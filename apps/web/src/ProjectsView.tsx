@@ -108,6 +108,7 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
   const [mergePreview, setMergePreview] = useState<{ preview: MergePreview; memberId: string; branchId: string | null; requestId?: string } | null>(null);
   const [agentMergePreview, setAgentMergePreview] = useState<{ preview: MergePreview; agentId: string; branchId: string } | null>(null);
   const [mergeBusy, setMergeBusy] = useState(false);
+  const [mergeActivity, setMergeActivity] = useState("Preparing merge review…");
   // "Submit commit request" now runs the OWASP analysis first, then submits.
   const [commitPhase, setCommitPhase] = useState<null | "fixing" | "analyzing" | "submitting">(null);
 
@@ -540,20 +541,38 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
   const decideCommit = async (requestId: string, decision: "approved" | "rejected") => {
     if (!selectedId) return;
     setError(null);
+    if (decision === "approved") {
+      setMergeActivity("Applying approved commit to parent main…");
+      setMergeBusy(true);
+    }
     try {
       await api.projects.decideCommitRequest(requestId, decision);
       await refreshCommitRequests(selectedId);
     } catch (reason) {
-      if (decision === "approved" && reason instanceof ApiError && reason.preview) {
+      const preview = reason instanceof ApiError
+        ? reason.preview
+        : reason && typeof reason === "object" && "preview" in reason
+          ? (reason as { preview?: MergePreview }).preview
+          : undefined;
+      if (decision === "approved" && preview) {
         const request = commitRequests.find((item) => item.id === requestId);
-        if (request) setMergePreview({ preview: reason.preview, memberId: request.memberId, branchId: null, requestId });
+        if (request) setMergePreview({ preview, memberId: request.memberId, branchId: null, requestId });
+        // A conflict is an expected transition into merge review, not a
+        // terminal approval error.
+        setError(null);
+      } else {
+        fail(reason);
       }
-      fail(reason);
+    } finally {
+      if (decision === "approved") {
+        setMergeBusy(false);
+        setMergeActivity("Preparing merge review…");
+      }
     }
   };
 
   const openAgentMerge = async (agentId: string, branchId: string) => {
-    setMergeBusy(true); setError(null);
+    setMergeActivity("Preparing merge review…"); setMergeBusy(true); setError(null);
     try { setAgentMergePreview({ preview: await api.mergePreview(agentId, branchId), agentId, branchId }); }
     catch (reason) { fail(reason); }
     finally { if (mounted.current) setMergeBusy(false); }
@@ -569,7 +588,7 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
 
   const openChildMerge = async (memberId: string, branchId: string | null = null, requestId?: string) => {
     if (!selectedId) return;
-    setMergeBusy(true); setError(null);
+    setMergeActivity("Preparing merge review…"); setMergeBusy(true); setError(null);
     try { setMergePreview({ preview: await api.projects.mergePreview(selectedId, memberId, branchId), memberId, branchId, requestId }); }
     catch (reason) { fail(reason); }
     finally { if (mounted.current) setMergeBusy(false); }
@@ -1371,7 +1390,7 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
         </div>
       )}
 
-      {mergeBusy && !mergePreview && !agentMergePreview && <div className="modal-backdrop merge-loading-backdrop"><section className="merge-loading-card" role="status" aria-live="polite"><span className="spinner" /><div><strong>Preparing merge review…</strong><p>Comparing outcomes, workspace files, and context prompts.</p></div></section></div>}
+      {mergeBusy && !mergePreview && !agentMergePreview && <div className="modal-backdrop merge-loading-backdrop"><section className="merge-loading-card" role="status" aria-live="polite"><span className="spinner" /><div><strong>{mergeActivity}</strong><p>Comparing outcomes, workspace files, and context prompts.</p></div></section></div>}
       {mergePreview && <MergeReview preview={mergePreview.preview} busy={mergeBusy} onCancel={() => setMergePreview(null)} onFixWithAi={() => { if (!selectedId) return Promise.reject(new Error("Project not selected")); return api.projects.mergeAi(selectedId, mergePreview.memberId, mergePreview.branchId); }} onMerge={(resolution) => void applyChildMerge(resolution)} />}
       {agentMergePreview && <MergeReview preview={agentMergePreview.preview} busy={mergeBusy} onCancel={() => setAgentMergePreview(null)} onFixWithAi={() => api.mergeAi(agentMergePreview.agentId, agentMergePreview.branchId)} onMerge={(resolution) => void applyAgentMerge(resolution)} />}
       {transferTo && detail && (
