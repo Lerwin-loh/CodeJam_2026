@@ -1,0 +1,51 @@
+flowchart LR
+  subgraph System[" "]
+    User["Human User"]
+    UI["React Web UI"]
+    API["Fastify API"]
+    Middleware["Team-Designed<br/>Middleware"]
+
+    Agent["AgentService"]
+    Project["ProjectService"]
+    Merge["MergeEngine"]
+    History["WorkspaceHistory"]
+    Store["JSON Metadata Store"]
+    Workspace["Agent Workspaces"]
+    Session["Codex Thread State"]
+    Runner{"AgentRunner<br/>Interface"}
+    Container["Disposable Runtime<br/>Container"]
+    Process["Codex CLI Process"]
+    Security["OWASP Security Gate"]
+    Ark["Volcengine Ark<br/>Responses API"]
+  end
+
+  User --> UI --> API
+  API -->|runs & chats| Agent
+  API -->|projects & requests| Project
+  Agent -->|metadata| Store
+  Agent -->|workspace| Workspace
+  Agent -->|traces & checkpoints| History
+  Agent --> Runner
+  Project --> Store
+  Project -->|parent / child| Workspace
+  Project --> Security
+  Project -->|merge review| Merge
+  Merge -->|diffs & rollback| History
+  Merge -->|provenance| Store
+  Merge -->|reconstruct context| Session
+  History --> Workspace
+  Session --> Store
+  Runner -->|"Local POC"| Container
+  Runner -->|"Development / ECS"| Process
+  Container --> Ark
+  Process --> Ark
+  Security -->|"bounded analysis"| Ark
+  Middleware -. "integrate" .-> API
+  Middleware -. "integrate" .-> Agent
+  Middleware -. "integrate" .-> Project
+  Middleware -. "integrate" .-> Runner
+
+  classDef standard fill:#edf2fa,stroke:#171717,color:#202020,stroke-width:2px;
+  classDef runner fill:#fff0c8,stroke:#171717,color:#202020,stroke-width:2px;
+  class User,UI,API,Middleware,Agent,Project,Merge,History,Store,Workspace,Session,Container,Process,Security standard;
+  class Runner runner;

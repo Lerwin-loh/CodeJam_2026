@@ -14,7 +14,7 @@ npm run check
 The command runs these stages in order:
 
 ```text
-TypeScript checks -> all server tests -> web and server production builds
+TypeScript checks -> Web/API production builds -> all server tests
 ```
 
 Run only the automated tests:
@@ -30,7 +30,7 @@ npm test -- --run src/app.test.ts
 ```
 
 Vitest automatically discovers every `*.test.ts` file under
-`apps/server/src`. The current suite contains **62 tests in 8 files**.
+`apps/server/src`. The current suite contains **90 tests in 9 files**.
 
 ## Classification
 

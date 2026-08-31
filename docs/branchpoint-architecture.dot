@@ -1,0 +1,60 @@
+digraph BranchPointArchitecture {
+  graph [rankdir=LR, bgcolor="white", pad="0.18", nodesep="0.55", ranksep="0.75", splines=curved, outputorder=edgesfirst, fontname="Arial"];
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=14, margin="0.20,0.13", color="#171717", penwidth=2.0, fillcolor="#edf2fa", fontcolor="#202020"];
+  edge [fontname="Arial", fontsize=11, color="#111111", penwidth=1.8, arrowsize=0.72];
+
+  subgraph cluster_system {
+    label="";
+    color="#86a8de";
+    penwidth=1.7;
+    style="solid";
+    margin=18;
+
+    user [label="Human User"];
+    ui [label="React Web UI"];
+    api [label="Fastify API"];
+    middleware [label="Team-Designed\nMiddleware"];
+
+    agent [label="AgentService"];
+    project [label="ProjectService"];
+    merge [label="MergeEngine"];
+    history [label="WorkspaceHistory"];
+
+    store [label="JSON Metadata Store"];
+    workspace [label="Agent Workspaces"];
+    session [label="Codex Thread State"];
+
+    runner [label="AgentRunner\nInterface", shape=diamond, fillcolor="#fff0c8"];
+    container [label="Disposable Runtime\nContainer"];
+    process [label="Codex CLI Process"];
+    security [label="OWASP Security Gate"];
+    ark [label="Volcengine Ark\nResponses API"];
+  }
+
+  user -> ui;
+  ui -> api;
+  api -> agent [label="runs & chats"];
+  api -> project [label="projects & requests"];
+  agent -> store [label="metadata"];
+  agent -> workspace [label="workspace"];
+  agent -> history [label="traces & checkpoints"];
+  agent -> runner;
+  project -> store;
+  project -> workspace [label="parent / child"];
+  project -> security;
+  project -> merge [label="merge review"];
+  merge -> history [label="diffs & rollback"];
+  merge -> store [label="provenance"];
+  merge -> session [label="reconstruct context"];
+  history -> workspace;
+  session -> store;
+  runner -> container [label="Local POC"];
+  runner -> process [label="Development / ECS"];
+  container -> ark;
+  process -> ark;
+  security -> ark [label="bounded analysis"];
+  middleware -> api [style=dotted, label="integrate"];
+  middleware -> agent [style=dotted, label="integrate"];
+  middleware -> project [style=dotted, label="integrate"];
+  middleware -> runner [style=dotted, label="integrate"];
+}

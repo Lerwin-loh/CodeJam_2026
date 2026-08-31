@@ -14,6 +14,24 @@ Volcengine ECS.
 > isolation. Do not use production data or credentials. See
 > [SECURITY.md](SECURITY.md).
 
+## Features
+
+- React and TypeScript Web UI
+- Agent create, edit, start, stop, delete, and multi-turn chat
+- Individual and collaboration-project modes with owner/member authorization
+- One-way standalone-Agent upgrade into a project parent, preserving files,
+  history, branches, and Codex threads
+- Parent and per-member child Agents with isolated project workspaces
+- BranchPoint traces, named and automatic checkpoints, diffs, restoration, and
+  branches
+- Advisory member-workspace security scans and owner-reviewed commit requests
+- Causal three-way merge review with code-linked prompt provenance and
+  reconstructed Codex context
+- Fastify control plane with asynchronous Run state
+- Persistent Agent workspaces and Codex sessions
+- Disposable Docker, Colima, or Podman container for each local turn
+- Docker and Terraform deployment paths for Volcengine ECS
+
 ## Screenshots
 
 ### Agent Playground
@@ -24,72 +42,39 @@ Volcengine ECS.
 
 ![Create Agent form with name, description, and workspace instructions](docs/assets/create-agent.jpg)
 
-## Features
+## Quick start
 
-- React and TypeScript Web UI
-- Agent create, edit, start, stop, delete, and multi-turn chat
-- Individual and collaboration-project modes with owner/member authorization
-- One-way standalone-Agent upgrade into a project parent, preserving files, history, branches, and Codex threads
-- Parent and per-member child Agents with isolated project workspaces
-- BranchPoint traces, named and automatic checkpoints, diffs, restoration, and branches
-- Advisory member-workspace security scans and owner-reviewed commit requests
-- Fastify control plane with asynchronous Run state
-- Persistent Agent workspaces and Codex sessions
-- Disposable Docker, Colima, or Podman container for each local turn
-- Docker and Terraform deployment paths for Volcengine ECS
-
-## Requirements
+### Requirements
 
 - Node.js 22+
 - npm 10+
 - Docker, Colima, or Podman
 - A Volcengine Ark API key and endpoint that supports the Responses API
 
-Codex CLI is included in the Runtime image and is not required on the host.
+Codex CLI is included in the Runtime image and is not required on the host for
+the local POC.
 
-## Local browser SOP
+### Run the local POC
 
-### 1. Check the local tools
-
-Install Node.js 22+ and one supported container engine, then verify them:
-
-```bash
-node --version
-npm --version
-docker --version        # Docker Desktop, Docker Engine, or Colima
-podman --version        # Use this instead when running Podman
-```
-
-Only one container engine is required. Codex CLI is already included in the
-Runtime image.
-
-### 2. Clone the repository
+Install dependencies and start the application:
 
 ```bash
-git clone <repository-url> volc-agent-launchpad
-cd volc-agent-launchpad
-```
-
-Skip this step when already working from the repository root.
-
-### 3. Start the POC
-
-```bash
+npm ci
 ARK_API_KEY=your-ark-api-key \
 ARK_MODEL=ep-your-endpoint-id \
 npm run poc
 ```
 
-The first run installs Node.js dependencies and builds the Runtime image. The
-script automatically selects Docker, Colima, or Podman.
+The script automatically selects Docker, Colima, or Podman and builds the
+Runtime image on the first run. Open <http://localhost:3000>.
 
-### 4. Open the browser
-
-Visit <http://localhost:3000>, or open it from the terminal:
+For disposable repeatable state, set a separate data root:
 
 ```bash
-open http://localhost:3000       # macOS
-xdg-open http://localhost:3000   # Linux desktop
+LOCAL_POC_DATA_ROOT=/tmp/branchpoint-demo \
+ARK_API_KEY=your-ark-api-key \
+ARK_MODEL=ep-your-endpoint-id \
+npm run poc
 ```
 
 In the Web UI:
@@ -106,10 +91,10 @@ In the Web UI:
 The Agent can write files, run commands, and continue the same Codex session in
 later messages.
 
-### 5. Stop and resume
+### Stop and resume
 
-Press `Ctrl+C` in the startup terminal. The script removes temporary Runtime
-containers but keeps Agent workspaces and conversations.
+Press `Ctrl+C` in the startup terminal. Temporary Runtime containers are
+removed, while Agent workspaces and conversations are kept.
 
 - macOS state: `~/.volc-agent-launchpad/`
 - Linux state: `.local/`
@@ -117,7 +102,7 @@ containers but keeps Agent workspaces and conversations.
 
 Run the same `npm run poc` command to continue later.
 
-### Select a specific container engine
+### Select a container engine
 
 Force Podman when multiple engines are installed:
 
@@ -128,10 +113,40 @@ ARK_MODEL=ep-your-endpoint-id \
 npm run poc
 ```
 
-Colima uses `CONTAINER_ENGINE=docker` because it exposes the Docker CLI.
-
-For a clean Linux host, follow the
+Colima uses `CONTAINER_ENGINE=docker` because it exposes the Docker CLI. For a
+clean Linux host, follow the
 [rootless Podman setup](docs/LOCAL_POC.md#rootless-podman-on-linux).
+
+## Development
+
+Host-process development is available with:
+
+```bash
+npm install
+cp .env.example .env
+npm install --global @openai/codex@0.111.0
+```
+
+The development scripts do not load `.env` automatically. Export its values in
+the current shell before starting the host-process server:
+
+```bash
+set -a
+. ./.env
+set +a
+npm run poc
+```
+
+- Web UI: <http://localhost:5173>
+- API: <http://localhost:3000>
+
+Use local paths in `.env` when running outside Docker:
+
+```dotenv
+APP_DATA_DIR=.data
+AGENT_WORKSPACE_ROOT=workspaces
+CODEX_HOME=codex-home
+```
 
 ## Docker Compose
 
@@ -149,37 +164,146 @@ ARK_MODEL=ep-your-endpoint-id
 APP_AUTH_TOKEN=replace-with-at-least-24-random-characters
 ```
 
-Start the application:
+Start and stop the application without deleting Agent data:
 
 ```bash
 docker compose up --build
-```
-
-Open <http://localhost:3000>. Stop it without deleting Agent data:
-
-```bash
 docker compose down
 ```
 
-## Development
+Open <http://localhost:3000> after the services start.
+
+## Architecture and runtime flow
+
+![Whole BranchPoint architecture](docs/branchpoint-architecture.svg)
+
+The editable diagram source is
+[docs/branchpoint-architecture.mmd](docs/branchpoint-architecture.mmd).
+
+The first turn uses `codex exec`; later turns resume the stored Codex thread.
+The browser stores the current demo user's generated bearer token locally and
+sends it to the API. The API resolves that user, then `AgentService` and
+`ProjectService` enforce ownership and project-role decisions. BranchPoint
+records observable Runtime events and filesystem-derived checkpoints without
+capturing hidden chain-of-thought.
+
+Deleting an Agent archives its workspace under `workspaces/.deleted/`.
+Project workspaces are stored under `workspaces/projects/<project-id>/`, with
+parent branches under `main/branches/` and member branches under the relevant
+member workspace's `branches/` directory.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component and extension
+boundaries.
+
+## BranchPoint middleware
+
+This repository contains the complete BranchPoint middleware implementation
+after the supplied Agent Launchpad starter kit. It makes Agent work observable,
+recoverable, branchable, reviewable, and safe to hand off across isolated
+workspaces.
+
+### Middleware problem and rationale
+
+The starter kit can run an Agent and persist its conversation, but
+collaboration needs stronger guarantees. A file diff does not identify the
+prompt and Run that caused it; failed turns need recoverable states; branches
+must not leak workspace or context; members must not publish directly to the
+owner's main; security approvals must become stale after a workspace change;
+and merged code must not create a misleading next-turn conversation.
+
+BranchPoint treats the filesystem as authoritative, captures immutable
+checkpoint state, enforces authorization in the backend, gates member handoff
+with a hash-bound OWASP review, performs a causal three-way merge, and records
+visible provenance for code that combines both sides.
+
+### Design summary
+
+The starter baseline remains: Agent CRUD and lifecycle, Playground chat,
+persistent messages/Runs/workspaces, Codex threads, host-process execution,
+disposable local Runtime execution, bounded output/time, cancellation, and
+resumable turns.
+
+BranchPoint adds:
+
+- Observable `codex exec --json` traces, Run state, filesystem changes,
+  checkpoints, completion, errors, and authenticated SSE streaming without
+  storing hidden chain-of-thought.
+- Deterministic workspace manifests using file paths, sizes, modes, and
+  SHA-256 hashes; created/modified/deleted diffs; automatic and named
+  immutable checkpoints; checkpoint details; and bounded file comparisons.
+- Staged, hash-verified restoration with recovery copies, platform-directory
+  preservation, and rollback on publication failure.
+- Independent checkpoint branches with isolated workspace state, lineage,
+  Runs, messages, and Codex sessions. Usable Codex rollout metadata is forked
+  at the checkpoint offset; otherwise a fresh thread is used safely.
+- Collaboration projects with an owner-controlled parent Agent, isolated
+  child Agent per active member, membership/invitation management, roles,
+  activity, archive/unarchive, transfer, deletion, and standalone-Agent
+  upgrade that preserves identity and history.
+- Server-side authorization and audit records. A member owns and may merge its
+  child branch into child main; only the project owner may merge child work
+  into the parent main or decide a commit request.
+- OWASP Top 10 security analysis over bounded changed files, zero-token static
+  findings, direct model classification without Agent tools/history, safe
+  full-file auto-fix, and workspace-hash invalidation.
+- Commit requests whose clean owner approval uses the shared merge engine and
+  atomically marks the request `merged`; conflicts return a preview and remain
+  `pending`; rejection changes only status.
+- Causal prompt conflicts based on actual conflicting file changes and prompt
+  attribution through Run checkpoints. Wording, shared anchors, unrelated
+  files, and code-free prompts do not create prompt conflicts.
+- Strict AI resolution: a side is legal only when it satisfies every
+  acceptance criterion; otherwise AI must return `COMBINED` with a complete
+  file body, merge instruction, and explanation.
+- Target/source choices preserve the corresponding prompts. Mixed or clean
+  two-sided results preserve attributed prompts and record merge provenance.
+  Merge-history events are shown in the UI but are excluded from native Codex
+  prompts.
+- Reconstructed merged threads use selected real prompts/responses and
+  explicitly inherit the merged workspace as their `cwd`.
+
+## Validation and demo
+
+### Automated checks
+
+Run the main verification gate:
 
 ```bash
-npm install
-cp .env.example .env
-npm install --global @openai/codex@0.111.0
-npm run dev
+npm run check
 ```
 
-- Web UI: <http://localhost:5173>
-- API: <http://localhost:3000>
+Optional deployment/configuration checks:
 
-Use local paths in `.env` when running outside Docker:
-
-```dotenv
-APP_DATA_DIR=.data
-AGENT_WORKSPACE_ROOT=workspaces
-CODEX_HOME=codex-home
+```bash
+terraform fmt -check -recursive deploy/volcengine
+docker compose config
 ```
+
+The automated gate runs server/Web TypeScript checks, Web/API production
+builds, and the server Vitest suite. It covers Agent lifecycle, traces,
+checkpoints, restore, branches, session forking, projects, authorization,
+audit, security analysis, commit requests, clean/conflicting approvals,
+rollback, causal attribution, strict AI criteria, provenance, and
+reconstructed-thread workspace inheritance. The tests use fixtures and mocks
+and do not require Ark credentials, network access, or a running Docker daemon.
+
+### Demo walkthrough
+
+1. Run an Agent task that changes a file and inspect its trace and automatic
+   checkpoint.
+2. Save a named checkpoint, make another change, compare states, and restore
+   the earlier checkpoint.
+3. Create a branch, run a different task, and show independent files, history,
+   and Codex context.
+4. Create a project and member. Verify child-owner branch-to-child-main merge
+   access and project-owner-only child-to-parent merge access.
+5. Run the member OWASP check, submit a commit request, and approve a clean
+   request as the owner.
+6. Prepare a same-file conflict, approve it, observe progress into merge
+   review, and resolve it by target/source or AI `COMBINED` output.
+7. Show the resulting workspace, provenance, application history, and
+   reconstructed thread path. Reject another request and verify no files
+   change.
 
 ## Deployment
 
@@ -217,35 +341,25 @@ cp deploy/volcengine/terraform.tfvars.example \
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
 
-## How it works
+## Limitations and secret handling
 
-![Current implementation architecture](docs/assets/current-architecture.svg)
+- Demo identity and generated bearer tokens are not production authentication.
+- `JsonStore` is single-process JSON persistence, not a distributed database.
+- Runtime containers are resource-limited but not hardened tenant isolation.
+- The OWASP gate is a focused pre-commit control, not a complete security
+  audit.
+- Codex rollout files are append-oriented, so merged context requires a new
+  thread rather than surgical edits to an old native transcript.
+- Reconstruction is best-effort when rollout files or offsets are unavailable.
+- The POC has no distributed locks, remote object storage, or hosted multi-node
+  collaboration.
 
-The editable diagram source is
-[docs/current-architecture.mmd](docs/current-architecture.mmd).
-
-The first turn uses `codex exec`; later turns resume the stored Codex thread.
-The browser stores the current demo user's generated bearer token locally and
-sends it to the API. The API resolves that user, then `AgentService` and
-`ProjectService` enforce ownership and project-role decisions. BranchPoint
-records observable Runtime events and filesystem-derived checkpoints without
-capturing hidden chain-of-thought.
-
-Deleting an Agent archives its workspace under `workspaces/.deleted/`.
-Project workspaces are stored under `workspaces/projects/<project-id>/`, with
-parent branches under `main/branches/` and member branches under the relevant
-member workspace's `branches/` directory.
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component and extension
-boundaries.
-
-## Validation
-
-```bash
-npm run check
-terraform fmt -check -recursive deploy/volcengine
-docker compose config
-```
+Never commit Ark API keys, bearer tokens, `.env` files, private keys, Docker
+credentials, or production data. Use [.env.example](.env.example) and
+placeholders such as `your-ark-api-key`. Keep credentials server-side or in an
+external secret manager; the browser never receives the Ark API key. Do not
+display credentials, browser storage, or authorization headers during a
+demonstration.
 
 ## Documentation
 
