@@ -766,7 +766,15 @@ export class AgentService {
     return branch;
   }
 
-  private async mergeSide(agent: Agent, workspacePath: string, id: string, label: string, baseSnapshotId: string | null, branchId: string | null = null) {
+  private async mergeSide(
+    agent: Agent,
+    workspacePath: string,
+    id: string,
+    label: string,
+    baseSnapshotId: string | null,
+    branchId: string | null = null,
+    mergeBaseContext: AgentContextSnapshot | null = null,
+  ) {
     const database = this.store.snapshot();
     const runs = database.runs.filter((run) => run.agentId === agent.id && run.branchId === branchId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     const messages = this.getMessages(agent.id, branchId);
@@ -776,7 +784,8 @@ export class AgentService {
       ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)
       : null;
     const context = checkpoint ? database.contexts.find((item) => item.id === checkpoint.contextId) : null;
-    const baseConversation = context ? conversationCommits(context.messages, database.runs) : [];
+    const baseContext = mergeBaseContext ?? context;
+    const baseConversation = baseContext ? conversationCommits(baseContext.messages, database.runs) : [];
     const currentThreadId = branch?.codexThreadId ?? agent.codexThreadId;
     const currentOffset = captureSessionOffset(this.config.codexHome, currentThreadId);
     const prompts = conversation.map((commit) => commit.prompt);
@@ -795,9 +804,12 @@ export class AgentService {
       baseConversation,
       session: {
         threadId: currentThreadId,
-        rolloutRelativePath: currentOffset?.rolloutRelativePath ?? context?.sessionRolloutPath ?? null,
-        baseLineOffset: context?.sessionLineOffset ?? null,
-        baseThreadId: context?.sourceThreadId ?? null,
+        rolloutRelativePath: currentOffset?.rolloutRelativePath ?? baseContext?.sessionRolloutPath ?? null,
+        // A standalone/project merge has no shared Codex checkpoint. In that
+        // case rebuild from the session metadata line and append the merged
+        // application timeline in order.
+        baseLineOffset: baseContext?.sessionLineOffset ?? 1,
+        baseThreadId: baseContext?.sourceThreadId ?? null,
       },
       baseSnapshot,
     };
@@ -808,7 +820,9 @@ export class AgentService {
     const branch = this.getBranch(branchId);
     if (branch.agentId !== agentId) throw new HttpError(403, "This branch belongs to another Agent");
     const baseId = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null;
-    return this.mergeEngine.preview(await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId), await this.mergeSide(agent, branch.workspacePath, branch.id, branch.name, baseId, branch.id));
+    const checkpoint = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId);
+    const baseContext = checkpoint ? this.store.snapshot().contexts.find((item) => item.id === checkpoint.contextId) ?? null : null;
+    return this.mergeEngine.preview(await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId, null, baseContext), await this.mergeSide(agent, branch.workspacePath, branch.id, branch.name, baseId, branch.id));
   }
 
   async mergeBranch(agentId: string, branchId: string, resolution: MergeResolution) {
@@ -816,7 +830,9 @@ export class AgentService {
     const branch = this.getBranch(branchId);
     if (branch.agentId !== agentId) throw new HttpError(403, "This branch belongs to another Agent");
     const baseId = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null;
-    const target = await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId);
+    const checkpoint = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId);
+    const baseContext = checkpoint ? this.store.snapshot().contexts.find((item) => item.id === checkpoint.contextId) ?? null : null;
+    const target = await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId, null, baseContext);
     const source = await this.mergeSide(agent, branch.workspacePath, branch.id, branch.name, baseId, branch.id);
     return this.mergeEngine.apply(target, source, resolution, async (manifest, conversation) => {
       const snapshot = await this.history.createSnapshot(agent.id, null, agent.workspacePath, manifest);

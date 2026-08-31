@@ -7,6 +7,8 @@ import { MergeConflictError, MergeEngine, conversationCommits, outcomeDetails, o
 import { JsonStore } from "./store.js";
 import type {
   Agent,
+  AgentContextSnapshot,
+  AgentRun,
   AuditDecision,
   ChangedFiles,
   CommitRequest,
@@ -1801,13 +1803,22 @@ export class ProjectService {
     return request;
   }
 
-  private async projectMergeSide(agent: Agent, workspacePath: string, id: string, label: string, baseSnapshotId: string | null, branchId: string | null = null) {
+  private async projectMergeSide(
+    agent: Agent,
+    workspacePath: string,
+    id: string,
+    label: string,
+    baseSnapshotId: string | null,
+    branchId: string | null = null,
+    mergeBaseContext: AgentContextSnapshot | null = null,
+  ) {
     const database = this.store.snapshot();
     const runs = database.runs.filter((run) => run.agentId === agent.id && run.branchId === branchId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     const branch = branchId ? database.branches.find((item) => item.id === branchId) : null;
     const checkpoint = branch?.parentCheckpointId ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId) : null;
     const context = checkpoint ? database.contexts.find((item) => item.id === checkpoint.contextId) ?? null : null;
-    const contextMessages = context?.messages ?? [];
+    const baseContext = mergeBaseContext ?? context;
+    const contextMessages = baseContext?.messages ?? [];
     const sideMessages = database.messages.filter((message) => message.agentId === agent.id && (branchId === null ? message.branchId === null : message.branchId === branchId));
     const conversation = conversationCommits([...contextMessages, ...sideMessages], database.runs);
     const baseConversation = conversationCommits(contextMessages, database.runs);
@@ -1817,7 +1828,7 @@ export class ProjectService {
     const baseSnapshot = baseSnapshotId ? database.snapshots.find((snapshot) => snapshot.id === baseSnapshotId) ?? null : null;
     const changed = baseSnapshot ? this.history.diff(baseSnapshot.manifest, await this.history.manifest(workspacePath)) : { created: [], modified: [], deleted: [] };
     const fileSummary = [changed.created.length ? "created " + changed.created.join(", ") : "", changed.modified.length ? "updated " + changed.modified.join(", ") : "", changed.deleted.length ? "deleted " + changed.deleted.join(", ") : ""].filter(Boolean).join("; ");
-    return { id, label, workspacePath, outcome: { id, label, summary: outcomeSummary(runs[0]?.output ?? "", fileSummary), details: outcomeDetails(runs[0]?.output ?? "", fileSummary), requestedFeatures: prompts }, prompts, conversation, baseConversation, session: { threadId: currentThreadId, rolloutRelativePath: currentOffset?.rolloutRelativePath ?? context?.sessionRolloutPath ?? null, baseLineOffset: context?.sessionLineOffset ?? null, baseThreadId: context?.sourceThreadId ?? null }, baseSnapshot };
+    return { id, label, workspacePath, outcome: { id, label, summary: outcomeSummary(runs[0]?.output ?? "", fileSummary), details: outcomeDetails(runs[0]?.output ?? "", fileSummary), requestedFeatures: prompts }, prompts, conversation, baseConversation, session: { threadId: currentThreadId, rolloutRelativePath: currentOffset?.rolloutRelativePath ?? baseContext?.sessionRolloutPath ?? null, baseLineOffset: baseContext?.sessionLineOffset ?? 1, baseThreadId: baseContext?.sourceThreadId ?? null }, baseSnapshot };
   }
 
   async previewChildMerge(projectId: string, memberId: string, branchId: string | null = null) {
