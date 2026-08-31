@@ -18,6 +18,7 @@ There are two merge scopes:
 | Operation | Authorized users |
 | --- | --- |
 | Child branch → that child agent's own main | The child-agent owner or project owner |
+| Parent-agent branch → the parent agent's main | The project owner |
 | Child agent → project parent agent's main | Project owner only |
 | Preview, AI resolution, or manual application of a project-level merge | Project owner only |
 

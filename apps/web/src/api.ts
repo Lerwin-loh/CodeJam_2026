@@ -27,6 +27,9 @@ export class ApiError extends Error {
     message: string,
     public readonly status: number,
     public readonly preview?: MergePreview,
+    public readonly requestId?: string,
+    public readonly memberId?: string,
+    public readonly branchId?: string | null,
   ) {
     super(message);
   }
@@ -76,13 +79,23 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     error?: string;
     message?: string;
     preview?: MergePreview;
+    requestId?: string;
+    memberId?: string;
+    branchId?: string | null;
   };
   if (!response.ok) {
     // Our handler puts the real text in `error`; Fastify's default puts a bare
     // status phrase in `error` and the real text in `message`.
     const detail =
       typeof data.message === "string" && data.message ? data.message : data.error;
-    throw new ApiError(detail ?? "Request failed", response.status, data.preview);
+    throw new ApiError(
+      detail ?? "Request failed",
+      response.status,
+      data.preview,
+      data.requestId,
+      data.memberId,
+      data.branchId,
+    );
   }
   return data;
 }

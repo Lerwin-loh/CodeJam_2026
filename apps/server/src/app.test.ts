@@ -5,9 +5,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
+import { MergeConflictError } from "./merge-engine.js";
 import { ProjectService } from "./project-service.js";
 import { JsonStore } from "./store.js";
-import type { AgentRunner } from "./types.js";
+import type { AgentRunner, MergePreview } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 import { WorkspaceHistory } from "./workspace-history.js";
 
@@ -83,6 +84,49 @@ describe("HTTP boundary", () => {
       payload: JSON.stringify({ name: "x".repeat(1_100_000) }),
     });
     expect(oversized.statusCode).toBe(413);
+    await app.close();
+  });
+
+  it("returns the merge preview and request identity for a conflicting approval", async () => {
+    const projectId = "22222222-2222-4222-8222-222222222222";
+    const memberId = "33333333-3333-4333-8333-333333333333";
+    const requestId = "44444444-4444-4444-8444-444444444444";
+    const preview: MergePreview = {
+      target: { id: "target", label: "main", summary: "target", details: [], requestedFeatures: [] },
+      source: { id: "source", label: "branch", summary: "source", details: [], requestedFeatures: [] },
+      targetPrompts: [],
+      sourcePrompts: [],
+      baseConversation: [],
+      targetConversation: [],
+      sourceConversation: [],
+      acceptanceCriteria: [],
+      changedFiles: { created: [], modified: [], deleted: [] },
+      workspaceConflicts: [{ path: "src/app.ts", targetContent: "target", sourceContent: "source", baseContent: "base" }],
+      contextConflicts: [],
+      combinedFiles: [],
+    };
+    const conflictProjects = {
+      listProjects: () => [],
+      listPendingInvitations: () => [],
+      getCommitRequest: () => ({ projectId, memberId }),
+      assertProjectAccess: async () => ({ role: "owner", member: null }),
+      decideCommitRequest: async () => { throw new MergeConflictError(preview); },
+    } as unknown as ProjectService;
+    const app = await createApp(loadConfig({ NODE_ENV: "test" }), service, conflictProjects);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/commit-requests/" + requestId + "/decide",
+      headers: { authorization: "Bearer valid-user-token", "content-type": "application/json" },
+      payload: JSON.stringify({ decision: "approved" }),
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      error: "Resolve every merge conflict before applying the merge.",
+      preview,
+      requestId,
+      memberId,
+      branchId: null,
+    });
     await app.close();
   });
 

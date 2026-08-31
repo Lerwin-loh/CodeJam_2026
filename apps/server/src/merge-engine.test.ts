@@ -96,7 +96,7 @@ describe("MergeEngine", () => {
     await writeFile(path.join(f.target, "verify.ts"), "sendVerification(email);\n");
     await writeFile(path.join(f.source, "login.html"), "<form id=login><input name=username><input name=password></form>\n");
     const ai: MergeAiResolver = {
-      chooseWorkspace: async () => "target",
+      chooseWorkspace: async () => ({ choice: "target", explanation: "The target satisfies every criterion.", satisfiesAllCriteria: true }),
     };
     const engine = new MergeEngine(f.history, ai);
     const target = { ...side("target", f.target, f.baseSnapshot, "create an email login and use email for verification", ["login.html", "verify.ts"]), prompts: ["create an email login and use email for verification"] };
@@ -295,6 +295,24 @@ describe("MergeEngine", () => {
         mergePrompt: "Combine both implementations.",
         explanation: "The output was incomplete.",
       }),
+    });
+    const target = side("target", f.target, f.baseSnapshot, "implement target behavior");
+    const source = side("source", f.source, f.baseSnapshot, "implement source behavior");
+    const preview = await engine.preview(target, source);
+
+    await expect(engine.apply(target, source, {
+      workspace: { "shared.txt": "ai" },
+      context: { [preview.contextConflicts[0]!.id]: "ai" },
+    }, async () => null)).rejects.toBeInstanceOf(MergeConflictError);
+    expect(await readFile(path.join(f.target, "shared.txt"), "utf8")).toBe("target\n");
+  });
+
+  it("rejects an unverified AI side choice instead of silently selecting a branch", async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.target, "shared.txt"), "target\n");
+    await writeFile(path.join(f.source, "shared.txt"), "source\n");
+    const engine = new MergeEngine(f.history, {
+      chooseWorkspace: async () => ({ choice: "target", explanation: "Target looks better." }),
     });
     const target = side("target", f.target, f.baseSnapshot, "implement target behavior");
     const source = side("source", f.source, f.baseSnapshot, "implement source behavior");

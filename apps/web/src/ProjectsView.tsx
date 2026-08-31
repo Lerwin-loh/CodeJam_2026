@@ -556,10 +556,13 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
           : undefined;
       if (decision === "approved" && preview) {
         const request = commitRequests.find((item) => item.id === requestId);
-        if (request) setMergePreview({ preview, memberId: request.memberId, branchId: null, requestId });
+        const memberId = reason instanceof ApiError ? reason.memberId : request?.memberId;
+        const branchId = reason instanceof ApiError ? reason.branchId ?? null : null;
+        if (memberId) setMergePreview({ preview, memberId, branchId, requestId });
+        else fail(new Error("The merge preview did not identify the child agent."));
         // A conflict is an expected transition into merge review, not a
         // terminal approval error.
-        setError(null);
+        if (memberId) setError(null);
       } else {
         fail(reason);
       }
@@ -1002,10 +1005,10 @@ export default function ProjectsView({ currentUser, initialProjectId, onSignOut,
 
                       {isOwner && cr.status === "pending" && !isArchived && (
                         <div className="commit-actions">
-                          <button className="button button-primary" onClick={() => void decideCommit(cr.id, "approved")}>
+                          <button className="button button-primary" disabled={mergeBusy} onClick={() => void decideCommit(cr.id, "approved")}>
                             Approve
                           </button>
-                          <button className="button button-ghost" onClick={() => void decideCommit(cr.id, "rejected")}>
+                          <button className="button button-ghost" disabled={mergeBusy} onClick={() => void decideCommit(cr.id, "rejected")}>
                             Reject
                           </button>
                         </div>

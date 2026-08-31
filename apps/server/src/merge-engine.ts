@@ -25,7 +25,7 @@ import { WorkspaceHistory } from "./workspace-history.js";
 const execFileAsync = promisify(execFile);
 
 export interface MergeAiResolver {
-  chooseWorkspace?(input: { preview: MergePreview; path: string; targetContent: string | null; sourceContent: string | null; baseContent: string | null }): Promise<MergeWorkspaceDecision | "target" | "source">;
+  chooseWorkspace?(input: { preview: MergePreview; path: string; targetContent: string | null; sourceContent: string | null; baseContent: string | null }): Promise<MergeWorkspaceDecision>;
   summarizeOutcome?(input: { outcome: MergeSide["outcome"] }): Promise<string>;
 }
 
@@ -238,13 +238,16 @@ export class MergeEngine {
     }
     for (const conflict of preview.workspaceConflicts) {
       if (resolution.workspace[conflict.path] === "ai") {
-        const aiChoice = await this.aiResolver?.chooseWorkspace?.({ preview, path: conflict.path, targetContent: conflict.targetContent, sourceContent: conflict.sourceContent, baseContent: conflict.baseContent }) ?? "target";
+        const aiChoice = await this.aiResolver?.chooseWorkspace?.({ preview, path: conflict.path, targetContent: conflict.targetContent, sourceContent: conflict.sourceContent, baseContent: conflict.baseContent }) ?? invalidAiDecision();
         const decision = normalizeWorkspaceDecision(aiChoice);
         if (decision.choice === "combined" && conflict.path.startsWith("semantic:")) {
           workspace[conflict.path] = "target";
           aiDecisions["workspace:" + conflict.path] = "AI selected the target implementation for the grouped semantic conflict.";
         } else {
           if (decision.choice === "combined") validateCombinedDecision(decision, preview);
+          if ((decision.choice === "target" || decision.choice === "source") && decision.satisfiesAllCriteria !== true) {
+            throw new MergeConflictError(preview);
+          }
           workspace[conflict.path] = decision.choice;
           if (decision.choice === "combined") {
             combined[conflict.path] = decision;
@@ -270,9 +273,7 @@ export class MergeEngine {
         ? [...choices][0] as "target" | "source"
         : "combined";
     }
-    const provenance: MergeProvenance[] = preview.combinedFiles
-      .filter((item) => item.targetPrompts.length > 0 && item.sourcePrompts.length > 0)
-      .map((item) => ({
+    const provenance: MergeProvenance[] = preview.combinedFiles.map((item) => ({
         id: "merge:auto:" + item.path,
         paths: [item.path],
         targetPrompts: item.targetPrompts,
@@ -434,6 +435,15 @@ function summaryBullets(value: string): string[] {
     .filter(Boolean)
     .slice(0, 5);
 }
+function invalidAiDecision(): MergeWorkspaceDecision {
+  return {
+    choice: "combined",
+    content: "",
+    mergePrompt: "",
+    explanation: "AI did not verify that one implementation satisfies every acceptance criterion.",
+  };
+}
+
 function parseAiDecision(output: string): MergeWorkspaceDecision {
   const json = output.match(/\{[\s\S]*\}/)?.[0];
   if (json) {
@@ -461,10 +471,9 @@ function parseAiDecision(output: string): MergeWorkspaceDecision {
   if (choice === "combined") {
     return { choice, content: "", mergePrompt: "", explanation: "AI requested a combined file but did not return a valid complete file body." };
   }
-  return { choice, explanation: `AI kept the ${choice} implementation based on the combined merge criteria.` };
+  return invalidAiDecision();
 }
-function normalizeWorkspaceDecision(decision: MergeWorkspaceDecision | "target" | "source"): MergeWorkspaceDecision {
-  if (typeof decision === "string") return { choice: decision, explanation: `AI kept the ${decision} implementation based on the combined merge criteria.` };
+function normalizeWorkspaceDecision(decision: MergeWorkspaceDecision): MergeWorkspaceDecision {
   return decision;
 }
 

@@ -8,7 +8,7 @@ import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import { MergeConflictError } from "./merge-engine.js";
 import type { ProjectService } from "./project-service.js";
-import type { User } from "./types.js";
+import type { MergePreview, User } from "./types.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -93,6 +93,24 @@ const projectMergeBody = z.object({ memberId: z.string().uuid(), branchId: z.str
 const commitRequestParams = z.object({ id: z.string().uuid() });
 
 const publicPaths = new Set(["/api/health", "/api/auth"]);
+
+type MergeConflictLike = { message: string; preview: MergePreview };
+
+function mergeConflictFrom(error: unknown): MergeConflictLike | null {
+  if (error instanceof MergeConflictError) return error;
+  if (
+    error &&
+    typeof error === "object" &&
+    "message" in error &&
+    typeof error.message === "string" &&
+    "preview" in error &&
+    error.preview &&
+    typeof error.preview === "object"
+  ) {
+    return error as MergeConflictLike;
+  }
+  return null;
+}
 
 export async function createApp(
   config: AppConfig,
@@ -690,7 +708,7 @@ export async function createApp(
     };
   });
 
-  app.post("/api/commit-requests/:id/decide", async (request) => {
+  app.post("/api/commit-requests/:id/decide", async (request, reply) => {
     const { id } = commitRequestParams.parse(request.params);
     const existing = projects.getCommitRequest(id);
     await projects.assertProjectAccess(
@@ -699,8 +717,25 @@ export async function createApp(
       "commit.request.decide",
     );
     const body = decideCommitBody.parse(request.body);
-    const updated = await projects.decideCommitRequest(id, body.decision, request.user);
-    return { request: updated };
+    try {
+      const updated = await projects.decideCommitRequest(id, body.decision, request.user);
+      return { request: updated };
+    } catch (error) {
+      // Keep the conflict preview attached to this response even if an
+      // adapter/framework wraps the domain error before the global handler
+      // sees it. The owner must receive the review data to resolve the merge.
+      const conflict = mergeConflictFrom(error);
+      if (conflict) {
+        return reply.code(409).send({
+          error: conflict.message,
+          preview: conflict.preview,
+          requestId: id,
+          memberId: existing.memberId,
+          branchId: null,
+        });
+      }
+      throw error;
+    }
   });
 
   if (config.nodeEnv === "production") {
@@ -719,13 +754,14 @@ export async function createApp(
 
   app.setErrorHandler((error, request, reply) => {
     const appError = error instanceof Error ? error : new Error(String(error));
+    const mergeConflict = mergeConflictFrom(error);
     const validationError = error instanceof z.ZodError;
     const frameworkStatus =
       typeof (error as { statusCode?: unknown }).statusCode === "number"
         ? (error as { statusCode: number }).statusCode
         : null;
     const statusCode =
-      error instanceof MergeConflictError
+      mergeConflict
         ? 409
         : error instanceof HttpError
           ? error.statusCode
@@ -739,7 +775,7 @@ export async function createApp(
     }
     return reply.code(statusCode).send({
       error: appError.message,
-      ...(appError instanceof MergeConflictError ? { preview: appError.preview } : {}),
+      ...(mergeConflict ? { preview: mergeConflict.preview } : {}),
       ...(validationError ? { details: error.issues } : {}),
     });
   });
