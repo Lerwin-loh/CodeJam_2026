@@ -24,6 +24,10 @@ Volcengine ECS.
 - Parent and per-member child Agents with isolated project workspaces
 - BranchPoint traces, named and automatic checkpoints, diffs, restoration, and
   branches
+- Dynamic live website preview for HTML pages and built web apps, including
+  branch selection, refresh, and expanded preview mode
+- Downloadable project ZIPs with a generated README for running the exported
+  project locally
 - Advisory member-workspace security scans and owner-reviewed commit requests
 - Causal three-way merge review with code-linked prompt provenance and
   reconstructed Codex context
@@ -90,6 +94,53 @@ In the Web UI:
 
 The Agent can write files, run commands, and continue the same Codex session in
 later messages.
+
+## Workspace output
+
+The Workspace output appears after the selected Agent workspace contains a
+previewable web entry. It stays hidden when the workspace has no HTML page or
+built web app, so non-web tasks do not produce an empty preview panel.
+
+Preview discovery supports the following entry files, in priority order. These
+must be files, not directories:
+
+- `dist/index.html`
+- `build/index.html`
+- `index.html`
+- `public/index.html`
+
+An actual file named `index.html` is supported. A directory named
+`index.html` is ignored because it cannot be rendered as a web page.
+
+If none of those exists, the server searches the workspace for other `.html`
+files while excluding platform-managed directories such as `branches/`,
+`.git/`, and `node_modules/`. A built app is previewable when its build output
+contains an HTML entry file.
+
+When a preview is available:
+
+- Use the workspace selector to preview the Agent's main workspace or a
+  specific BranchPoint branch.
+- Use **Refresh** to reload the current entry file after workspace changes.
+- Use **Expand** to open the preview in a larger modal view.
+
+The preview is served through the authenticated API, and relative HTML assets
+are routed through the same selected workspace. The preview status is checked
+again when the Agent or selected branch changes.
+
+## Downloading a project
+
+Select **Download ZIP** in the Agent controls to export the Agent's main
+workspace. The archive contains the project source and configuration needed to
+run it locally, plus a generated `README.md` containing setup and start
+instructions.
+
+Dependencies, generated output, BranchPoint state, platform-managed
+`AGENTS.md`, credentials, and environment files are intentionally excluded.
+After extracting the archive, install the project's dependencies with
+`npm install` and use the command documented by its generated README and
+`package.json`. Branch changes should be merged into the Agent's main workspace
+before downloading if they need to be included in the export.
 
 ### Stop and resume
 
@@ -179,6 +230,9 @@ Open <http://localhost:3000> after the services start.
 
 The editable diagram source is
 [docs/branchpoint-architecture.mmd](docs/branchpoint-architecture.mmd).
+The `branchpoint-architecture.mmd` and `.svg` files are the canonical current
+architecture artifacts. Older `current-architecture` files are retained as
+historical artifacts and are not the diagrams referenced by this documentation.
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
 The browser stores the current demo user's generated bearer token locally and

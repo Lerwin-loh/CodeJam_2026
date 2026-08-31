@@ -13,6 +13,9 @@ The editable source is [branchpoint-architecture.mmd](branchpoint-architecture.m
 It shows the authenticated Web/API boundary, BranchPoint services, persistent
 state, project handoff, merge review and provenance, reconstructed Codex
 sessions, security analysis, and both local and ECS Runtime profiles.
+The `branchpoint-architecture.mmd` and `.svg` files are the canonical current
+architecture artifacts. Older `current-architecture` files are retained as
+historical artifacts and are not used by the current documentation.
 
 ## Responsibility boundaries
 
@@ -22,8 +25,9 @@ The UI selects the demo user, stores that user's generated bearer token in
 local storage, renders Individual and Collaboration modes, and calls the API.
 It presents Playground chat, run traces, checkpoints, comparisons, restoration,
 branches, project membership, security results, commit requests, merge review,
-provenance, and application history. UI restrictions are only for usability;
-the server rechecks every permission. The Ark API key is never returned to the
+provenance, application history, branch-aware live website previews, expanded
+previews, and project ZIP export. UI restrictions are only for usability; the
+server rechecks every permission. The Ark API key is never returned to the
 browser.
 
 ### Fastify API
@@ -34,7 +38,8 @@ Resource routes resolve the owning Agent or project before invoking service
 authorization. Protected operations include Agent lifecycle, chat, runs,
 traces, checkpoints, restoration, branches, project membership and lifecycle,
 security checks, commit requests, merge preview/resolution, and request
-decisions.
+decisions, workspace preview status, authenticated preview assets, and project
+export.
 
 ### AgentService
 
@@ -136,6 +141,29 @@ history.
 temporary JSON file before replacement. It stores users, Agents, projects,
 membership, Runs, messages, traces, checkpoints, contexts, security verdicts,
 commit requests, branches, and audit entries.
+
+### Workspace output and project export
+
+Workspace preview status is resolved server-side for the selected Agent main
+workspace or BranchPoint branch. The server prefers the `dist/index.html`,
+`build/index.html`, `index.html`, and `public/index.html` files, then
+searches for other HTML files while excluding platform-managed directories. An
+actual `index.html` file is valid; a directory named `index.html` is ignored
+because it cannot be rendered as a web page. The Web UI only
+renders Workspace output after an entry file is found; otherwise the output
+panel is omitted entirely.
+
+Preview requests remain authenticated and are scoped to the selected Agent and
+branch. HTML asset references are routed through the preview endpoint so
+relative CSS, JavaScript, and image paths continue to work inside the selected
+workspace. The UI provides branch selection, refresh, and an expanded preview
+dialog.
+
+Project export is a separate authenticated operation. It packages the Agent's
+main workspace source and configuration, excludes dependencies, generated
+output, platform state, credentials, and environment files, and adds a
+generated `README.md` with local setup guidance. It does not export the entire
+Agent, conversation history, BranchPoint metadata, or unmerged branch folders.
 
 ## Core state flows
 

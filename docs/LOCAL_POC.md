@@ -49,6 +49,9 @@ Codex requests `workspace-write`. If the Linux kernel lacks Landlock, startup
 warns and disables only the inner Codex sandbox. The outer container limits
 remain active, but this fallback is not tenant isolation.
 
+For product-level usage after the POC starts, see [Workspace output](../README.md#workspace-output)
+and [Downloading a project](../README.md#downloading-a-project) in the README.
+
 ## Rootless Podman on Linux
 
 This path requires no Docker or Compose. It supports Ubuntu 22.04/24.04, Debian

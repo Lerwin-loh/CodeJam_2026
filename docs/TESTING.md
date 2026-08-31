@@ -30,7 +30,7 @@ npm test -- --run src/app.test.ts
 ```
 
 Vitest automatically discovers every `*.test.ts` file under
-`apps/server/src`. The current suite contains **90 tests in 9 files**.
+`apps/server/src`. The current suite contains **93 tests in 9 files**.
 
 ## Classification
 
@@ -125,6 +125,17 @@ tests exercise the same domain services without rendering the React UI.
     merged branch records and folders.**
 44. **Completes a branch merge when an old branch folder is already missing.**
 
+<!-- The merge-engine entry is documented below with the system tests.
+
+#### Merge engine — `merge-engine.test.ts`
+
+63. **Verifies shared causal three-way merge behavior** — covers clean
+    non-overlapping merges, workspace and prompt conflicts, semantic identity
+    conflicts, target/source/combined decisions, strict AI criteria validation,
+    invalid combined-output rejection, merge provenance, and conversation
+    reconstruction without partial application.
+
+-->
 ### System tests
 
 System tests verify middleware internals and infrastructure adapters. They use
@@ -180,6 +191,14 @@ Docker, or network access.
     workspace mount, Codex-home mount, dropped capabilities, resource limits,
     user, network, and Runtime labels.
 62. **Resumes a thread inside the mounted Runtime workspace.**
+
+#### Merge engine - `merge-engine.test.ts`
+
+63. **Verifies shared causal three-way merge behavior** - covers clean
+    non-overlapping merges, workspace and prompt conflicts, semantic identity
+    conflicts, target/source/combined decisions, strict AI criteria validation,
+    invalid combined-output rejection, merge provenance, and conversation
+    reconstruction without partial application.
 
 ## How this meets automated-verification requirements
 

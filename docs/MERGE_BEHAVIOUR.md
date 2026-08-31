@@ -1,6 +1,6 @@
 # Merge, Conflict, and Thread Behavior
 
-This document describes the merge and conversation behavior implemented in the current `feat/merge-logic` branch.
+This document describes the merge and conversation behavior implemented
 
 ## Terminology
 
