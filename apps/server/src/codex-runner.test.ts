@@ -96,5 +96,37 @@ describe("Codex runner protocol", () => {
       metadata: { codexType: "item.completed", command: "npm test", exit_code: 0 },
     });
     expect((parsed.events[0]?.metadata.output as string).length).toBe(2_000);
+
+    parseCodexEventLine(
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "error",
+          message: "Connection interrupted; retrying.",
+        },
+      }),
+      parsed,
+    );
+    expect(parsed.events[1]).toMatchObject({
+      type: "error",
+      metadata: {
+        codexType: "item.completed",
+        itemType: "error",
+        message: "Connection interrupted; retrying.",
+      },
+    });
+
+    parseCodexEventLine(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "reasoning", text: "private model reasoning" },
+      }),
+      parsed,
+    );
+    expect(parsed.events[2]).toMatchObject({
+      type: "reasoning",
+      metadata: { codexType: "item.completed", itemType: "reasoning" },
+    });
+    expect(parsed.events[2]?.metadata).not.toHaveProperty("output");
   });
 });

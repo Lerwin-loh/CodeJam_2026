@@ -1,12 +1,27 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { Database } from "./types.js";
+
+interface AtomicFileOperations {
+  rename: typeof fs.rename;
+  copyFile: typeof fs.copyFile;
+  unlink: typeof fs.unlink;
+}
+
+const defaultAtomicFileOperations: AtomicFileOperations = {
+  rename: fs.rename,
+  copyFile: fs.copyFile,
+  unlink: fs.unlink,
+};
 
 const emptyDatabase = (): Database => ({
   version: 1,
   users: [],
   audit: [],
   agents: [],
+  projects: [],
+  projectMembers: [],
+  commitRequests: [],
   branches: [],
   messages: [],
   runs: [],
@@ -20,19 +35,40 @@ export class JsonStore {
   private data: Database = emptyDatabase();
   private queue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly filePath: string,
+    private readonly atomicFiles: AtomicFileOperations = defaultAtomicFileOperations,
+  ) {}
 
   async initialize(): Promise<void> {
-    await mkdir(path.dirname(this.filePath), { recursive: true });
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     try {
-      const raw = await readFile(this.filePath, "utf8");
+      const raw = await fs.readFile(this.filePath, "utf8");
       const parsed = JSON.parse(raw) as Database;
       if (parsed.version !== 1 || !Array.isArray(parsed.agents)) {
         throw new Error("Unsupported database format");
       }
       parsed.users ??= [];
       parsed.audit ??= [];
+      parsed.projects ??= [];
+      parsed.projectMembers ??= [];
+      parsed.commitRequests ??= [];
       parsed.traces ??= [];
+      for (const member of parsed.projectMembers) {
+        member.securityAnalysis ??= null;
+        member.status ??= "active";
+        member.childAgentId ??= "";
+        member.workspacePath ??= "";
+        delete (member as { lastSecurityCheck?: unknown }).lastSecurityCheck;
+      }
+      for (const request of parsed.commitRequests) {
+        request.securityAnalysis ??= null;
+        delete (request as { securityCheck?: unknown }).securityCheck;
+      }
+      for (const project of parsed.projects) {
+        project.archivedAt ??= null;
+        project.description ??= "";
+      }
       parsed.branches ??= [];
       parsed.snapshots ??= [];
       parsed.contexts ??= [];
@@ -44,6 +80,10 @@ export class JsonStore {
         run.checkpointId ??= null;
       }
       for (const message of parsed.messages) message.branchId ??= null;
+      for (const context of parsed.contexts) {
+        context.sessionRolloutPath ??= null;
+        context.sessionLineOffset ??= null;
+      }
       for (const checkpoint of parsed.checkpoints) {
         checkpoint.branchId ??= null;
         checkpoint.label ??= null;
@@ -51,6 +91,9 @@ export class JsonStore {
       for (const event of parsed.traces) event.branchId ??= null;
       for (const agent of parsed.agents) {
         agent.ownerId ??= "";
+        agent.projectId ??= null;
+        agent.kind ??= "standalone";
+        agent.memberId ??= null;
       }
       this.data = parsed;
     } catch (error) {
@@ -63,6 +106,20 @@ export class JsonStore {
 
   snapshot(): Database {
     return structuredClone(this.data);
+  }
+
+  private async persistAtomically(sourcePath: string, destinationPath: string): Promise<void> {
+    try {
+      await this.atomicFiles.rename(sourcePath, destinationPath);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") {
+        throw error;
+      }
+    }
+    await this.atomicFiles.copyFile(sourcePath, destinationPath);
+    await this.atomicFiles.unlink(sourcePath);
   }
 
   async mutate<T>(mutation: (database: Database) => T | Promise<T>): Promise<T> {
@@ -80,10 +137,10 @@ export class JsonStore {
 
   private async persist(data: Database = this.data): Promise<void> {
     const temporaryPath = this.filePath + ".tmp";
-    await writeFile(temporaryPath, JSON.stringify(data, null, 2) + "\n", {
+    await fs.writeFile(temporaryPath, JSON.stringify(data, null, 2) + "\n", {
       encoding: "utf8",
       mode: 0o600,
     });
-    await rename(temporaryPath, this.filePath);
+    await this.persistAtomically(temporaryPath, this.filePath);
   }
 }

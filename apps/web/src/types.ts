@@ -18,12 +18,17 @@ export interface AuditEntry {
   timestamp: string;
 }
 
+export type AgentKind = "standalone" | "parent" | "child";
+
 export interface Agent {
   id: string;
   name: string;
   description: string;
   instructions: string;
   ownerId: string;
+  projectId?: string | null;
+  kind?: AgentKind;
+  memberId?: string | null;
   status: AgentStatus;
   workspacePath: string;
   codexThreadId: string | null;
@@ -36,6 +41,139 @@ export interface WorkspacePreview {
   available: boolean;
   entryFile: string | null;
   workspaceHash: string | null;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  ownerId: string;
+  mainWorkspacePath: string;
+  parentAgentId: string;
+  headSnapshotId: string;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ProjectMemberStatus = "invited" | "active";
+
+export interface ProjectInvitation {
+  projectId: string;
+  projectName: string;
+  role: string;
+  invitedByName: string;
+  invitedAt: string;
+}
+
+export interface ActivityEntry {
+  id: string;
+  userName: string;
+  action: string;
+  decision: "allow" | "deny";
+  reason: string;
+  timestamp: string;
+}
+
+export type OwaspStatus = "pass" | "fail" | "na";
+
+export interface SecurityAnalysisPoint {
+  id: string;
+  name: string;
+  status: OwaspStatus;
+  detail: string;
+  file?: string;
+  evidence?: string;
+  remediation?: string;
+}
+
+export interface SecurityAnalysis {
+  ranAt: string;
+  runId: string;
+  workspaceHash: string;
+  passed: boolean;
+  points: SecurityAnalysisPoint[];
+  summary: string;
+  modifiedWorkspace: boolean;
+}
+
+/** Commit-gate state for the current member's branch. */
+export interface MemberSecurityView {
+  analysis: SecurityAnalysis | null;
+  currentWorkspaceHash: string;
+  canCommit: boolean;
+  reason: "ok" | "never-run" | "failed" | "incomplete" | "branch-changed";
+}
+
+export type CommitRequestStatus = "pending" | "approved" | "rejected" | "merged";
+
+export interface CommitRequest {
+  id: string;
+  projectId: string;
+  memberId: string;
+  memberName: string;
+  role: string;
+  childAgentId: string;
+  title: string;
+  note: string;
+  status: CommitRequestStatus;
+  changedFiles: ChangedFiles;
+  securityAnalysis: SecurityAnalysis | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  createdAt: string;
+}
+
+export interface ProjectMember {
+  id: string;
+  projectId: string;
+  userId: string;
+  status: ProjectMemberStatus;
+  role: string;
+  childAgentId: string;
+  workspacePath: string;
+  securityAnalysis: SecurityAnalysis | null;
+  invitedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Owner sees this shape for each member; a member sees only the RosterEntry subset. */
+export interface ProjectMemberView {
+  id: string;
+  userId: string;
+  name: string;
+  status: ProjectMemberStatus;
+  role: string;
+  childAgentId: string;
+  securityAnalysis: SecurityAnalysis | null;
+  invitedByName: string;
+  pendingCommits: number;
+  createdAt: string;
+}
+
+export interface RosterEntry {
+  userId: string;
+  name: string;
+  status: ProjectMemberStatus;
+  role: string;
+}
+
+export interface ParentAgentView {
+  agent: { id: string; name: string; description: string; status: AgentStatus; kind: AgentKind };
+  messages: Message[];
+  trace: TraceEvent[];
+  checkpoints: AgentCheckpoint[];
+  /** Only present on the member's own child-agent view (`/my-agent`). */
+  security?: MemberSecurityView;
+}
+
+export interface ProjectDetail {
+  project: Project;
+  role: "owner" | "member";
+  owner: { id: string; name: string };
+  myMembership: ProjectMember | null;
+  members: ProjectMemberView[] | RosterEntry[];
 }
 
 export interface AgentBranch {
@@ -51,6 +189,28 @@ export interface AgentBranch {
   updatedAt: string;
 }
 
+export interface MergeOutcome { id: string; label: string; summary: string; details: string[]; requestedFeatures: string[]; }
+export interface MergeWorkspaceConflict { path: string; targetContent: string | null; sourceContent: string | null; baseContent: string | null; targetPaths?: string[]; sourcePaths?: string[]; }
+export interface ConversationCommit { id: string; runId: string; branchId: string | null; prompt: string; response: string | null; createdAt: string; changedPaths?: string[]; }
+export interface MergeCombinedFile { path: string; targetPrompts: ConversationCommit[]; sourcePrompts: ConversationCommit[]; }
+export interface MergeContextConflict { id: string; target: ConversationCommit; source: ConversationCommit; targetCommits?: ConversationCommit[]; sourceCommits?: ConversationCommit[]; paths: string[]; targetSideId: string; sourceSideId: string; targetDeleted?: boolean; sourceDeleted?: boolean; }
+export interface MergeProvenance { id: string; paths: string[]; targetPrompts: ConversationCommit[]; sourcePrompts: ConversationCommit[]; mergePrompt: string; explanation: string; mode: "automatic" | "ai"; }
+export interface MergeCombinedDecision { content: string; mergePrompt: string; explanation: string; }
+export interface MergePreview {
+  target: MergeOutcome;
+  source: MergeOutcome;
+  targetPrompts: string[];
+  sourcePrompts: string[];
+  baseConversation: ConversationCommit[];
+  targetConversation: ConversationCommit[];
+  sourceConversation: ConversationCommit[];
+  acceptanceCriteria: string[];
+  changedFiles: ChangedFiles;
+  workspaceConflicts: MergeWorkspaceConflict[];
+  contextConflicts: MergeContextConflict[];
+  combinedFiles: MergeCombinedFile[];
+}
+
 export interface Message {
   id: string;
   agentId: string;
@@ -59,6 +219,8 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  kind?: "conversation" | "merge";
+  mergeProvenance?: MergeProvenance[];
 }
 
 export interface AgentRun {

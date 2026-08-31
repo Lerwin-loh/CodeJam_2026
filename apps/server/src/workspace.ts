@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { cp, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Agent } from "./types.js";
 
@@ -9,8 +9,52 @@ export class WorkspaceManager {
     return path.join(this.root, agentId);
   }
 
-  branchWorkspacePath(agentId: string, branchId: string): string {
-    return path.join(this.root, agentId, "branches", branchId);
+  branchWorkspacePath(agentWorkspacePath: string, branchId: string): string {
+    return path.join(agentWorkspacePath, "branches", branchId);
+  }
+
+  projectMainPath(projectId: string): string {
+    return path.join(this.root, "projects", projectId, "main");
+  }
+
+  projectPath(projectId: string): string {
+    return path.join(this.root, "projects", projectId);
+  }
+
+  projectMemberPath(projectId: string, memberId: string): string {
+    return path.join(this.root, "projects", projectId, "members", memberId);
+  }
+
+  /**
+   * Stage an existing standalone workspace as a project's canonical main tree.
+   * The source stays untouched until the caller has committed its metadata, so
+   * a failed upgrade never leaves the standalone Agent without a workspace.
+   */
+  async copyStandaloneToProject(sourcePath: string, projectId: string): Promise<string> {
+    const source = path.resolve(sourcePath);
+    const workspaceRoot = path.resolve(this.root) + path.sep;
+    if (!source.startsWith(workspaceRoot) || source === path.resolve(this.root)) {
+      throw new Error("Standalone workspace is outside the managed workspace root");
+    }
+    const target = this.projectMainPath(projectId);
+    await mkdir(path.dirname(target), { recursive: true });
+    try {
+      await cp(source, target, {
+        recursive: true,
+        force: false,
+        errorOnExist: true,
+        preserveTimestamps: true,
+      });
+      return target;
+    } catch (error) {
+      await rm(this.projectPath(projectId), { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  /** Remove only a not-yet-committed project copy after a failed upgrade. */
+  async discardProjectCopy(projectId: string): Promise<void> {
+    await rm(this.projectPath(projectId), { recursive: true, force: true });
   }
 
   async initialize(): Promise<void> {
@@ -40,6 +84,17 @@ export class WorkspaceManager {
   }
 
   async writeInstructions(agent: Agent): Promise<void> {
+    const projectRole =
+      agent.kind === "parent"
+        ? [
+            "## Project role",
+            "",
+            "- You are the parent Agent for this project.",
+            "- This workspace is the project's canonical main workspace.",
+            "- Preserve reviewed team changes and keep project-level work coherent.",
+            "",
+          ]
+        : [];
     const content = [
       "# Platform-managed Agent instructions",
       "",
@@ -51,6 +106,7 @@ export class WorkspaceManager {
       agent.instructions ||
         "Help the user complete coding tasks in this workspace. Explain material results concisely.",
       "",
+      ...projectRole,
       "## Workspace rules",
       "",
       "- Work only inside this workspace unless the user explicitly requests otherwise.",
@@ -75,5 +131,40 @@ export class WorkspaceManager {
     );
     await rename(agent.workspacePath, destination);
     return destination;
+  }
+
+  /** Move a branch workspace under `.deleted/` (used when a branch is merged away). */
+  async archiveBranch(branchId: string, workspacePath: string): Promise<string | null> {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const archiveRoot = path.join(this.root, ".deleted", "branches");
+    const destination = path.join(archiveRoot, branchId + "-" + timestamp);
+    await mkdir(archiveRoot, { recursive: true });
+    try {
+      await rename(workspacePath, destination);
+      return destination;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  /** Put an archived branch workspace back if its metadata transaction fails. */
+  async restoreArchivedBranch(archivedPath: string, workspacePath: string): Promise<void> {
+    await mkdir(path.dirname(workspacePath), { recursive: true });
+    await rename(archivedPath, workspacePath);
+  }
+
+  async archiveProject(projectId: string): Promise<string | null> {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const archiveRoot = path.join(this.root, ".deleted", "projects");
+    const destination = path.join(archiveRoot, projectId + "-" + timestamp);
+    await mkdir(archiveRoot, { recursive: true });
+    try {
+      await rename(this.projectPath(projectId), destination);
+      return destination;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
   }
 }

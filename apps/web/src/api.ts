@@ -1,9 +1,36 @@
-import type { Agent, AgentCheckpoint, AgentRun, AuditEntry, CheckpointDetails, CheckpointDiff, Message, RunDetails, SystemInfo, TraceEvent, User, WorkspacePreview } from "./types";
+import type {
+    Agent,
+    AgentCheckpoint,
+    AgentRun,
+    AuditEntry,
+    CheckpointDetails,
+    CheckpointDiff,
+    CommitRequest,
+    MemberSecurityView,
+    MergeCombinedDecision,
+    MergeProvenance,
+    MergePreview,
+    Message,
+    ParentAgentView,
+    Project,
+    ProjectDetail,
+    ProjectMemberView,
+    RosterEntry,
+    RunDetails,
+    SystemInfo,
+    TraceEvent,
+    User,
+    WorkspacePreview,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly preview?: MergePreview,
+    public readonly requestId?: string,
+    public readonly memberId?: string,
+    public readonly branchId?: string | null,
   ) {
     super(message);
   }
@@ -49,9 +76,27 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     ...options,
     headers,
   });
-  const data = (await response.json().catch(() => ({}))) as T & { error?: string };
+  const data = (await response.json().catch(() => ({}))) as T & {
+    error?: string;
+    message?: string;
+    preview?: MergePreview;
+    requestId?: string;
+    memberId?: string;
+    branchId?: string | null;
+  };
   if (!response.ok) {
-    throw new ApiError(data.error ?? "Request failed", response.status);
+    // Our handler puts the real text in `error`; Fastify's default puts a bare
+    // status phrase in `error` and the real text in `message`.
+    const detail =
+      typeof data.message === "string" && data.message ? data.message : data.error;
+    throw new ApiError(
+      detail ?? "Request failed",
+      response.status,
+      data.preview,
+      data.requestId,
+      data.memberId,
+      data.branchId,
+    );
   }
   return data;
 }
@@ -63,6 +108,15 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
   me: () => request<{ user: User }>("/api/me"),
+  deleteAccount: () =>
+    request<{
+      deletedUserId: string;
+      deletedProjects: number;
+      deletedMemberships: number;
+      deletedAgents: number;
+      archivedWorkspaces: number;
+      archivedSnapshots: number;
+    }>("/api/users/me", { method: "DELETE" }),
   audit: () => request<{ entries: AuditEntry[] }>("/api/audit"),
   system: () => request<SystemInfo>("/api/system"),
   previewStatus: (id: string, branchId: string | null = null) => request<{ preview: WorkspacePreview }>(branchUrl("/api/agents/" + id + "/preview-status", branchId)),
@@ -71,9 +125,7 @@ export const api = {
     return "/api/agents/" + id + "/preview/" + entryFile + "?" + query;
   },
   exportProject: async (id: string): Promise<Blob> => {
-    const response = await fetch("/api/agents/" + id + "/export", {
-      headers: authToken ? { Authorization: "Bearer " + authToken } : {},
-    });
+    const response = await fetch("/api/agents/" + id + "/export", { headers: authToken ? { Authorization: "Bearer " + authToken } : {} });
     if (!response.ok) {
       const data = (await response.json().catch(() => ({}))) as { error?: string };
       throw new ApiError(data.error ?? "Project download failed", response.status);
@@ -81,6 +133,7 @@ export const api = {
     return response.blob();
   },
   listAgents: () => request<{ agents: Agent[] }>("/api/agents"),
+  getAgent: (id: string) => request<{ agent: Agent }>("/api/agents/" + id),
   createAgent: (body: {
     name: string;
     description: string;
@@ -90,6 +143,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  upgradeAgentToProject: (id: string, projectName: string) =>
+    request<{ project: Project; parentAgent: Agent; archivedWorkspace: string | null }>(
+      "/api/agents/" + id + "/upgrade-to-project",
+      {
+        method: "POST",
+        body: JSON.stringify({ projectName }),
+      },
+    ),
   updateAgent: (
     id: string,
     body: { name: string; description: string; instructions: string },
@@ -142,10 +203,129 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ checkpointId, name }),
     }),
+  mergePreview: (agentId: string, branchId: string) => request<MergePreview>("/api/agents/" + agentId + "/merge-preview", { method: "POST", body: JSON.stringify({ branchId }) }),
+  merge: (agentId: string, branchId: string, resolution: { workspace: Record<string, "target" | "source" | "ai" | "combined">; context: Record<string, "target" | "source" | "ai" | "combined">; combined?: Record<string, MergeCombinedDecision> }) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[]; provenance: MergeProvenance[] }>("/api/agents/" + agentId + "/merge", { method: "POST", body: JSON.stringify({ branchId, resolution }) }),
+  mergeAi: (agentId: string, branchId: string) => request<{ context: Record<string, "target" | "source" | "combined">; workspace: Record<string, "target" | "source" | "combined">; combined: Record<string, MergeCombinedDecision>; aiDecisions: Record<string, string>; provenance: MergeProvenance[] }>("/api/agents/" + agentId + "/merge-ai", { method: "POST", body: JSON.stringify({ branchId }) }),
+  deleteBranch: (id: string, branchId: string) =>
+    request<{ branchId: string; archivedWorkspace: string | null }>(
+      "/api/agents/" + id + "/branches/" + branchId,
+      { method: "DELETE" },
+    ),
+  mergeBranches: (id: string, branchIds: string[]) =>
+    request<{ mergedBranchIds: string[]; changedFiles: string[] }>(
+      "/api/agents/" + id + "/branches/merge",
+      { method: "POST", body: JSON.stringify({ branchIds }) },
+    ),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
   runDetails: (id: string) => request<RunDetails>("/api/runs/" + id + "/details"),
+
+  projects: {
+    list: () =>
+      request<{ projects: Project[]; invitations: import("./types").ProjectInvitation[] }>(
+        "/api/projects",
+      ),
+    create: (name: string) =>
+      request<{ project: Project }>("/api/projects", {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      }),
+    get: (id: string) => request<ProjectDetail>("/api/projects/" + id),
+    update: (id: string, body: { name?: string; description?: string }) =>
+      request<{ project: Project }>("/api/projects/" + id, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    transfer: (id: string, toUserId: string) =>
+      request<{ project: Project }>("/api/projects/" + id + "/transfer", {
+        method: "POST",
+        body: JSON.stringify({ toUserId }),
+      }),
+    leave: (id: string) =>
+      request<{ ok: true }>("/api/projects/" + id + "/leave", { method: "POST" }),
+    acceptInvite: (id: string) =>
+      request<{ member: import("./types").ProjectMember }>(
+        "/api/projects/" + id + "/invitation/accept",
+        { method: "POST" },
+      ),
+    declineInvite: (id: string) =>
+      request<{ ok: true }>("/api/projects/" + id + "/invitation/decline", { method: "POST" }),
+    activity: (id: string) =>
+      request<{ activity: import("./types").ActivityEntry[] }>(
+        "/api/projects/" + id + "/activity",
+      ),
+    delete: (id: string) =>
+      request<{ archivedWorkspace: string | null; archivedSnapshots: number }>(
+        "/api/projects/" + id,
+        { method: "DELETE" },
+      ),
+    archive: (id: string) =>
+      request<{ project: Project }>("/api/projects/" + id + "/archive", { method: "POST" }),
+    unarchive: (id: string) =>
+      request<{ project: Project }>("/api/projects/" + id + "/unarchive", { method: "POST" }),
+    tree: (id: string) => request<{ files: string[] }>("/api/projects/" + id + "/tree"),
+    file: (id: string, path: string) =>
+      request<{ path: string; content: string }>(
+        "/api/projects/" + id + "/file?path=" + encodeURIComponent(path),
+      ),
+    members: (id: string) =>
+      request<{ members: ProjectMemberView[] | RosterEntry[] }>(
+        "/api/projects/" + id + "/members",
+      ),
+    addMember: (id: string, body: { userName: string; role: string }) =>
+      request<{ member: import("./types").ProjectMember }>("/api/projects/" + id + "/members", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    updateMember: (id: string, memberId: string, body: { role: string }) =>
+      request<{ member: import("./types").ProjectMember }>(
+        "/api/projects/" + id + "/members/" + memberId,
+        { method: "PATCH", body: JSON.stringify(body) },
+      ),
+    removeMember: (id: string, memberId: string) =>
+      request<{ ok: true }>("/api/projects/" + id + "/members/" + memberId, {
+        method: "DELETE",
+      }),
+    parentAgent: (id: string) =>
+      request<ParentAgentView>("/api/projects/" + id + "/parent-agent"),
+    myAgent: (id: string) =>
+      request<ParentAgentView>("/api/projects/" + id + "/my-agent"),
+    securityAnalysis: (id: string, memberId: string) =>
+      request<{ security: MemberSecurityView }>(
+        "/api/projects/" + id + "/members/" + memberId + "/security-analysis",
+        { method: "POST" },
+      ),
+    securityFix: (id: string, memberId: string, pointIds?: string[]) =>
+      request<{ security: MemberSecurityView }>(
+        "/api/projects/" + id + "/members/" + memberId + "/security-fix",
+        { method: "POST", body: JSON.stringify(pointIds ? { pointIds } : {}) },
+      ),
+    submitCommitRequest: (
+      id: string,
+      memberId: string,
+      body: { title?: string; note?: string },
+    ) =>
+      request<{ request: CommitRequest }>(
+        "/api/projects/" + id + "/members/" + memberId + "/commit-request",
+        { method: "POST", body: JSON.stringify(body) },
+      ),
+    commitRequests: (id: string) =>
+      request<{ requests: CommitRequest[] }>("/api/projects/" + id + "/commit-requests"),
+    decideCommitRequest: (requestId: string, decision: "approved" | "rejected") =>
+      request<{ request: CommitRequest }>("/api/commit-requests/" + requestId + "/decide", {
+        method: "POST",
+        body: JSON.stringify({ decision }),
+      }),
+    mergePreview: (id: string, memberId: string, branchId: string | null = null) => request<MergePreview>("/api/projects/" + id + "/merge-preview", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
+    merge: (id: string, memberId: string, branchId: string | null, resolution: { workspace: Record<string, "target" | "source" | "ai" | "combined">; context: Record<string, "target" | "source" | "ai" | "combined">; combined?: Record<string, MergeCombinedDecision> }, requestId?: string) => request<{ preview: MergePreview; conversation: import("./types").ConversationCommit[]; provenance: MergeProvenance[] }>("/api/projects/" + id + "/merge", { method: "POST", body: JSON.stringify({ memberId, branchId, requestId, resolution }) }),
+    mergeAi: (id: string, memberId: string, branchId: string | null) => request<{ context: Record<string, "target" | "source" | "combined">; workspace: Record<string, "target" | "source" | "combined">; combined: Record<string, MergeCombinedDecision>; aiDecisions: Record<string, string>; provenance: MergeProvenance[] }>("/api/projects/" + id + "/merge-ai", { method: "POST", body: JSON.stringify({ memberId, branchId }) }),
+  },
   restoreCheckpoint: (id: string) =>
-    request<{ checkpoint: AgentCheckpoint; workspacePath: string; workspaceHash: string }>("/api/checkpoints/" + id + "/restore", {
+    request<{
+      checkpoint: AgentCheckpoint;
+      workspacePath: string;
+      activeWorkspacePath: string;
+      workspaceHash: string;
+    }>("/api/checkpoints/" + id + "/restore", {
       method: "POST",
     }),
   streamRunTrace: async (id: string, onEvent: (event: TraceEvent) => void, signal?: AbortSignal): Promise<void> => {

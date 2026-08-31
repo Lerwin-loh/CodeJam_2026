@@ -68,10 +68,21 @@ export function parseCodexEventLine(line: string, parsed: ParsedEvents, onEvent?
       codexType: event.type,
       itemType: typeof item.type === "string" ? item.type : "unknown",
     };
-    for (const key of ["command", "name", "status", "exit_code"] as const) {
-      if (item[key] !== undefined) metadata[key] = item[key];
+    for (const key of ["command", "name", "status"] as const) {
+      const value = boundedText(item[key]);
+      if (value) metadata[key] = value;
     }
-    const output = boundedText(item.aggregated_output ?? item.text);
+    if (item.exit_code !== undefined) metadata.exit_code = item.exit_code;
+    const message = boundedText(
+      item.message ??
+        (item.error && typeof item.error === "object"
+          ? (item.error as Record<string, unknown>).message
+          : item.error),
+    );
+    if (message) metadata.message = message;
+    // Reasoning contents are not part of the observable trace. Record only
+    // the fact that a reasoning item occurred; descriptions stay structural.
+    const output = item.type === "reasoning" ? undefined : boundedText(item.aggregated_output ?? item.text);
     if (output) metadata.output = output;
     const runnerEvent = { type: String(item.type ?? "item"), metadata };
     (parsed.events ??= []).push(runnerEvent);

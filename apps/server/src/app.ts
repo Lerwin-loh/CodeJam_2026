@@ -1,15 +1,17 @@
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
-import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import type { AgentService } from "./agent-service.js";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
-import type { AgentService } from "./agent-service.js";
-import type { User } from "./types.js";
+import { MergeConflictError } from "./merge-engine.js";
 import { createProjectZip } from "./project-export.js";
+import type { ProjectService } from "./project-service.js";
+import type { MergePreview, User } from "./types.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -18,6 +20,10 @@ declare module "fastify" {
 }
 
 const agentIdParams = z.object({ id: z.string().uuid() });
+const agentBranchParams = z.object({
+  id: z.string().uuid(),
+  branchId: z.string().uuid(),
+});
 const runIdParams = z.object({ id: z.string().uuid() });
 const checkpointIdParams = z.object({ id: z.string().uuid() });
 const createUserBody = z.object({
@@ -40,16 +46,79 @@ const branchMessageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
   branchId: z.string().uuid().nullable().optional(),
 });
+const mergeBranchesBody = z.object({
+  branchIds: z.array(z.string().uuid()).min(1).max(50),
+});
+const securityFixBody = z.object({
+  pointIds: z.array(z.string().max(20)).max(10).optional(),
+});
 const branchQuery = z.object({ branchId: z.string().uuid().optional() });
 const createCheckpointBody = z.object({
   label: z.string().trim().min(1).max(120),
 });
 
+const projectIdParams = z.object({ id: z.string().uuid() });
+const memberParams = z.object({
+  id: z.string().uuid(),
+  memberId: z.string().uuid(),
+});
+const createProjectBody = z.object({ name: z.string().trim().min(1).max(120) });
+const updateProjectBody = z
+  .object({
+    name: z.string().trim().min(1).max(120).optional(),
+    description: z.string().max(500).optional(),
+  })
+  .refine((v) => v.name !== undefined || v.description !== undefined, "Nothing to update");
+const transferProjectBody = z.object({ toUserId: z.string().uuid() });
+const upgradeAgentBody = z.object({ projectName: z.string().trim().min(1).max(120) });
+const addMemberBody = z.object({
+  userName: z.string().trim().min(1).max(60),
+  role: z.string().trim().min(1).max(60),
+});
+const updateMemberBody = z.object({ role: z.string().trim().min(1).max(60) });
+const filePathQuery = z.object({ path: z.string().min(1).max(400) });
+const commitRequestBody = z.object({
+  title: z.string().trim().max(120).optional(),
+  note: z.string().trim().max(2000).optional(),
+});
+const decideCommitBody = z.object({ decision: z.enum(["approved", "rejected"]) });
+const mergeResolution = z.object({
+  workspace: z.record(z.string(), z.enum(["target", "source", "ai", "combined"])),
+  context: z.record(z.string(), z.enum(["target", "source", "ai", "combined"])),
+  combined: z.record(z.string(), z.object({
+    content: z.string().max(200_000),
+    mergePrompt: z.string().trim().min(1).max(2_000),
+    explanation: z.string().trim().min(1).max(2_000),
+  })).optional(),
+});
+const agentMergeBody = z.object({ branchId: z.string().uuid(), resolution: mergeResolution.optional() });
+const projectMergeBody = z.object({ memberId: z.string().uuid(), branchId: z.string().uuid().nullable().optional(), requestId: z.string().uuid().optional(), resolution: mergeResolution.optional() });
+const commitRequestParams = z.object({ id: z.string().uuid() });
+
 const publicPaths = new Set(["/api/health", "/api/auth"]);
+
+type MergeConflictLike = { message: string; preview: MergePreview };
+
+function mergeConflictFrom(error: unknown): MergeConflictLike | null {
+  if (error instanceof MergeConflictError) return error;
+  if (
+    error &&
+    typeof error === "object" &&
+    "message" in error &&
+    typeof error.message === "string" &&
+    "preview" in error &&
+    error.preview &&
+    typeof error.preview === "object"
+  ) {
+    return error as MergeConflictLike;
+  }
+  return null;
+}
 
 export async function createApp(
   config: AppConfig,
   service: AgentService,
+  projects: ProjectService,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
@@ -70,8 +139,8 @@ export async function createApp(
     if (!request.url.startsWith("/api/")) return;
     const path = request.url.split("?")[0] ?? request.url;
     if (publicPaths.has(path)) return;
-    // The iframe cannot attach a bearer header, so preview routes authenticate
-    // with their short-lived query token in the route below.
+    // Preview iframes cannot attach a bearer header; preview routes validate
+    // their short-lived query token inside the route handler.
     if (path.includes("/preview/") || path.includes("/preview-image")) return;
     if (path === "/api/users" && request.method === "POST") return;
     const header = request.headers.authorization ?? "";
@@ -104,6 +173,10 @@ export async function createApp(
     user: { id: request.user.id, name: request.user.name },
   }));
 
+  app.delete("/api/users/me", async (request) =>
+    service.deleteAccount(request.user),
+  );
+
   app.get("/api/audit", async (request) => ({
     entries: service.listAudit(request.user),
   }));
@@ -127,6 +200,17 @@ export async function createApp(
     });
     return reply.code(201).send({ agent });
   });
+
+  app.post("/api/agents/:id/upgrade-to-project", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "agent.upgrade-to-project");
+    const body = upgradeAgentBody.parse(request.body);
+    const result = await projects.upgradeStandaloneAgent(id, body.projectName, request.user);
+    return reply.code(201).send(result);
+  });
+
+  // Standalone Agents use the collection routes above. Project parent and child
+  // Agents are created through project routes and share these per-Agent routes.
 
   app.get("/api/agents/:id", async (request) => {
     const { id } = agentIdParams.parse(request.params);
@@ -230,6 +314,43 @@ export async function createApp(
     return reply.code(201).send({ branch });
   });
 
+  app.post("/api/agents/:id/merge-preview", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "agent.read");
+    const body = agentMergeBody.parse(request.body);
+    return service.previewBranchMerge(id, body.branchId);
+  });
+
+  app.post("/api/agents/:id/merge", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "branch.merge");
+    const body = agentMergeBody.parse(request.body);
+    if (!body.resolution) throw new HttpError(400, "Merge resolutions are required.");
+    return service.mergeBranch(id, body.branchId, body.resolution);
+  });
+
+  app.post("/api/agents/:id/merge-ai", async (request) => {
+    const { id } = agentIdParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "branch.merge");
+    const body = agentMergeBody.parse(request.body);
+    return service.resolveBranchMerge(id, body.branchId);
+  });
+
+  app.delete("/api/agents/:id/branches/:branchId", async (request) => {
+    const { id, branchId } = agentBranchParams.parse(request.params);
+    await service.assertAgentAccess(id, request.user, "branch.delete");
+    const result = await service.deleteBranch(id, branchId);
+    await service.recordAudit({
+      user: request.user,
+      agentId: id,
+      action: "branch.delete",
+      resource: "branch:" + branchId,
+      decision: "allow",
+      reason: "Owner deleted an idle leaf branch",
+    });
+    return result;
+  });
+
   app.post("/api/agents/:id/checkpoints", async (request, reply) => {
     const { id } = agentIdParams.parse(request.params);
     await service.assertAgentAccess(id, request.user, "checkpoint.create");
@@ -265,10 +386,7 @@ export async function createApp(
     const agent = await service.assertAgentAccess(id, request.user, "workspace.export");
     const archive = await createProjectZip(agent);
     const filename = agent.name.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "") || "agent-project";
-    return reply
-      .type("application/zip")
-      .header("content-disposition", `attachment; filename="${filename}.zip"`)
-      .send(archive);
+    return reply.type("application/zip").header("content-disposition", `attachment; filename="${filename}.zip"`).send(archive);
   });
 
   app.get("/api/agents/:id/preview-image", async (request, reply) => {
@@ -277,9 +395,7 @@ export async function createApp(
     const user = service.getUserByToken(query.token ?? "");
     if (!user) return reply.code(401).send({ error: "Preview session expired" });
     await service.assertAgentAccess(id, user, "workspace.preview.read");
-    if (!query.url || !/^https:\/\/picsum\.photos\//i.test(query.url)) {
-      return reply.code(400).send({ error: "Unsupported preview image" });
-    }
+    if (!query.url || !/^https:\/\/picsum\.photos\//i.test(query.url)) return reply.code(400).send({ error: "Unsupported preview image" });
     try {
       const upstream = await fetch(query.url);
       if (!upstream.ok) return reply.code(404).send({ error: "Preview image not found" });
@@ -301,29 +417,23 @@ export async function createApp(
     const directory = service.getWorkspaceDirectory(id, query.branchId ?? null);
     const relative = String((request.params as { "*": string })["*"] || "index.html");
     const requested = path.resolve(directory, relative);
-    if (requested !== directory && !requested.startsWith(directory + path.sep)) {
-      return reply.code(400).send({ error: "Invalid preview path" });
-    }
+    if (requested !== directory && !requested.startsWith(path.resolve(directory) + path.sep)) return reply.code(400).send({ error: "Invalid preview path" });
     try {
       let body = await readFile(requested);
       const extension = path.extname(requested).toLowerCase();
-      const contentType = extension === ".html" ? "text/html; charset=utf-8" : extension === ".css" ? "text/css; charset=utf-8" : extension === ".js" ? "text/javascript; charset=utf-8" : extension === ".json" ? "application/json" : "application/octet-stream";
+      const contentType = extension === ".html" ? "text/html; charset=utf-8" : extension === ".css" ? "text/css; charset=utf-8" : extension === ".js" || extension === ".mjs" ? "text/javascript; charset=utf-8" : extension === ".json" ? "application/json" : "application/octet-stream";
+      const tokenQuery = "?token=" + encodeURIComponent(query.token ?? refererToken) + (query.branchId ? "&branchId=" + encodeURIComponent(query.branchId) : "");
       if (extension === ".html") {
-        const tokenQuery = "?token=" + encodeURIComponent(query.token ?? "") + (query.branchId ? "&branchId=" + encodeURIComponent(query.branchId) : "");
-        const html = body.toString("utf8").replace(/((?:href|src)=[\"'])(?!https?:|data:|#|\/)([^\"']+)([\"'])/gi, (_match, start: string, asset: string, end: string) => {
-          const separator = asset.includes("?") ? "&" : "?";
-          return start + asset + separator + tokenQuery.slice(1) + end;
-        }).replace(/((?:href|src)=[\"'])\/(?!api\/)([^\"']+)([\"'])/gi, (_match, start: string, asset: string, end: string) => {
-          const entryDirectory = path.posix.dirname(relative);
-          const previewPath = entryDirectory === "." ? asset : entryDirectory + "/" + asset;
-          return start + "/api/agents/" + id + "/preview/" + previewPath + tokenQuery + end;
-        });
+        const html = body.toString("utf8")
+          .replace(/((?:href|src)=[\"'])(?!https?:|data:|#|\/)([^\"']+)([\"'])/gi, (_match, start: string, asset: string, end: string) => start + asset + (asset.includes("?") ? "&" : "?") + tokenQuery.slice(1) + end)
+          .replace(/((?:href|src)=[\"'])\/(?!api\/)([^\"']+)([\"'])/gi, (_match, start: string, asset: string, end: string) => {
+            const entryDirectory = path.posix.dirname(relative);
+            const previewPath = entryDirectory === "." ? asset : entryDirectory + "/" + asset;
+            return start + "/api/agents/" + id + "/preview/" + previewPath + tokenQuery + end;
+          });
         body = Buffer.from(html, "utf8");
       } else if (extension === ".js" || extension === ".mjs") {
-        const tokenQuery = "?token=" + encodeURIComponent(query.token ?? "") + (query.branchId ? "&branchId=" + encodeURIComponent(query.branchId) : "");
-        const script = body.toString("utf8").replace(/https:\/\/picsum\.photos\/[^\"'`\\]+/gi, (imageUrl) => {
-          return "/api/agents/" + id + "/preview-image?url=" + encodeURIComponent(imageUrl) + tokenQuery;
-        });
+        const script = body.toString("utf8").replace(/https:\/\/picsum\.photos\/[^\"'`\\]+/gi, (imageUrl) => "/api/agents/" + id + "/preview-image?url=" + encodeURIComponent(imageUrl) + tokenQuery);
         body = Buffer.from(script, "utf8");
       }
       return reply.type(contentType).send(body);
@@ -357,6 +467,8 @@ export async function createApp(
 
   app.get("/api/runs/:id/trace/stream", async (request, reply) => {
     const { id } = runIdParams.parse(request.params);
+    const run = service.getRun(id);
+    await service.assertAgentAccess(run.agentId, request.user, "run.trace.read");
     reply.hijack();
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -393,6 +505,8 @@ export async function createApp(
 
   app.get("/api/runs/:id/details", async (request) => {
     const { id } = runIdParams.parse(request.params);
+    const run = service.getRun(id);
+    await service.assertAgentAccess(run.agentId, request.user, "run.details.read");
     return service.getRunDetails(id);
   });
 
@@ -431,7 +545,271 @@ export async function createApp(
 
   app.post("/api/checkpoints/:id/restore", async (request) => {
     const { id } = checkpointIdParams.parse(request.params);
+    const checkpoint = service.getCheckpoint(id);
+    await service.assertAgentAccess(
+      checkpoint.agentId,
+      request.user,
+      "checkpoint.restore",
+    );
     return await service.restoreCheckpoint(id);
+  });
+
+  // --- Collaboration projects (Part 1: RBAC) ----------------------------------
+
+  app.post("/api/projects", async (request, reply) => {
+    const body = createProjectBody.parse(request.body);
+    const project = await projects.createProject(body.name, request.user.id);
+    return reply.code(201).send({ project });
+  });
+
+  app.get("/api/projects", async (request) => ({
+    projects: projects.listProjects(request.user.id),
+    invitations: projects.listPendingInvitations(request.user.id),
+  }));
+
+  app.get("/api/projects/:id", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    return projects.getProject(id, request.user);
+  });
+
+  app.patch("/api/projects/:id", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.update");
+    const body = updateProjectBody.parse(request.body);
+    return { project: await projects.updateProject(id, request.user, body) };
+  });
+
+  app.post("/api/projects/:id/transfer", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.transfer");
+    const { toUserId } = transferProjectBody.parse(request.body);
+    return { project: await projects.transferOwnership(id, request.user, toUserId) };
+  });
+
+  app.post("/api/projects/:id/leave", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.leave");
+    await projects.leaveProject(id, request.user);
+    return { ok: true };
+  });
+
+  app.post("/api/projects/:id/invitation/accept", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "invitation.respond");
+    return { member: await projects.acceptInvitation(id, request.user) };
+  });
+
+  app.post("/api/projects/:id/invitation/decline", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "invitation.respond");
+    await projects.declineInvitation(id, request.user);
+    return { ok: true };
+  });
+
+  app.get("/api/projects/:id/activity", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "activity.read");
+    return { activity: projects.getActivity(id) };
+  });
+
+  app.delete("/api/projects/:id", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.delete");
+    for (const agentId of projects.projectAgentIds(id)) {
+      await service.stopAgent(agentId);
+    }
+    return projects.deleteProject(id, request.user);
+  });
+
+  app.post("/api/projects/:id/archive", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.archive");
+    for (const agentId of projects.projectAgentIds(id)) {
+      await service.stopAgent(agentId);
+    }
+    const project = await projects.setProjectArchived(id, request.user, true);
+    return { project };
+  });
+
+  app.post("/api/projects/:id/unarchive", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.unarchive");
+    const project = await projects.setProjectArchived(id, request.user, false);
+    return { project };
+  });
+
+  app.get("/api/projects/:id/tree", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "project.tree.read");
+    return { files: await projects.getMainTree(id) };
+  });
+
+  app.get("/api/projects/:id/file", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    const { path: filePath } = filePathQuery.parse(request.query);
+    await projects.assertProjectAccess(id, request.user, "file.read");
+    return { path: filePath, content: await projects.readMainFile(id, filePath) };
+  });
+
+  app.get("/api/projects/:id/members", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    const { role } = await projects.assertProjectAccess(id, request.user, "members.read");
+    return { members: projects.listMembers(id, role === "owner") };
+  });
+
+  app.post("/api/projects/:id/members", async (request, reply) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "member.manage");
+    const body = addMemberBody.parse(request.body);
+    const member = await projects.inviteMember(id, request.user, body);
+    return reply.code(201).send({ member });
+  });
+
+  app.patch("/api/projects/:id/members/:memberId", async (request) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "member.manage");
+    const body = updateMemberBody.parse(request.body);
+    const member = await projects.updateMember(id, memberId, request.user, body);
+    return { member };
+  });
+
+  app.delete("/api/projects/:id/members/:memberId", async (request) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "member.manage");
+    await projects.removeMember(id, memberId, request.user);
+    return { ok: true };
+  });
+
+  app.get("/api/projects/:id/parent-agent", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    const { project } = await projects.assertProjectAccess(id, request.user, "parent.read");
+    const agent = service.getAgent(project.parentAgentId);
+    return {
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        status: agent.status,
+        kind: agent.kind,
+      },
+      messages: service.getMessages(agent.id),
+      trace: service.getTrace(agent.id),
+      checkpoints: service.getCheckpoints(agent.id),
+    };
+  });
+
+  app.get("/api/projects/:id/my-agent", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    const { member } = await projects.assertProjectAccess(id, request.user, "child.read");
+    if (!member) {
+      throw new HttpError(403, "Only project members have a child agent");
+    }
+    const agent = service.getAgent(member.childAgentId);
+    return {
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        status: agent.status,
+        kind: agent.kind,
+      },
+      messages: service.getMessages(agent.id),
+      trace: service.getTrace(agent.id),
+      checkpoints: service.getCheckpoints(agent.id),
+      security: await projects.getMemberSecurity(id, member.id),
+    };
+  });
+
+  // Part 1B: the pre-commit OWASP gate, cheapest-path-first —
+  //  1. only the branch-vs-main diff is in scope (no full-tree scan);
+  //  2. a fast static pass runs with zero tokens; if it finds issues we stop there;
+  //  3. otherwise ONE direct model call over just the changed files (no agent,
+  //     no tools, no conversation history).
+  app.post("/api/projects/:id/members/:memberId/security-analysis", async (request) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "security.check", { memberId });
+    return { security: await projects.runSecurityGate(id, memberId) };
+  });
+
+  // Auto-fix flagged OWASP findings — one direct model call per affected file,
+  // no agent run. `pointIds` optional: omit to fix every flagged finding.
+  app.post("/api/projects/:id/members/:memberId/security-fix", async (request) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "security.check", { memberId });
+    const { pointIds } = securityFixBody.parse(request.body ?? {});
+    return { security: await projects.applySecurityFixes(id, memberId, pointIds ?? null) };
+  });
+
+  app.post("/api/projects/:id/members/:memberId/commit-request", async (request, reply) => {
+    const { id, memberId } = memberParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.create", { memberId });
+    const body = commitRequestBody.parse(request.body);
+    const created = await projects.submitCommitRequest(id, memberId, body);
+    return reply.code(201).send({ request: created });
+  });
+
+  app.post("/api/projects/:id/merge-preview", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.decide");
+    const body = projectMergeBody.parse(request.body);
+    return projects.previewChildMerge(id, body.memberId, body.branchId ?? null);
+  });
+
+  app.post("/api/projects/:id/merge", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.decide");
+    const body = projectMergeBody.parse(request.body);
+    if (!body.resolution) throw new HttpError(400, "Merge resolutions are required.");
+    return projects.mergeChild(id, body.memberId, body.branchId ?? null, body.resolution, body.requestId, request.user.id);
+  });
+
+  app.post("/api/projects/:id/merge-ai", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    await projects.assertProjectAccess(id, request.user, "commit.request.decide");
+    const body = projectMergeBody.parse(request.body);
+    return projects.resolveChildMerge(id, body.memberId, body.branchId ?? null);
+  });
+
+  app.get("/api/projects/:id/commit-requests", async (request) => {
+    const { id } = projectIdParams.parse(request.params);
+    const { role, member } = await projects.assertProjectAccess(
+      id,
+      request.user,
+      "commit.request.read",
+    );
+    return {
+      requests: projects.listCommitRequests(id, role === "owner" ? null : member),
+    };
+  });
+
+  app.post("/api/commit-requests/:id/decide", async (request, reply) => {
+    const { id } = commitRequestParams.parse(request.params);
+    const existing = projects.getCommitRequest(id);
+    await projects.assertProjectAccess(
+      existing.projectId,
+      request.user,
+      "commit.request.decide",
+    );
+    const body = decideCommitBody.parse(request.body);
+    try {
+      const updated = await projects.decideCommitRequest(id, body.decision, request.user);
+      return { request: updated };
+    } catch (error) {
+      // Keep the conflict preview attached to this response even if an
+      // adapter/framework wraps the domain error before the global handler
+      // sees it. The owner must receive the review data to resolve the merge.
+      const conflict = mergeConflictFrom(error);
+      if (conflict) {
+        return reply.code(409).send({
+          error: conflict.message,
+          preview: conflict.preview,
+          requestId: id,
+          memberId: existing.memberId,
+          branchId: null,
+        });
+      }
+      throw error;
+    }
   });
 
   if (config.nodeEnv === "production") {
@@ -450,14 +828,17 @@ export async function createApp(
 
   app.setErrorHandler((error, request, reply) => {
     const appError = error instanceof Error ? error : new Error(String(error));
+    const mergeConflict = mergeConflictFrom(error);
     const validationError = error instanceof z.ZodError;
     const frameworkStatus =
       typeof (error as { statusCode?: unknown }).statusCode === "number"
         ? (error as { statusCode: number }).statusCode
         : null;
     const statusCode =
-      error instanceof HttpError
-        ? error.statusCode
+      mergeConflict
+        ? 409
+        : error instanceof HttpError
+          ? error.statusCode
         : validationError
           ? 400
           : frameworkStatus && frameworkStatus >= 400 && frameworkStatus <= 599
@@ -468,6 +849,7 @@ export async function createApp(
     }
     return reply.code(statusCode).send({
       error: appError.message,
+      ...(mergeConflict ? { preview: mergeConflict.preview } : {}),
       ...(validationError ? { details: error.issues } : {}),
     });
   });

@@ -1,33 +1,36 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readdir, stat } from "node:fs/promises";
+import { access, cp, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { captureSessionOffset, forkSessionAtOffset, rebuildSessionFromTimeline } from "./codex-session-fork.js";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
+import { MergeEngine, conversationCommits, outcomeDetails, outcomeSummary } from "./merge-engine.js";
 import { JsonStore } from "./store.js";
 import type {
-  Agent,
-  AgentRun,
-  AgentRunner,
-  AgentCheckpoint,
-  AuditDecision,
-  AuditEntry,
-  CheckpointDetails,
-  CheckpointDiff,
-  CreateAgentInput,
-  Message,
-  RunnerEvent,
-  AgentContextSnapshot,
-  TraceEvent,
-  TraceEventType,
-  RunDetails,
-  User,
-  WorkspaceManifest,
-  WorkspacePreview,
-  UpdateAgentInput,
+    Agent,
+    AgentCheckpoint,
+    AgentContextSnapshot,
+    AgentRun,
+    AgentRunner,
+    AuditDecision,
+    AuditEntry,
+    CheckpointDetails,
+    CheckpointDiff,
+    CreateAgentInput,
+    MergeProvenance,
+    MergeResolution,
+    Message,
+    RunDetails,
+    TraceEvent,
+    TraceEventType,
+    UpdateAgentInput,
+    User,
+    WorkspaceManifest,
+    WorkspacePreview
 } from "./types.js";
-import { WorkspaceManager } from "./workspace.js";
 import { WorkspaceHistory } from "./workspace-history.js";
+import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
@@ -64,6 +67,20 @@ function buildDiffHunks(
   return [{ oldStart: start + 1, newStart: start + 1, lines }];
 }
 
+/** Agent actions that mutate state and must be frozen inside an archived project. */
+const ARCHIVE_FROZEN_AGENT_ACTIONS = new Set([
+  "agent.update",
+  "agent.delete",
+  "agent.start",
+  "agent.stop",
+  "agent.run",
+  "branch.create",
+  "branch.delete",
+  "branch.merge",
+  "checkpoint.create",
+  "checkpoint.restore",
+]);
+
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
@@ -75,12 +92,14 @@ export class AgentService {
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
     private readonly history = new WorkspaceHistory(path.join(config.dataDirectory, "branchpoint")),
+    private readonly mergeEngine = new MergeEngine(history),
   ) {}
 
   async initialize(): Promise<void> {
     await this.store.initialize();
     await this.workspaces.initialize();
     await this.history.initialize();
+    await this.migrateProjectBranchWorkspaces();
     await this.store.mutate((database) => {
       for (const run of database.runs) {
         if (run.status === "queued" || run.status === "running") {
@@ -110,6 +129,39 @@ export class AgentService {
           database.users.push(demo);
         }
         for (const agent of orphans) agent.ownerId = demo.id;
+      }
+    });
+  }
+
+  /** Move branches created by older builds from workspaces/<agent>/branches into the agent's project workspace. */
+  private async migrateProjectBranchWorkspaces(): Promise<void> {
+    const database = this.store.snapshot();
+    const moves: Array<{ branchId: string; from: string; to: string }> = [];
+    for (const branch of database.branches) {
+      const agent = database.agents.find((item) => item.id === branch.agentId);
+      if (!agent?.projectId) continue;
+      const target = this.workspaces.branchWorkspacePath(agent.workspacePath, branch.id);
+      if (path.resolve(branch.workspacePath) === path.resolve(target)) continue;
+      moves.push({ branchId: branch.id, from: branch.workspacePath, to: target });
+    }
+    if (moves.length === 0) return;
+
+    const completed: typeof moves = [];
+    for (const move of moves) {
+      await mkdir(path.dirname(move.to), { recursive: true });
+      try {
+        await rename(move.from, move.to);
+        completed.push(move);
+      } catch (error) {
+        // Keep the recorded path unchanged if its workspace no longer exists.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    if (completed.length === 0) return;
+    await this.store.mutate((next) => {
+      for (const move of completed) {
+        const branch = next.branches.find((item) => item.id === move.branchId);
+        if (branch) branch.workspacePath = move.to;
       }
     });
   }
@@ -151,6 +203,102 @@ export class AgentService {
       database.users.push(user);
       return structuredClone(user);
     });
+  }
+
+  /**
+   * Delete one user and every resource whose lifetime depends on that account.
+   * Owned projects are removed in full; memberships in projects owned by other
+   * users remove only this user's member workspace and child Agent.
+   */
+  async deleteAccount(user: User): Promise<{
+    deletedUserId: string;
+    deletedProjects: number;
+    deletedMemberships: number;
+    deletedAgents: number;
+    archivedWorkspaces: number;
+    archivedSnapshots: number;
+  }> {
+    const database = this.store.snapshot();
+    if (!database.users.some((item) => item.id === user.id)) {
+      throw new HttpError(404, "User not found");
+    }
+
+    const ownedProjectIds = new Set(
+      database.projects
+        .filter((project) => project.ownerId === user.id)
+        .map((project) => project.id),
+    );
+    const removedMemberships = database.projectMembers.filter(
+      (member) => member.userId === user.id || ownedProjectIds.has(member.projectId),
+    );
+    const removedMembershipIds = new Set(removedMemberships.map((member) => member.id));
+    const affectedAgents = database.agents.filter(
+      (agent) => agent.ownerId === user.id ||
+        (agent.projectId !== null && ownedProjectIds.has(agent.projectId)),
+    );
+    const affectedAgentIds = new Set(affectedAgents.map((agent) => agent.id));
+
+    // No workspace is moved while an Agent could still be writing to it.
+    for (const agent of affectedAgents) {
+      await this.cancelExecution(agent.id);
+    }
+
+    let archivedWorkspaces = 0;
+    for (const projectId of ownedProjectIds) {
+      if (await this.workspaces.archiveProject(projectId)) archivedWorkspaces += 1;
+    }
+    for (const agent of affectedAgents) {
+      if (agent.projectId !== null && ownedProjectIds.has(agent.projectId)) continue;
+      try {
+        await this.workspaces.archive(agent);
+        archivedWorkspaces += 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+
+    const affectedSnapshots = database.snapshots.filter((snapshot) =>
+      affectedAgentIds.has(snapshot.agentId),
+    );
+    const archivedSnapshots = await this.history.archiveSnapshots(
+      "account-" + user.id,
+      affectedSnapshots,
+    );
+
+    await this.store.mutate((next) => {
+      next.users = next.users.filter((item) => item.id !== user.id);
+      next.projects = next.projects.filter((item) => !ownedProjectIds.has(item.id));
+      next.projectMembers = next.projectMembers.filter(
+        (item) => !removedMembershipIds.has(item.id),
+      );
+      next.commitRequests = next.commitRequests.filter(
+        (item) => !ownedProjectIds.has(item.projectId) &&
+          !removedMembershipIds.has(item.memberId) &&
+          !affectedAgentIds.has(item.childAgentId),
+      );
+      next.agents = next.agents.filter((item) => !affectedAgentIds.has(item.id));
+      next.branches = next.branches.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.messages = next.messages.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.runs = next.runs.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.traces = next.traces.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.snapshots = next.snapshots.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.contexts = next.contexts.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.checkpoints = next.checkpoints.filter((item) => !affectedAgentIds.has(item.agentId));
+      next.audit = next.audit.filter(
+        (item) => item.userId !== user.id &&
+          (item.agentId === null || !affectedAgentIds.has(item.agentId)) &&
+          !ownedProjectIds.has(item.resource.replace(/^project:/, "")),
+      );
+    });
+
+    return {
+      deletedUserId: user.id,
+      deletedProjects: ownedProjectIds.size,
+      deletedMemberships: removedMemberships.length,
+      deletedAgents: affectedAgents.length,
+      archivedWorkspaces,
+      archivedSnapshots,
+    };
   }
 
   async recordAudit(entry: {
@@ -201,30 +349,51 @@ export class AgentService {
     user: User,
     action: string,
   ): Promise<Agent> {
-    const agent = this.store
-      .snapshot()
-      .agents.find((item) => item.id === agentId);
+    const database = this.store.snapshot();
+    const agent = database.agents.find((item) => item.id === agentId);
     if (!agent) {
       throw new HttpError(404, "Agent not found");
     }
-    if (agent.ownerId !== user.id) {
-      await this.recordAudit({
-        user,
-        agentId: agent.id,
-        action,
-        resource: "agent:" + agent.id,
-        decision: "deny",
-        reason: "Agent belongs to a different user",
-      });
-      throw new HttpError(403, "You do not have access to this Agent");
+    if (agent.projectId && ARCHIVE_FROZEN_AGENT_ACTIONS.has(action)) {
+      const project = database.projects.find((item) => item.id === agent.projectId);
+      if (project?.archivedAt) {
+        await this.recordAudit({
+          user,
+          agentId: agent.id,
+          action,
+          resource: "agent:" + agent.id,
+          decision: "deny",
+          reason: "Project is archived",
+        });
+        throw new HttpError(409, "This project is archived. Unarchive it to make changes.");
+      }
     }
-    return agent;
+    if (agent.ownerId === user.id) {
+      return agent;
+    }
+    // The owner of a project may reach every Agent inside it (parent and children).
+    if (agent.projectId) {
+      const project = database.projects.find((item) => item.id === agent.projectId);
+      if (project && project.ownerId === user.id) {
+        return agent;
+      }
+    }
+    await this.recordAudit({
+      user,
+      agentId: agent.id,
+      action,
+      resource: "agent:" + agent.id,
+      decision: "deny",
+      reason: "Agent belongs to a different user",
+    });
+    throw new HttpError(403, "You do not have access to this Agent");
   }
 
+  /** Standalone Agents only. Project Agents are reached through the project routes. */
   listAgents(ownerId: string): Agent[] {
     return this.store
       .snapshot()
-      .agents.filter((agent) => agent.ownerId === ownerId)
+      .agents.filter((agent) => agent.ownerId === ownerId && agent.projectId === null)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
@@ -245,8 +414,6 @@ export class AgentService {
 
   async getWorkspacePreview(agentId: string, branchId: string | null = null): Promise<WorkspacePreview> {
     const directory = this.getWorkspaceDirectory(agentId, branchId);
-    // Prefer compiled application output. A Vite source index.html usually
-    // points at JSX/TSX modules that a plain browser cannot execute.
     const preferredEntries = ["dist/index.html", "build/index.html", "index.html", "public/index.html"];
     for (const entryFile of preferredEntries) {
       try {
@@ -263,8 +430,7 @@ export class AgentService {
         const absolute = path.join(current, entry.name);
         const relative = path.relative(directory, absolute).split(path.sep).join("/");
         if (entry.isDirectory()) {
-          // Branch workspaces live below the main workspace. They are managed by
-          // the launchpad, not part of the project's previewable files.
+          // Branch workspaces are managed by Launchpad and are not project files.
           if (!["node_modules", "dist", "build", "branches"].includes(entry.name)) await scan(absolute);
         } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".html") && entry.name !== "AGENTS.md") {
           candidates.push({ path: relative, modifiedAt: (await stat(absolute)).mtimeMs });
@@ -272,9 +438,7 @@ export class AgentService {
       }
     };
     await scan(directory);
-    const entryFile = candidates.sort((left, right) => {
-      return right.modifiedAt - left.modifiedAt || left.path.localeCompare(right.path);
-    })[0]?.path;
+    const entryFile = candidates.sort((left, right) => right.modifiedAt - left.modifiedAt || left.path.localeCompare(right.path))[0]?.path;
     if (entryFile) {
       const manifest = await this.history.manifest(directory);
       return { available: true, entryFile, workspaceHash: manifest.workspaceHash };
@@ -291,6 +455,9 @@ export class AgentService {
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
       ownerId,
+      projectId: null,
+      kind: "standalone",
+      memberId: null,
       status: "ready",
       workspacePath: this.workspaces.workspacePath(id),
       codexThreadId: null,
@@ -353,6 +520,7 @@ export class AgentService {
           createdAt: now(),
         });
       }
+      const sessionOffset = captureSessionOffset(this.config.codexHome, threadId);
       const context: AgentContextSnapshot = {
         id: randomUUID(),
         agentId: agent.id,
@@ -362,6 +530,8 @@ export class AgentService {
         instructions: agent.instructions,
         messages,
         sourceThreadId: threadId,
+        sessionRolloutPath: sessionOffset?.rolloutRelativePath ?? null,
+        sessionLineOffset: sessionOffset?.lineOffset ?? null,
         createdAt: now(),
       };
       const parentCheckpointId = this.store
@@ -420,7 +590,7 @@ export class AgentService {
         type,
         timestamp: now(),
         metadata: {
-          explanation: this.traceExplanation(type),
+          explanation: this.traceExplanation(type, metadata),
           ...metadata,
         },
       };
@@ -430,21 +600,83 @@ export class AgentService {
     for (const listener of this.traceListeners.get(run.id) ?? []) listener(event);
   }
 
-  private traceExplanation(type: TraceEventType): string {
+  private traceExplanation(type: TraceEventType, metadata: Record<string, unknown>): string {
     switch (type) {
       case "run.started":
         return "The Agent began processing the user instruction.";
       case "codex.event":
-        return "Codex reported an observable tool or model activity.";
+        return this.codexEventExplanation(metadata);
       case "workspace.changed":
-        return "The Agent changed files in its workspace.";
+        return this.workspaceChangeExplanation(metadata);
       case "checkpoint.created":
-        return "A recoverable snapshot was created from the workspace mutation.";
+        return metadata.status === "partial"
+          ? "A partial recoverable checkpoint was created after the workspace change."
+          : "A complete recoverable checkpoint was created after the workspace change.";
       case "run.completed":
-        return "The Agent finished successfully.";
+        return metadata.workspaceChanged === true
+          ? "The Agent finished successfully and saved its workspace changes."
+          : "The Agent finished successfully without workspace changes.";
       case "run.error":
-        return "The Run ended with an error or cancellation.";
+        return typeof metadata.error === "string" && metadata.error.trim()
+          ? `The Run ended with an error or cancellation: ${metadata.error.trim().slice(0, 500)}`
+          : "The Run ended with an error or cancellation.";
     }
+  }
+
+  private codexEventExplanation(metadata: Record<string, unknown>): string {
+    const eventType = typeof metadata.eventType === "string" ? metadata.eventType : "activity";
+    const codexType = typeof metadata.codexType === "string" ? metadata.codexType : "";
+    const command = typeof metadata.command === "string" ? metadata.command.trim().slice(0, 240) : "";
+    const message = typeof metadata.message === "string" ? metadata.message.trim().slice(0, 500) : "";
+    const output = typeof metadata.output === "string" ? metadata.output.trim().slice(0, 500) : "";
+    const completed = codexType === "item.completed";
+
+    switch (eventType) {
+      case "command_execution": {
+        if (!completed || metadata.status === "in_progress") {
+          return command ? `Codex started running: ${command}` : "Codex started running a command.";
+        }
+        const exitCode = metadata.exit_code;
+        if (typeof exitCode === "number") {
+          return command
+            ? `Command finished with exit code ${exitCode}: ${command}`
+            : `A command finished with exit code ${exitCode}.`;
+        }
+        return command ? `Codex finished running: ${command}` : "Codex finished running a command.";
+      }
+      case "reasoning":
+        return completed
+          ? "Codex completed a reasoning step; private reasoning content is not included in the trace."
+          : "Codex started a reasoning step; private reasoning content is not included in the trace.";
+      case "agent_message":
+        return "Codex prepared an Agent response.";
+      case "file_change":
+        return completed ? "Codex completed a workspace file change." : "Codex started a workspace file change.";
+      case "error":
+        return message || output
+          ? `Codex reported an activity-level issue: ${message || output}`
+          : "Codex reported an activity-level issue. The Run is marked failed separately if it cannot recover.";
+      default: {
+        const readable = eventType.replace(/[._-]+/g, " ");
+        return `Codex reported observable ${readable} activity.`;
+      }
+    }
+  }
+
+  private workspaceChangeExplanation(metadata: Record<string, unknown>): string {
+    const count = (key: "created" | "modified" | "deleted") =>
+      Array.isArray(metadata[key]) ? metadata[key].length : 0;
+    const created = count("created");
+    const modified = count("modified");
+    const deleted = count("deleted");
+    const changes = [
+      created ? `${created} created` : "",
+      modified ? `${modified} modified` : "",
+      deleted ? `${deleted} deleted` : "",
+    ].filter(Boolean);
+    return changes.length
+      ? `The Agent changed workspace files: ${changes.join(", ")}.`
+      : "The Agent changed files in its workspace.";
   }
 
   async updateAgent(id: string, input: UpdateAgentInput): Promise<Agent> {
@@ -473,6 +705,12 @@ export class AgentService {
 
   async deleteAgent(id: string): Promise<{ archivedWorkspace: string }> {
     const agent = this.getAgent(id);
+    if (agent.projectId !== null) {
+      throw new HttpError(
+        409,
+        "Project Agents must be removed through their Project or membership",
+      );
+    }
     await this.cancelExecution(id);
     const archivedWorkspace = await this.workspaces.archive(agent);
     await this.store.mutate((database) => {
@@ -519,8 +757,8 @@ export class AgentService {
   }
 
   getMessages(agentId: string, branchId: string | null = null): Message[] {
-    this.getAgent(agentId);
     const database = this.store.snapshot();
+    if (!database.agents.some((item) => item.id === agentId)) throw new HttpError(404, "Agent not found");
     return this.store
       .snapshot()
       .messages.filter((message) => message.agentId === agentId)
@@ -571,6 +809,132 @@ export class AgentService {
     return branch;
   }
 
+  private async mergeSide(
+    agent: Agent,
+    workspacePath: string,
+    id: string,
+    label: string,
+    baseSnapshotId: string | null,
+    branchId: string | null = null,
+    mergeBaseContext: AgentContextSnapshot | null = null,
+  ) {
+    const database = this.store.snapshot();
+    const runs = database.runs.filter((run) => run.agentId === agent.id && run.branchId === branchId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const messages = this.getMessages(agent.id, branchId);
+    const conversation = conversationCommits(messages, database.runs, database.checkpoints);
+    const branch = branchId ? database.branches.find((item) => item.id === branchId) : null;
+    const checkpoint = branch?.parentCheckpointId
+      ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)
+      : null;
+    const context = checkpoint ? database.contexts.find((item) => item.id === checkpoint.contextId) : null;
+    const baseContext = mergeBaseContext ?? context;
+    const baseConversation = baseContext ? conversationCommits(baseContext.messages, database.runs, database.checkpoints) : [];
+    const currentThreadId = branch?.codexThreadId ?? agent.codexThreadId;
+    const currentOffset = captureSessionOffset(this.config.codexHome, currentThreadId);
+    const prompts = conversation.map((commit) => commit.prompt);
+    const baseSnapshot = baseSnapshotId ? database.snapshots.find((snapshot) => snapshot.id === baseSnapshotId) ?? null : null;
+    const changed = baseSnapshot ? this.history.diff(baseSnapshot.manifest, await this.history.manifest(workspacePath)) : { created: [], modified: [], deleted: [] };
+    const fileSummary = [
+      changed.created.length ? "created " + changed.created.join(", ") : "",
+      changed.modified.length ? "updated " + changed.modified.join(", ") : "",
+      changed.deleted.length ? "deleted " + changed.deleted.join(", ") : "",
+    ].filter(Boolean).join("; ");
+    return {
+      id, label, workspacePath,
+      outcome: { id, label, summary: outcomeSummary(runs[0]?.output ?? "", fileSummary), details: outcomeDetails(runs[0]?.output ?? "", fileSummary), requestedFeatures: prompts },
+      prompts,
+      conversation,
+      baseConversation,
+      session: {
+        workspacePath,
+        threadId: currentThreadId,
+        rolloutRelativePath: currentOffset?.rolloutRelativePath ?? baseContext?.sessionRolloutPath ?? null,
+        // A standalone/project merge has no shared Codex checkpoint. In that
+        // case rebuild from the session metadata line and append the merged
+        // application timeline in order.
+        baseLineOffset: baseContext?.sessionLineOffset ?? 1,
+        baseThreadId: baseContext?.sourceThreadId ?? null,
+      },
+      baseSnapshot,
+    };
+  }
+
+  async previewBranchMerge(agentId: string, branchId: string) {
+    const agent = this.getAgent(agentId);
+    const branch = this.getBranch(branchId);
+    if (branch.agentId !== agentId) throw new HttpError(403, "This branch belongs to another Agent");
+    const baseId = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null;
+    const checkpoint = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId);
+    const baseContext = checkpoint ? this.store.snapshot().contexts.find((item) => item.id === checkpoint.contextId) ?? null : null;
+    return this.mergeEngine.preview(await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId, null, baseContext), await this.mergeSide(agent, branch.workspacePath, branch.id, branch.name, baseId, branch.id));
+  }
+
+  async mergeBranch(agentId: string, branchId: string, resolution: MergeResolution) {
+    const agent = this.getAgent(agentId);
+    const branch = this.getBranch(branchId);
+    if (branch.agentId !== agentId) throw new HttpError(403, "This branch belongs to another Agent");
+    const baseId = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId)?.snapshotId ?? null;
+    const checkpoint = this.store.snapshot().checkpoints.find((item) => item.id === branch.parentCheckpointId);
+    const baseContext = checkpoint ? this.store.snapshot().contexts.find((item) => item.id === checkpoint.contextId) ?? null : null;
+    const target = await this.mergeSide(agent, agent.workspacePath, agent.id, "main", baseId, null, baseContext);
+    const source = await this.mergeSide(agent, branch.workspacePath, branch.id, branch.name, baseId, branch.id);
+    return this.mergeEngine.apply(target, source, resolution, async (manifest, conversation, provenance: MergeProvenance[]) => {
+      const snapshot = await this.history.createSnapshot(agent.id, null, agent.workspacePath, manifest);
+      const mergedThreadId = target.session && source.session
+        ? await rebuildSessionFromTimeline(this.config.codexHome, target.session, source.session, conversation)
+        : null;
+      try {
+        await this.store.mutate((database) => {
+          database.snapshots.push(snapshot);
+          const row = database.agents.find((item) => item.id === agent.id);
+          if (row) {
+            database.messages = database.messages.filter((message) =>
+              !(message.agentId === agent.id && message.branchId === null),
+            );
+            for (const commit of conversation) {
+              database.messages.push({
+                id: randomUUID(), agentId: agent.id, runId: commit.runId, branchId: null,
+                role: "user", content: commit.prompt, createdAt: commit.createdAt,
+              });
+              if (commit.response !== null) {
+                database.messages.push({
+                  id: randomUUID(), agentId: agent.id, runId: commit.runId, branchId: null,
+                  role: "assistant", content: commit.response, createdAt: commit.createdAt,
+                });
+              }
+            }
+            if (provenance.length > 0) {
+              database.messages.push({
+                id: randomUUID(),
+                agentId: agent.id,
+                runId: "merge:" + randomUUID(),
+                branchId: null,
+                role: "assistant",
+                content: "Combined implementation recorded for this merge.",
+                createdAt: now(),
+                kind: "merge",
+                mergeProvenance: provenance,
+              });
+            }
+            row.codexThreadId = mergedThreadId;
+          }
+        });
+      } catch (error) {
+        await rm(snapshot.directory, { recursive: true, force: true });
+        throw error;
+      }
+      return snapshot;
+    });
+  }
+
+  async resolveBranchMerge(agentId: string, branchId: string) {
+    const preview = await this.previewBranchMerge(agentId, branchId);
+    return this.mergeEngine.resolve(preview, {
+      workspace: Object.fromEntries(preview.workspaceConflicts.map((conflict) => [conflict.path, "ai"])),
+      context: Object.fromEntries(preview.contextConflicts.map((conflict) => [conflict.id, "ai"])),
+    });
+  }
+
   async createBranchFromCheckpoint(
     agentId: string,
     checkpointId: string,
@@ -582,6 +946,14 @@ export class AgentService {
     if (!checkpoint || checkpoint.agentId !== agentId) throw new HttpError(404, "Checkpoint not found");
     const snapshot = database.snapshots.find((item) => item.id === checkpoint.snapshotId);
     if (!snapshot) throw new HttpError(500, "Checkpoint snapshot is missing");
+    const context = database.contexts.find((item) => item.id === checkpoint.contextId);
+    let forkedThreadId: string | null = null;
+    if (context?.sourceThreadId && context.sessionRolloutPath && context.sessionLineOffset !== null) {
+      forkedThreadId = await forkSessionAtOffset(this.config.codexHome, context.sourceThreadId, {
+        rolloutRelativePath: context.sessionRolloutPath,
+        lineOffset: context.sessionLineOffset,
+      });
+    }
     const branchId = randomUUID();
     const branch: import("./types.js").AgentBranch = {
       id: branchId,
@@ -589,8 +961,8 @@ export class AgentService {
       name: name.trim(),
       parentBranchId: checkpoint.branchId,
       parentCheckpointId: checkpointId,
-      workspacePath: this.workspaces.branchWorkspacePath(agentId, branchId),
-      codexThreadId: null,
+      workspacePath: this.workspaces.branchWorkspacePath(agent.workspacePath, branchId),
+      codexThreadId: forkedThreadId,
       status: "ready",
       createdAt: now(),
       updatedAt: now(),
@@ -599,6 +971,172 @@ export class AgentService {
     await this.history.restoreSnapshot(snapshot, branch.workspacePath);
     await this.store.mutate((next) => next.branches.push(branch));
     return branch;
+  }
+
+  /**
+   * Recoverably delete one idle leaf branch and all metadata created on it.
+   * Parent branches must be deleted from the leaves upward so lineage is never
+   * left pointing at a branch that no longer exists.
+   */
+  async deleteBranch(
+    agentId: string,
+    branchId: string,
+  ): Promise<{ branchId: string; archivedWorkspace: string | null }> {
+    const agent = this.getAgent(agentId);
+    const database = this.store.snapshot();
+    const branch = database.branches.find(
+      (item) => item.id === branchId && item.agentId === agentId,
+    );
+    if (!branch) throw new HttpError(404, "Branch not found");
+    if (agent.status === "busy" || branch.status === "busy") {
+      throw new HttpError(409, "Stop the active run before deleting this branch");
+    }
+    if (database.branches.some((item) => item.parentBranchId === branchId)) {
+      throw new HttpError(409, "Delete this branch's child branches first");
+    }
+
+    const archivedWorkspace = await this.workspaces.archiveBranch(
+      branch.id,
+      branch.workspacePath,
+    );
+    try {
+      await this.store.mutate((next) => {
+        const storedBranch = next.branches.find(
+          (item) => item.id === branchId && item.agentId === agentId,
+        );
+        if (!storedBranch) throw new HttpError(404, "Branch not found");
+        if (storedBranch.status === "busy") {
+          throw new HttpError(409, "Stop the active run before deleting this branch");
+        }
+        if (next.branches.some((item) => item.parentBranchId === branchId)) {
+          throw new HttpError(409, "Delete this branch's child branches first");
+        }
+        next.branches = next.branches.filter((item) => item.id !== branchId);
+        next.checkpoints = next.checkpoints.filter((item) => item.branchId !== branchId);
+        next.runs = next.runs.filter((item) => item.branchId !== branchId);
+        next.messages = next.messages.filter((item) => item.branchId !== branchId);
+        next.traces = next.traces.filter((item) => item.branchId !== branchId);
+        const storedAgent = next.agents.find((item) => item.id === agentId);
+        if (storedAgent) storedAgent.updatedAt = now();
+      });
+    } catch (error) {
+      if (archivedWorkspace) {
+        try {
+          await this.workspaces.restoreArchivedBranch(
+            archivedWorkspace,
+            branch.workspacePath,
+          );
+        } catch {
+          throw new HttpError(
+            500,
+            "Branch deletion failed and its workspace could not be restored",
+          );
+        }
+      }
+      throw error;
+    }
+    return { branchId, archivedWorkspace };
+  }
+
+  /**
+   * Fold each selected branch's net changes (vs the checkpoint it forked from)
+   * into the agent's trunk workspace, then remove the branches. File-level: the
+   * branch's created/modified files overwrite the trunk, its deletions are
+   * applied. Later branches in the list win on overlap.
+   */
+  async mergeBranches(
+    agentId: string,
+    branchIds: string[],
+  ): Promise<{ mergedBranchIds: string[]; changedFiles: string[] }> {
+    const agent = this.getAgent(agentId);
+    if (agent.status === "busy") {
+      throw new HttpError(409, "Stop the active run before merging branches");
+    }
+
+    const database = this.store.snapshot();
+    const wanted = [...new Set(branchIds)];
+    const branches = wanted.map((branchId) => {
+      const branch = database.branches.find(
+        (item) => item.id === branchId && item.agentId === agentId,
+      );
+      if (!branch) throw new HttpError(404, "Branch not found");
+      if (branch.status === "busy") {
+        throw new HttpError(409, "Branch \"" + branch.name + "\" is running — stop it first");
+      }
+      return branch;
+    });
+    if (branches.length === 0) throw new HttpError(400, "Select at least one branch to merge");
+    // Oldest first so a newer branch's edits land last.
+    branches.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+
+    const changed = new Set<string>();
+    for (const branch of branches) {
+      // A branch whose workspace folder is gone (older path scheme, manual
+      // delete) has no changes to fold in — just drop the stale record below.
+      let branchManifest: WorkspaceManifest | null;
+      try {
+        branchManifest = await this.history.manifest(branch.workspacePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          branchManifest = null;
+        } else {
+          throw error;
+        }
+      }
+      if (!branchManifest) continue;
+
+      const baseCheckpoint = branch.parentCheckpointId
+        ? database.checkpoints.find((item) => item.id === branch.parentCheckpointId)
+        : null;
+      const baseSnapshot = baseCheckpoint
+        ? database.snapshots.find((item) => item.id === baseCheckpoint.snapshotId)
+        : null;
+      const baseManifest: WorkspaceManifest = baseSnapshot?.manifest ?? {
+        workspaceHash: "",
+        files: [],
+        createdAt: now(),
+      };
+      const diff = this.history.diff(baseManifest, branchManifest);
+
+      for (const relPath of [...diff.created, ...diff.modified]) {
+        if (relPath === "AGENTS.md") continue; // platform-managed
+        const from = path.join(branch.workspacePath, relPath);
+        const to = path.join(agent.workspacePath, relPath);
+        await mkdir(path.dirname(to), { recursive: true });
+        await cp(from, to, { force: true, recursive: false, preserveTimestamps: true });
+        changed.add(relPath);
+      }
+      for (const relPath of diff.deleted) {
+        if (relPath === "AGENTS.md") continue;
+        await rm(path.join(agent.workspacePath, relPath), { force: true });
+        changed.add(relPath);
+      }
+    }
+
+    for (const branch of branches) {
+      await this.workspaces.archiveBranch(branch.id, branch.workspacePath);
+    }
+
+    const mergedIds = new Set(branches.map((branch) => branch.id));
+    await this.store.mutate((next) => {
+      next.branches = next.branches.filter((item) => !mergedIds.has(item.id));
+      next.checkpoints = next.checkpoints.filter(
+        (item) => item.branchId === null || !mergedIds.has(item.branchId),
+      );
+      next.runs = next.runs.filter(
+        (item) => item.branchId === null || !mergedIds.has(item.branchId),
+      );
+      next.messages = next.messages.filter(
+        (item) => item.branchId === null || !mergedIds.has(item.branchId),
+      );
+      next.traces = next.traces.filter(
+        (item) => item.branchId === null || !mergedIds.has(item.branchId),
+      );
+      const storedAgent = next.agents.find((item) => item.id === agentId);
+      if (storedAgent) storedAgent.updatedAt = now();
+    });
+
+    return { mergedBranchIds: [...mergedIds], changedFiles: [...changed].sort() };
   }
 
   getCheckpoints(agentId: string, branchId: string | null = null): AgentCheckpoint[] {
@@ -676,6 +1214,7 @@ export class AgentService {
           after,
         );
     const snapshotId = snapshot?.id ?? parentSnapshot!.id;
+    const sessionOffset = captureSessionOffset(this.config.codexHome, agent.codexThreadId);
     const context: AgentContextSnapshot = {
       id: randomUUID(),
       agentId: agent.id,
@@ -685,6 +1224,8 @@ export class AgentService {
       instructions: agent.instructions,
       messages: this.getMessages(agent.id),
       sourceThreadId: agent.codexThreadId,
+      sessionRolloutPath: sessionOffset?.rolloutRelativePath ?? null,
+      sessionLineOffset: sessionOffset?.lineOffset ?? null,
       createdAt: now(),
     };
     const checkpoint: AgentCheckpoint = {
@@ -782,23 +1323,102 @@ export class AgentService {
     };
   }
 
-  async restoreCheckpoint(checkpointId: string): Promise<{ checkpoint: AgentCheckpoint; workspacePath: string; workspaceHash: string }> {
+  async restoreCheckpoint(checkpointId: string): Promise<{
+    checkpoint: AgentCheckpoint;
+    workspacePath: string;
+    activeWorkspacePath: string;
+    workspaceHash: string;
+  }> {
     const checkpoint = this.getCheckpoint(checkpointId);
-    const snapshot = this.store
-      .snapshot()
-      .snapshots.find((item) => item.id === checkpoint.snapshotId);
+    const database = this.store.snapshot();
+    const snapshot = database.snapshots.find((item) => item.id === checkpoint.snapshotId);
     if (!snapshot) {
       throw new HttpError(500, "Checkpoint snapshot is missing");
     }
+    const agent = database.agents.find((item) => item.id === checkpoint.agentId);
+    if (!agent) throw new HttpError(404, "Agent not found");
+    if (agent.projectId) {
+      const project = database.projects.find((item) => item.id === agent.projectId);
+      if (project?.archivedAt) {
+        throw new HttpError(409, "This project is archived. Unarchive it to restore a checkpoint.");
+      }
+    }
+    const sourceBranch = checkpoint.branchId
+      ? database.branches.find(
+          (item) => item.id === checkpoint.branchId && item.agentId === checkpoint.agentId,
+        )
+      : null;
+    if (checkpoint.branchId && !sourceBranch) {
+      throw new HttpError(404, "Checkpoint branch not found");
+    }
+    const activeWorkspacePath = sourceBranch?.workspacePath ?? agent.workspacePath;
+
+    let previousStatus: Agent["status"] | null = null;
+    await this.store.mutate((next) => {
+      const storedAgent = next.agents.find((item) => item.id === checkpoint.agentId);
+      if (!storedAgent) throw new HttpError(404, "Agent not found");
+      if (checkpoint.branchId) {
+        const storedBranch = next.branches.find(
+          (item) => item.id === checkpoint.branchId && item.agentId === checkpoint.agentId,
+        );
+        if (!storedBranch) throw new HttpError(404, "Checkpoint branch not found");
+        if (storedBranch.status === "busy") {
+          throw new HttpError(409, "Wait for the branch run to finish before restoring it");
+        }
+        previousStatus = storedBranch.status;
+        storedBranch.status = "busy";
+        storedBranch.updatedAt = now();
+        return;
+      }
+      if (storedAgent.status === "busy") {
+        throw new HttpError(409, "Wait for the Agent run to finish before restoring it");
+      }
+      const runningBranch = next.branches.find(
+        (item) => item.agentId === checkpoint.agentId && item.status === "busy",
+      );
+      if (runningBranch) {
+        throw new HttpError(409, "Wait for every branch run to finish before restoring main");
+      }
+      previousStatus = storedAgent.status;
+      storedAgent.status = "busy";
+      storedAgent.updatedAt = now();
+    });
+
     const restoreRoot = path.join(this.config.dataDirectory, "branchpoint", "restores");
-    await mkdir(restoreRoot, { recursive: true });
     const workspacePath = path.join(restoreRoot, checkpoint.id + "-" + Date.now());
-    await this.history.restoreSnapshot(snapshot, workspacePath);
-    return {
-      checkpoint,
-      workspacePath,
-      workspaceHash: snapshot.manifest.workspaceHash,
-    };
+    try {
+      await mkdir(restoreRoot, { recursive: true });
+      await this.history.restoreSnapshot(snapshot, workspacePath);
+      const recoveryManifest = await this.history.manifest(workspacePath);
+      if (recoveryManifest.workspaceHash !== snapshot.manifest.workspaceHash) {
+        throw new Error("The recovery workspace does not match the checkpoint snapshot");
+      }
+      await this.history.restoreSnapshotInPlace(snapshot, activeWorkspacePath);
+      return {
+        checkpoint,
+        workspacePath,
+        activeWorkspacePath,
+        workspaceHash: snapshot.manifest.workspaceHash,
+      };
+    } finally {
+      await this.store.mutate((next) => {
+        if (checkpoint.branchId) {
+          const storedBranch = next.branches.find(
+            (item) => item.id === checkpoint.branchId && item.agentId === checkpoint.agentId,
+          );
+          if (storedBranch && storedBranch.status === "busy" && previousStatus) {
+            storedBranch.status = previousStatus;
+            storedBranch.updatedAt = now();
+          }
+          return;
+        }
+        const storedAgent = next.agents.find((item) => item.id === checkpoint.agentId);
+        if (storedAgent && storedAgent.status === "busy" && previousStatus) {
+          storedAgent.status = previousStatus;
+          storedAgent.updatedAt = now();
+        }
+      });
+    }
   }
 
   getTrace(agentId: string, branchId: string | null = null): TraceEvent[] {

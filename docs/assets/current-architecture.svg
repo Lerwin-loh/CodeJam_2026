@@ -1,0 +1,221 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="1100" viewBox="0 0 1900 1100" role="img" aria-labelledby="title desc">
+  <title id="title">Volc Agent Launchpad current implementation architecture</title>
+  <desc id="desc">Architecture diagram showing the React web application, Fastify API, AgentService, ProjectService, BranchPoint, persistent stores, runtime profiles, direct security analysis path, and Volcengine Ark.</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#1f2937" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5.5 L0,11 z" fill="#596273"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5.5 L0,11 z" fill="#7157d9"/>
+    </marker>
+    <style>
+      .title { font: 700 30px Inter, ui-sans-serif, system-ui, sans-serif; fill: #1c2430; }
+      .subtitle { font: 400 15px Inter, ui-sans-serif, system-ui, sans-serif; fill: #647083; }
+      .boundary { fill: #fbfcfe; stroke: #b8c1cf; stroke-width: 1.5; stroke-dasharray: 8 7; }
+      .boundaryLabel { font: 700 13px Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: 1.2px; fill: #596273; }
+      .middlewareBoundary { fill: #fbf9ff; stroke: #9a86df; stroke-width: 1.5; stroke-dasharray: 7 6; }
+      .box { stroke-width: 1.8; rx: 13; filter: url(#shadow); }
+      .actor { fill: #f8fafc; stroke: #697586; }
+      .ui { fill: #f3efff; stroke: #7157d9; }
+      .api { fill: #edf6ff; stroke: #4389c6; }
+      .middleware { fill: #fff8e8; stroke: #c18a2f; }
+      .data { fill: #eef9f2; stroke: #4a9367; }
+      .runtime { fill: #fff3e8; stroke: #d37a3a; }
+      .external { fill: #fff0f3; stroke: #c9586c; }
+      .head { font: 700 17px Inter, ui-sans-serif, system-ui, sans-serif; fill: #202733; }
+      .body { font: 400 12px Inter, ui-sans-serif, system-ui, sans-serif; fill: #536071; }
+      .small { font: 400 11.5px Inter, ui-sans-serif, system-ui, sans-serif; fill: #667284; }
+      .chip { fill: #ffffff; stroke: #d8dce5; stroke-width: 1; rx: 8; }
+      .chipText { font: 600 10.5px Inter, ui-sans-serif, system-ui, sans-serif; fill: #4d5666; }
+      .arrow { fill: none; stroke: #596273; stroke-width: 2; marker-end: url(#arrow); }
+      .arrowSoft { fill: none; stroke: #7a8392; stroke-width: 1.7; marker-end: url(#arrow); }
+      .arrowPurple { fill: none; stroke: #7157d9; stroke-width: 2.2; marker-end: url(#arrowPurple); }
+      .arrowDash { fill: none; stroke: #7157d9; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrowPurple); }
+      .edgeLabelBg { fill: #ffffff; opacity: .96; rx: 5; }
+      .edgeLabel { font: 600 10.5px Inter, ui-sans-serif, system-ui, sans-serif; fill: #5b6472; }
+      .legend { font: 500 11.5px Inter, ui-sans-serif, system-ui, sans-serif; fill: #536071; }
+    </style>
+  </defs>
+
+  <rect width="1900" height="1100" fill="#ffffff"/>
+  <text x="42" y="48" class="title">Volc Agent Launchpad · Current Implementation Architecture</text>
+  <text x="42" y="76" class="subtitle">Single-node control plane with isolated Agent workspaces, recoverable BranchPoint history, project collaboration, and a cost-aware OWASP gate</text>
+
+  <!-- Server and middleware trust boundaries -->
+  <rect x="486" y="106" width="1188" height="890" rx="22" class="boundary"/>
+  <text x="510" y="132" class="boundaryLabel">SERVER TRUST BOUNDARY · NODE.JS + FASTIFY</text>
+  <rect x="734" y="148" width="882" height="790" rx="18" class="middlewareBoundary"/>
+  <text x="758" y="174" class="boundaryLabel" fill="#7157d9">TEAM-DESIGNED MIDDLEWARE</text>
+
+  <!-- Actor -->
+  <rect x="42" y="432" width="150" height="96" class="box actor"/>
+  <circle cx="117" cy="462" r="12" fill="none" stroke="#566274" stroke-width="2"/>
+  <path d="M94 505 C97 481 137 481 140 505" fill="none" stroke="#566274" stroke-width="2" stroke-linecap="round"/>
+  <text x="117" y="518" text-anchor="middle" class="head" font-size="14">Owner / Member</text>
+
+  <!-- Web UI -->
+  <rect x="232" y="338" width="218" height="285" class="box ui"/>
+  <text x="341" y="372" text-anchor="middle" class="head">React Web UI</text>
+  <text x="341" y="394" text-anchor="middle" class="small">React 19 · TypeScript · Vite</text>
+  <rect x="252" y="416" width="178" height="35" class="chip"/><text x="341" y="438" text-anchor="middle" class="chipText">Individual mode</text>
+  <rect x="252" y="461" width="178" height="35" class="chip"/><text x="341" y="483" text-anchor="middle" class="chipText">Project owner / member views</text>
+  <rect x="252" y="506" width="178" height="35" class="chip"/><text x="341" y="528" text-anchor="middle" class="chipText">Playground + live SSE trace</text>
+  <rect x="252" y="551" width="178" height="35" class="chip"/><text x="341" y="573" text-anchor="middle" class="chipText">BranchPoint + security UI</text>
+  <text x="341" y="606" text-anchor="middle" class="small">Bearer token held in browser</text>
+
+  <!-- API -->
+  <rect x="518" y="337" width="178" height="286" class="box api"/>
+  <text x="607" y="371" text-anchor="middle" class="head">Fastify API</text>
+  <text x="607" y="393" text-anchor="middle" class="small">Protocol + authorization boundary</text>
+  <rect x="538" y="416" width="138" height="35" class="chip"/><text x="607" y="438" text-anchor="middle" class="chipText">Bearer identity</text>
+  <rect x="538" y="461" width="138" height="35" class="chip"/><text x="607" y="483" text-anchor="middle" class="chipText">Zod validation</text>
+  <rect x="538" y="506" width="138" height="35" class="chip"/><text x="607" y="528" text-anchor="middle" class="chipText">RBAC + audit decisions</text>
+  <rect x="538" y="551" width="138" height="35" class="chip"/><text x="607" y="573" text-anchor="middle" class="chipText">JSON + SSE routes</text>
+  <text x="607" y="606" text-anchor="middle" class="small">1 MB request limit · redacted logs</text>
+
+  <!-- AgentService -->
+  <rect x="758" y="198" width="272" height="248" class="box middleware"/>
+  <text x="894" y="232" text-anchor="middle" class="head">AgentService</text>
+  <text x="894" y="254" text-anchor="middle" class="small">Execution and BranchPoint orchestration</text>
+  <text x="780" y="286" class="body">• Agent CRUD + lifecycle + ownership</text>
+  <text x="780" y="310" class="body">• async Runs, messages, usage + live traces</text>
+  <text x="780" y="334" class="body">• automatic / named checkpoints + diffs</text>
+  <text x="780" y="358" class="body">• verified restore + recovery + rollback</text>
+  <text x="780" y="382" class="body">• workspace + native thread branching</text>
+  <text x="780" y="406" class="body">• branch-to-trunk merge + cleanup</text>
+  <text x="780" y="430" class="body">• one active Run per main / branch</text>
+
+  <!-- ProjectService -->
+  <rect x="758" y="492" width="272" height="286" class="box middleware"/>
+  <text x="894" y="526" text-anchor="middle" class="head">ProjectService</text>
+  <text x="894" y="548" text-anchor="middle" class="small">Collaboration and policy orchestration</text>
+  <text x="780" y="580" class="body">• project lifecycle + owner/member RBAC</text>
+  <text x="780" y="604" class="body">• canonical main + isolated member copies</text>
+  <text x="780" y="628" class="body">• standalone → project parent promotion</text>
+  <text x="780" y="652" class="body">• main/member diff + OWASP commit gate</text>
+  <text x="780" y="676" class="body">• targeted security fix + hash freshness</text>
+  <text x="780" y="700" class="body">• commit requests + owner decisions</text>
+  <text x="780" y="724" class="body">• archive freeze + workspace deletion</text>
+  <text x="780" y="748" class="body">• filtered roster + safe main-tree reads</text>
+
+  <!-- Persistent state -->
+  <rect x="1076" y="198" width="244" height="130" class="box data"/>
+  <text x="1198" y="229" text-anchor="middle" class="head">JSON Metadata Store</text>
+  <text x="1198" y="252" text-anchor="middle" class="small">data/launchpad.json</text>
+  <text x="1096" y="280" class="body">Users · Agents · projects · members</text>
+  <text x="1096" y="302" class="body">Runs · messages · traces · audit · security</text>
+
+  <rect x="1076" y="360" width="244" height="198" class="box data"/>
+  <text x="1198" y="391" text-anchor="middle" class="head">Managed Workspaces</text>
+  <text x="1096" y="423" class="body">standalone/&lt;agent-id&gt;/</text>
+  <text x="1096" y="447" class="body">projects/&lt;project-id&gt;/main/</text>
+  <text x="1096" y="471" class="body">projects/&lt;project-id&gt;/members/&lt;id&gt;/</text>
+  <text x="1096" y="495" class="body">└─ branches/&lt;branch-id&gt;/</text>
+  <text x="1096" y="525" class="small">Filesystem is authoritative for code state</text>
+  <text x="1096" y="544" class="small">Deleted workspaces are archived</text>
+
+  <rect x="1076" y="590" width="244" height="160" class="box data"/>
+  <text x="1198" y="621" text-anchor="middle" class="head">BranchPoint History</text>
+  <text x="1096" y="653" class="body">Content manifests + workspace hashes</text>
+  <text x="1096" y="677" class="body">Immutable snapshots + changed-file diffs</text>
+  <text x="1096" y="701" class="body">Timestamped restores + atomic rollback</text>
+  <text x="1096" y="725" class="body">Observable context (no hidden reasoning)</text>
+
+  <rect x="1076" y="782" width="244" height="122" class="box data"/>
+  <text x="1198" y="813" text-anchor="middle" class="head">Codex Session Store</text>
+  <text x="1096" y="845" class="body">Codex home · SQLite index · JSONL rollout</text>
+  <text x="1096" y="869" class="body">Checkpoint offset → independent thread ID</text>
+  <text x="1096" y="890" class="small">Persistent memory across Runs and branches</text>
+
+  <!-- Runtime -->
+  <rect x="1370" y="198" width="218" height="94" class="box runtime"/>
+  <text x="1479" y="231" text-anchor="middle" class="head">AgentRunner Interface</text>
+  <text x="1479" y="255" text-anchor="middle" class="body">argv execution · timeout · cancel</text>
+  <text x="1479" y="275" text-anchor="middle" class="small">bounded observable output</text>
+
+  <rect x="1370" y="330" width="218" height="154" class="box runtime"/>
+  <text x="1479" y="362" text-anchor="middle" class="head">Local POC Runtime</text>
+  <text x="1479" y="385" text-anchor="middle" class="small">Disposable container per turn</text>
+  <text x="1390" y="416" class="body">Docker · Colima · Podman</text>
+  <text x="1390" y="440" class="body">Dropped capabilities + resource limits</text>
+  <text x="1390" y="464" class="body">Selected workspace + Codex home mounts</text>
+
+  <rect x="1370" y="518" width="218" height="132" class="box runtime"/>
+  <text x="1479" y="550" text-anchor="middle" class="head">Process / ECS Runtime</text>
+  <text x="1479" y="574" text-anchor="middle" class="small">Codex CLI child process</text>
+  <text x="1390" y="606" class="body">Local development or ECS profile</text>
+  <text x="1390" y="630" class="body">Same host / application container</text>
+
+  <!-- Security gate -->
+  <rect x="1370" y="690" width="218" height="214" class="box middleware"/>
+  <text x="1479" y="721" text-anchor="middle" class="head">Security Analysis Gate</text>
+  <text x="1390" y="752" class="body">1. Diff member workspace vs main</text>
+  <text x="1390" y="776" class="body">2. Local static scan (0 tokens)</text>
+  <text x="1390" y="800" class="body">3. One bounded JSON model call if clean</text>
+  <text x="1390" y="824" class="body">4. One call / affected file for auto-fix</text>
+  <text x="1390" y="848" class="body">5. Re-scan + hash-bound commit unlock</text>
+  <text x="1479" y="879" text-anchor="middle" class="small">No Agent loop · tools · chat history</text>
+
+  <!-- External model -->
+  <rect x="1712" y="410" width="154" height="190" class="box external"/>
+  <text x="1789" y="447" text-anchor="middle" class="head">Volcengine Ark</text>
+  <text x="1789" y="472" text-anchor="middle" class="body">Responses API</text>
+  <path d="M1754 512 C1754 489 1824 489 1824 512 C1824 534 1754 534 1754 512 Z" fill="#fff" stroke="#c9586c" stroke-width="1.4"/>
+  <circle cx="1772" cy="512" r="5" fill="#c9586c"/><circle cx="1789" cy="512" r="5" fill="#c9586c"/><circle cx="1806" cy="512" r="5" fill="#c9586c"/>
+  <text x="1789" y="558" text-anchor="middle" class="small">Model execution</text>
+  <text x="1789" y="578" text-anchor="middle" class="small">Server-side credential</text>
+
+  <!-- Primary request path -->
+  <path d="M192 480 L232 480" class="arrowPurple"/>
+  <path d="M450 480 L518 480" class="arrowPurple"/>
+  <rect x="451" y="443" width="67" height="25" class="edgeLabelBg"/>
+  <text x="484" y="455" text-anchor="middle" class="edgeLabel"><tspan x="484" dy="0">JSON + SSE</tspan><tspan x="484" dy="12">Bearer token</tspan></text>
+  <path d="M696 430 C724 430 728 322 758 322" class="arrow"/>
+  <path d="M696 532 C724 532 728 635 758 635" class="arrow"/>
+
+  <!-- Service-to-state paths -->
+  <path d="M1030 252 L1076 252" class="arrowSoft"/>
+  <path d="M1030 352 C1050 352 1054 430 1076 430" class="arrowSoft"/>
+  <path d="M1030 396 C1058 396 1046 650 1076 650" class="arrowSoft"/>
+  <path d="M1030 420 C1060 420 1045 830 1076 830" class="arrowSoft"/>
+  <path d="M1030 560 C1054 560 1050 286 1076 286" class="arrowSoft"/>
+  <path d="M1030 620 L1076 470" class="arrowSoft"/>
+  <path d="M1030 690 C1055 690 1053 700 1076 700" class="arrowSoft"/>
+
+  <!-- Agent runtime path -->
+  <path d="M1030 228 C1178 124 1284 124 1370 226" class="arrow"/>
+  <rect x="1170" y="126" width="123" height="24" class="edgeLabelBg"/>
+  <text x="1232" y="142" text-anchor="middle" class="edgeLabel">prompt + thread ID</text>
+  <path d="M1479 292 L1479 330" class="arrow"/>
+  <path d="M1516 292 C1564 354 1560 480 1516 518" class="arrow"/>
+  <path d="M1588 407 C1638 407 1662 468 1712 482" class="arrow"/>
+  <path d="M1588 584 C1640 584 1660 542 1712 529" class="arrow"/>
+  <rect x="1604" y="433" width="94" height="23" class="edgeLabelBg"/>
+  <text x="1651" y="449" text-anchor="middle" class="edgeLabel">Codex requests</text>
+
+  <!-- Runtime mounts -->
+  <path d="M1370 406 C1344 406 1348 440 1320 440" class="arrowSoft"/>
+  <path d="M1370 584 C1340 584 1346 496 1320 496" class="arrowSoft"/>
+  <path d="M1370 442 C1340 520 1350 834 1320 834" class="arrowSoft"/>
+  <path d="M1370 610 C1340 680 1350 866 1320 866" class="arrowSoft"/>
+
+  <!-- Direct security path -->
+  <path d="M1030 676 C1180 676 1220 760 1370 760" class="arrowDash"/>
+  <rect x="1150" y="710" width="138" height="25" class="edgeLabelBg"/>
+  <text x="1219" y="727" text-anchor="middle" class="edgeLabel">diff + policy decision</text>
+  <path d="M1588 797 C1660 797 1655 568 1712 555" class="arrowDash"/>
+  <rect x="1608" y="710" width="90" height="37" class="edgeLabelBg"/>
+  <text x="1653" y="725" text-anchor="middle" class="edgeLabel"><tspan x="1653" dy="0">direct call</tspan><tspan x="1653" dy="12">only if needed</tspan></text>
+
+  <!-- Legend -->
+  <rect x="42" y="1020" width="1818" height="52" rx="12" fill="#f7f8fb" stroke="#e0e4eb"/>
+  <circle cx="78" cy="1046" r="8" fill="#fff8e8" stroke="#c18a2f"/><text x="94" y="1050" class="legend">Middleware</text>
+  <circle cx="195" cy="1046" r="8" fill="#eef9f2" stroke="#4a9367"/><text x="211" y="1050" class="legend">Persistent state</text>
+  <circle cx="332" cy="1046" r="8" fill="#fff3e8" stroke="#d37a3a"/><text x="348" y="1050" class="legend">Runtime</text>
+  <line x1="445" y1="1046" x2="488" y2="1046" class="arrow"/><text x="500" y="1050" class="legend">Normal Agent execution path</text>
+  <line x1="705" y1="1046" x2="748" y2="1046" class="arrowDash"/><text x="760" y="1050" class="legend">Direct security-analysis path (bypasses Agent Runtime)</text>
+  <text x="1435" y="1050" class="legend">Deployment: local container · local process · Volcengine ECS</text>
+</svg>

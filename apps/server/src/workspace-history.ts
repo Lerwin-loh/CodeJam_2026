@@ -1,14 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile, chmod } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
-  ChangedFiles,
-  WorkspaceFile,
-  WorkspaceManifest,
-  WorkspaceSnapshot,
+    ChangedFiles,
+    WorkspaceFile,
+    WorkspaceManifest,
+    WorkspaceSnapshot,
 } from "./types.js";
 
-const ignoredNames = new Set([".codex", ".git", "node_modules", "dist"]);
+// Branch workspaces live beside their source workspace, but are platform state:
+// never include them recursively in source manifests, snapshots, or restores.
+const ignoredNames = new Set([".codex", ".git", "node_modules", "dist", "branches"]);
 
 export class WorkspaceHistory {
   constructor(private readonly root: string) {}
@@ -51,7 +53,7 @@ export class WorkspaceHistory {
 
   async createSnapshot(
     agentId: string,
-    runId: string,
+    runId: string | null,
     workspacePath: string,
     manifest: WorkspaceManifest,
   ): Promise<WorkspaceSnapshot> {
@@ -111,6 +113,102 @@ export class WorkspaceHistory {
       await cp(source, target, { force: true, recursive: false, preserveTimestamps: true });
       await chmod(target, file.mode);
     }
+  }
+
+  /**
+   * Replace an active workspace with a snapshot while preserving directories
+   * owned by the platform or Runtime. The replacement is prepared and hashed
+   * before publication; if publication fails, the original workspace is put
+   * back in place.
+   */
+  async restoreSnapshotInPlace(
+    snapshot: WorkspaceSnapshot,
+    destination: string,
+  ): Promise<void> {
+    const operationId = randomUUID();
+    const parent = path.dirname(destination);
+    const base = path.basename(destination);
+    const staging = path.join(parent, `.${base}.restore-${operationId}`);
+    const backup = path.join(parent, `.${base}.before-restore-${operationId}`);
+    let originalMoved = false;
+    let replacementPublished = false;
+
+    try {
+      await this.restoreSnapshot(snapshot, staging);
+      const stagedManifest = await this.manifest(staging);
+      if (stagedManifest.workspaceHash !== snapshot.manifest.workspaceHash) {
+        throw new Error("The staged workspace does not match the checkpoint snapshot");
+      }
+
+      // Copy platform/Runtime-owned state into the fully prepared replacement
+      // before the directory swap. The original stays intact and is therefore
+      // sufficient for rollback until publication has been verified.
+      for (const name of ignoredNames) {
+        try {
+          await cp(path.join(destination, name), path.join(staging, name), {
+            recursive: true,
+            force: false,
+            errorOnExist: true,
+            preserveTimestamps: true,
+          });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+
+      await rename(destination, backup);
+      originalMoved = true;
+      await rename(staging, destination);
+      replacementPublished = true;
+
+      const restoredManifest = await this.manifest(destination);
+      if (restoredManifest.workspaceHash !== snapshot.manifest.workspaceHash) {
+        throw new Error("The active workspace does not match the checkpoint snapshot");
+      }
+    } catch (error) {
+      if (originalMoved) {
+        if (replacementPublished) {
+          await rm(destination, { recursive: true, force: true });
+        }
+        await rename(backup, destination);
+      }
+      throw error;
+    } finally {
+      await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    }
+
+    // The active workspace is already verified and authoritative. Failure to
+    // remove this private backup must not turn a successful restore into an
+    // apparent failure; a later cleanup can safely remove the orphan.
+    await rm(backup, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  async archiveSnapshots(
+    projectId: string,
+    snapshots: WorkspaceSnapshot[],
+  ): Promise<number> {
+    if (snapshots.length === 0) return 0;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const archiveRoot = path.join(
+      this.root,
+      ".deleted",
+      projectId + "-" + timestamp,
+      "snapshots",
+    );
+    const snapshotRoot = path.resolve(this.root, "snapshots") + path.sep;
+    let archived = 0;
+    for (const snapshot of snapshots) {
+      const source = path.resolve(snapshot.directory);
+      if (!source.startsWith(snapshotRoot)) continue;
+      await mkdir(archiveRoot, { recursive: true });
+      try {
+        await rename(source, path.join(archiveRoot, snapshot.id));
+        archived += 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    return archived;
   }
 
   private async removeUnexpectedFiles(workspacePath: string, allowedFiles: Set<string>): Promise<void> {

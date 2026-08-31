@@ -1,7 +1,8 @@
+import * as fs from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { JsonStore } from "./store.js";
 
 const temporaryDirectories: string[] = [];
@@ -52,5 +53,37 @@ describe("JsonStore", () => {
     expect(store.snapshot().messages.map((message) => message.content)).toEqual([
       "queue recovered",
     ]);
+  });
+
+  it("falls back when atomic database replacement is blocked", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-rename-test-"));
+    temporaryDirectories.push(root);
+    const originalPath = path.join(root, "db.json");
+    const rename = vi.fn<typeof fs.rename>(fs.rename);
+    const store = new JsonStore(originalPath, {
+      rename,
+      copyFile: fs.copyFile,
+      unlink: fs.unlink,
+    });
+    await store.initialize();
+
+    rename.mockRejectedValueOnce(
+      Object.assign(new Error("EPERM"), { code: "EPERM" }),
+    );
+    await store.mutate((database) => {
+      database.messages.push({
+        id: "message-3",
+        agentId: "agent-2",
+        runId: "run-3",
+        role: "user",
+        content: "fallback persisted",
+        createdAt: new Date().toISOString(),
+      });
+    });
+
+    expect(store.snapshot().messages.map((message) => message.content)).toContain("fallback persisted");
+    expect(rename).toHaveBeenCalledWith(originalPath + ".tmp", originalPath);
+    await expect(fs.readFile(originalPath, "utf8")).resolves.toContain("fallback persisted");
+    await expect(fs.readFile(originalPath + ".tmp", "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

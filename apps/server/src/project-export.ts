@@ -3,7 +3,7 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { Agent } from "./types.js";
 
-const excludedDirectories = new Set([".git", ".codex", "node_modules", "dist", "build"]);
+const excludedDirectories = new Set([".git", ".codex", "node_modules", "dist", "build", "branches"]);
 const excludedFiles = new Set(["AGENTS.md", ".env", "README.md"]);
 
 function crc32(data: Buffer): number {
