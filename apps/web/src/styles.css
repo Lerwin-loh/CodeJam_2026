@@ -26,6 +26,170 @@ body {
   min-height: 100vh;
 }
 
+.live-preview-card {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--paper);
+  overflow: hidden;
+}
+
+.live-preview-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.live-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+.preview-expand-button {
+  gap: 5px;
+}
+
+.preview-branch-select {
+  min-height: 38px;
+  max-width: 170px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0 10px;
+  color: #464741;
+  background: #f0efea;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.live-preview-heading h2 {
+  margin: 4px 0 0;
+  font-size: 18px;
+}
+
+.live-preview-frame {
+  display: block;
+  width: 100%;
+  height: 520px;
+  border: 0;
+  background: white;
+}
+
+.live-preview-empty {
+  min-height: 180px;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.live-preview-empty strong { color: var(--ink); }
+
+.preview-expanded-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(26, 26, 24, 0.62);
+  backdrop-filter: blur(8px);
+}
+
+.preview-expanded-panel {
+  width: min(1500px, 100%);
+  height: min(920px, 100%);
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 16px;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.preview-expanded-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.preview-expanded-heading h2 {
+  margin: 4px 0 0;
+  font-size: 16px;
+}
+
+.live-preview-frame-expanded {
+  height: 100%;
+  min-height: 0;
+}
+
+/* Keep the conversation visible while the preview occupies its own pane. */
+@media (min-width: 901px) {
+  .playground {
+    grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.9fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .playground-topbar {
+    grid-column: 1 / -1;
+  }
+
+  .messages {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .composer {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  .live-preview-card {
+    grid-column: 2;
+    grid-row: 2 / 4;
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    border: 0;
+    border-left: 1px solid var(--line);
+    border-radius: 0;
+  }
+
+  .live-preview-frame {
+    width: 100%;
+    height: calc(100% - 77px);
+    min-height: 260px;
+  }
+}
+
+@media (max-width: 900px) {
+  .live-preview-card {
+    margin: 14px 0 0;
+  }
+
+  .live-preview-frame {
+    height: 360px;
+  }
+
+  .preview-expanded-backdrop {
+    padding: 10px;
+  }
+
+  .preview-expanded-panel {
+    height: 100%;
+  }
+}
+
 .auth-screen {
   min-height: 100vh;
   display: grid;

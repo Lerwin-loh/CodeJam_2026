@@ -114,6 +114,12 @@ export interface WorkspaceManifest {
   createdAt: string;
 }
 
+export interface WorkspacePreview {
+  available: boolean;
+  entryFile: string | null;
+  workspaceHash: string | null;
+}
+
 export interface WorkspaceSnapshot {
   id: string;
   agentId: string;

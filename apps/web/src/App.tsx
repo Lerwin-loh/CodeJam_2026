@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, getStoredToken, setAuthToken } from "./api";
-import type { Agent, AgentBranch, AgentCheckpoint, AgentRun, AuditEntry, CheckpointDetails, CheckpointDiff, Message, SystemInfo, TraceEvent, User } from "./types";
+import type { Agent, AgentBranch, AgentCheckpoint, AgentRun, AuditEntry, CheckpointDetails, CheckpointDiff, Message, SystemInfo, TraceEvent, User, WorkspacePreview } from "./types";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -74,6 +74,11 @@ export default function App() {
   const [restoreResult, setRestoreResult] = useState<{ path: string; hash: string } | null>(null);
   const [checkpointLabel, setCheckpointLabel] = useState("");
   const [savingCheckpoint, setSavingCheckpoint] = useState(false);
+  const [workspacePreview, setWorkspacePreview] = useState<WorkspacePreview | null>(null);
+  const [previewReload, setPreviewReload] = useState(0);
+  const [previewError, setPreviewError] = useState(false);
+  const [previewExpanded, setPreviewExpanded] = useState(false);
+  const [exportingProject, setExportingProject] = useState(false);
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
   const activeBranchIdRef = useRef<string | null>(null);
@@ -87,6 +92,31 @@ export default function App() {
     () => agents.find((agent) => agent.id === selectedId) ?? null,
     [agents, selectedId],
   );
+
+  const downloadProject = async () => {
+    if (!selected || exportingProject) return;
+    setExportingProject(true);
+    setError(null);
+    try {
+      const blob = await api.exportProject(selected.id);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = selected.name.replace(/[^a-z0-9._-]+/gi, "-") + ".zip";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "Project download failed");
+    } finally {
+      setExportingProject(false);
+    }
+  };
+
+  const previewSourceKey = selected && workspacePreview
+    ? [selected.id, activeBranchId ?? "main", workspacePreview.entryFile ?? "none", workspacePreview.workspaceHash ?? "none"].join(":")
+    : "none";
 
   const historyItems = useMemo(
     () => [
@@ -242,6 +272,20 @@ export default function App() {
       });
     }
   }, [selected]);
+
+  useEffect(() => {
+    setWorkspacePreview(null);
+    setPreviewError(false);
+    setPreviewExpanded(false);
+    if (!selectedId) return;
+    let cancelled = false;
+    void api.previewStatus(selectedId, activeBranchId).then(({ preview }) => {
+      if (!cancelled) setWorkspacePreview(preview);
+    }).catch(() => {
+      if (!cancelled) setWorkspacePreview({ available: false, entryFile: null, workspaceHash: null });
+    });
+    return () => { cancelled = true; };
+  }, [selectedId, activeBranchId, activeRun?.status]);
 
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: "smooth" });
@@ -677,6 +721,9 @@ export default function App() {
                 >
                   {selected.status === "stopped" ? "Start" : "Stop"}
                 </button>
+                <button className="button button-ghost" onClick={() => void downloadProject()} disabled={busy || exportingProject}>
+                  {exportingProject ? "Preparing…" : "Download ZIP"}
+                </button>
                 <button
                   className="button button-danger"
                   onClick={deleteAgent}
@@ -862,6 +909,56 @@ export default function App() {
                   </button>
                 </div>
               </form>
+              <section className="live-preview-card" aria-label="Live website preview">
+                <div className="live-preview-heading">
+                  <div><span className="eyebrow">Workspace output</span><h2>Live website preview</h2></div>
+                  {workspacePreview?.available && <div className="live-preview-actions">
+                    {branches.length > 0 && <select className="preview-branch-select" value={activeBranchId ?? "main"} onChange={(event) => { setPreviewError(false); setActiveBranchId(event.target.value === "main" ? null : event.target.value); }} aria-label="Preview workspace">
+                      <option value="main">Main workspace</option>
+                      {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+                    </select>}
+                    <button className="button button-ghost" type="button" onClick={() => { setPreviewError(false); setPreviewReload((value) => value + 1); }}>Refresh</button>
+                    <button className="button button-ghost preview-expand-button" type="button" onClick={() => setPreviewExpanded(true)} aria-label="Expand website preview">⛶ <span>Expand</span></button>
+                  </div>}
+                </div>
+                {!previewExpanded && workspacePreview?.available && workspacePreview.entryFile && selected && !previewError ? (
+                  <iframe
+                    key={previewSourceKey + ":" + previewReload + (previewExpanded ? "-expanded" : "-compact")}
+                    className="live-preview-frame"
+                    title="Generated website preview"
+                    src={api.previewUrl(selected.id, workspacePreview.entryFile, activeBranchId) + "&v=" + previewReload}
+                    sandbox="allow-scripts allow-same-origin allow-forms"
+                    onError={() => setPreviewError(true)}
+                  />
+                ) : !previewExpanded ? (
+                  <div className="live-preview-empty"><strong>{previewError ? "Preview could not be loaded" : "No website preview yet"}</strong><span>{previewError ? "Refresh the preview or ask the Agent to check the website entry file." : "Ask the Agent to create a website. The preview automatically discovers HTML pages and built web apps."}</span></div>
+                ) : null}
+              </section>
+              {previewExpanded && workspacePreview?.available && workspacePreview.entryFile && selected && !previewError && (
+                <div className="preview-expanded-backdrop" role="dialog" aria-modal="true" aria-label="Expanded website preview">
+                  <section className="preview-expanded-panel">
+                    <header className="preview-expanded-heading">
+                      <div><span className="eyebrow">Workspace output</span><h2>{selected.name} · Live preview</h2></div>
+                      <div className="live-preview-actions">
+                        {branches.length > 0 && <select className="preview-branch-select" value={activeBranchId ?? "main"} onChange={(event) => { setPreviewExpanded(false); setPreviewError(false); setActiveBranchId(event.target.value === "main" ? null : event.target.value); }} aria-label="Preview workspace">
+                          <option value="main">Main workspace</option>
+                          {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+                        </select>}
+                        <button className="button button-ghost" type="button" onClick={() => { setPreviewError(false); setPreviewReload((value) => value + 1); }}>Refresh</button>
+                        <button className="button button-ghost" type="button" onClick={() => setPreviewExpanded(false)} aria-label="Close expanded website preview">× Close</button>
+                      </div>
+                    </header>
+                    <iframe
+                      key={previewSourceKey + ":" + previewReload + "-expanded"}
+                      className="live-preview-frame live-preview-frame-expanded"
+                      title="Expanded generated website preview"
+                      src={api.previewUrl(selected.id, workspacePreview.entryFile, activeBranchId) + "&v=" + previewReload}
+                      sandbox="allow-scripts allow-same-origin allow-forms"
+                      onError={() => { setPreviewError(true); setPreviewExpanded(false); }}
+                    />
+                  </section>
+                </div>
+              )}
             </section>
           </>
         ) : (

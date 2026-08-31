@@ -128,9 +128,11 @@ elif [[ "$(uname -s)" == "Darwin" ]]; then
   export CODEX_HOME="${CODEX_HOME:-$local_state_root/codex-home}"
 else
   local_state_root="$repo_dir/.local"
-  export APP_DATA_DIR="${APP_DATA_DIR:-$local_state_root/data}"
-  export AGENT_WORKSPACE_ROOT="${AGENT_WORKSPACE_ROOT:-$local_state_root/workspaces}"
-  export CODEX_HOME="${CODEX_HOME:-$local_state_root/codex-home}"
+  # The local POC owns these paths. In particular, do not inherit deployment
+  # values such as /app/data from a previously sourced .env file.
+  export APP_DATA_DIR="$local_state_root/data"
+  export AGENT_WORKSPACE_ROOT="$local_state_root/workspaces"
+  export CODEX_HOME="$local_state_root/codex-home"
 fi
 export RUNTIME_INSTANCE_ID="${RUNTIME_INSTANCE_ID:-local-$(id -u)-$(printf '%s' "$repo_dir" | cksum | awk '{print $1}')}"
 
